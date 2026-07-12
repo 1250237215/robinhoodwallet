@@ -118,6 +118,14 @@ export function createRobinhoodConfig(env = process.env) {
     monitorWalletTopicChunkSize: boundedNumber(env.ROBINHOOD_MONITOR_WALLET_TOPIC_CHUNK_SIZE, 100, 1, 100),
     monitorLogConcurrency: Math.floor(boundedNumber(env.ROBINHOOD_MONITOR_LOG_CONCURRENCY, 2, 1, 2)),
     monitorRecoverySuccesses: Math.floor(boundedNumber(env.ROBINHOOD_MONITOR_RECOVERY_SUCCESSES, 20, 1, 1_000)),
+    monitorFastLiveBlockSpan: Math.floor(boundedNumber(env.ROBINHOOD_MONITOR_FAST_LIVE_BLOCK_SPAN, 50, 1, 500)),
+    monitorFastGapBlockSpan: Math.floor(boundedNumber(env.ROBINHOOD_MONITOR_FAST_GAP_BLOCK_SPAN, 100, 1, 500)),
+    monitorFastGapPollIntervalMs: boundedNumber(
+      env.ROBINHOOD_MONITOR_FAST_GAP_POLL_INTERVAL_MS,
+      5_000,
+      1_000,
+      60_000
+    ),
     monitorDeepPollIntervalMs: boundedNumber(env.ROBINHOOD_MONITOR_DEEP_POLL_INTERVAL_MS, 500, 250, 60_000),
     monitorDeepDegradedPollIntervalMs: boundedNumber(
       env.ROBINHOOD_MONITOR_DEEP_DEGRADED_POLL_INTERVAL_MS,

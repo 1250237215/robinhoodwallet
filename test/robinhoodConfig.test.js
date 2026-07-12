@@ -49,6 +49,9 @@ test('uses verified Robinhood mainnet addresses and bounded scan settings', () =
   assert.equal(config.monitorWalletTopicChunkSize, 100);
   assert.equal(config.monitorLogConcurrency, 2);
   assert.equal(config.monitorRecoverySuccesses, 20);
+  assert.equal(config.monitorFastLiveBlockSpan, 50);
+  assert.equal(config.monitorFastGapBlockSpan, 100);
+  assert.equal(config.monitorFastGapPollIntervalMs, 5_000);
   assert.equal(config.monitorDeepPollIntervalMs, 500);
   assert.equal(config.monitorDeepDegradedPollIntervalMs, 1_500);
   assert.equal(config.monitorDeepLiveBlockSpan, 20);

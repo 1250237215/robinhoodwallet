@@ -153,6 +153,7 @@ const elements = {
   monitorBlockLag: document.querySelector('#monitor-block-lag'),
   monitorTransportLabel: document.querySelector('#monitor-transport-label'),
   monitorFastBacklog: document.querySelector('#monitor-fast-backlog'),
+  monitorFastGap: document.querySelector('#monitor-fast-gap'),
   monitorFastDuration: document.querySelector('#monitor-fast-duration'),
   monitorDeepStatus: document.querySelector('#monitor-deep-status'),
   monitorDeepLiveBacklog: document.querySelector('#monitor-deep-live-backlog'),
@@ -795,6 +796,7 @@ function monitorHealthValues() {
     latestBlock,
     lag: explicitLag ?? (chainHead !== null && latestBlock !== null ? Math.max(0, chainHead - latestBlock) : null),
     fastBacklogBlocks: finiteNumber(health.fastBacklogBlocks, health.fast_backlog_blocks),
+    fastGapBlocks: finiteNumber(health.fastGapBlocks, health.fast_gap_blocks),
     fastLastRangeDurationMs: finiteNumber(health.fastLastRangeDurationMs, health.fast_last_range_duration_ms),
     deepLiveBacklogBlocks: finiteNumber(health.deepLiveBacklogBlocks, health.deep_live_backlog_blocks),
     deepLastRangeDurationMs: finiteNumber(health.deepLastRangeDurationMs, health.deep_last_range_duration_ms),
@@ -925,6 +927,7 @@ function renderMonitorHealth() {
       ? '每 2 秒轮询'
       : '正在建立连接';
   elements.monitorFastBacklog.textContent = formatMonitorBlockCount(health.fastBacklogBlocks);
+  elements.monitorFastGap.textContent = `缺口 ${formatMonitorBlockCount(health.fastGapBlocks)}`;
   elements.monitorFastDuration.textContent = `上轮 ${formatMonitorRangeDuration(health.fastLastRangeDurationMs)}`;
   elements.monitorDeepStatus.dataset.status = health.deepStatus.toLowerCase() || 'unknown';
   elements.monitorDeepStatus.textContent = formatMonitorDeepStatus(health.deepStatus);

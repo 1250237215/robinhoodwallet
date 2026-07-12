@@ -152,6 +152,44 @@ async function replayFixture(rpcClient, fixture) {
   }
 }
 
+async function replayProductionBacklog(rpcClient, dataFile) {
+  const store = createRobinhoodStore(dataFile);
+  const chainHead = await rpcClient.getBlockNumber();
+  const cursor = Math.max(0, chainHead - 5_000);
+  const starts = Object.fromEntries(
+    store.listMonitoredWalletAnnotations().map((wallet) => [wallet.address, cursor + 1])
+  );
+  store.setMeta('robinhood:monitor:cursor', String(cursor));
+  store.setMeta('robinhood:monitor:fast-gaps', '[]');
+  store.setMeta('robinhood:monitor:fast-wallet-starts', JSON.stringify(starts));
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    rpcClient,
+    fastLiveBlockSpan: 50,
+    fastGapBlockSpan: 100,
+    tokenMetadataBudgetMs: 1_500
+  });
+  const startedAt = performance.now();
+  try {
+    await withinDeadline(monitor.pollOnce(), 'production-sized fast backlog');
+    const latencyMs = Math.round(performance.now() - startedAt);
+    const health = monitor.getSnapshot({ eventLimit: 0 }).health;
+    if (health.fastBacklogBlocks !== 0) throw new Error('production-sized fast lane did not reach the live edge');
+    if (health.fastGapBlocks < 4_900) throw new Error('production-sized fast lane did not preserve the skipped gap');
+    return {
+      event: 'production_backlog',
+      lane: 'fast',
+      latencyMs,
+      blockNumber: chainHead,
+      fastGapBlocks: health.fastGapBlocks,
+      monitoredWallets: health.monitoredWallets
+    };
+  } finally {
+    monitor.close();
+    store.close();
+  }
+}
+
 async function main() {
   const rpcClient = new RobinhoodRpcClient({
     timeoutMs: 4_000,
@@ -163,6 +201,11 @@ async function main() {
   for (const fixture of FIXTURES) results.push(await replayFixture(rpcClient, fixture));
   console.table(results.map(({ event, lane, latencyMs, blockNumber }) => ({ event, lane, latencyMs, blockNumber })));
   console.log(`PASS: all ${results.length} event paths emitted within ${DEADLINE_MS}ms using the public RPC.`);
+  if (process.env.ROBINHOOD_MONITOR_LOAD_DB) {
+    const load = await replayProductionBacklog(rpcClient, process.env.ROBINHOOD_MONITOR_LOAD_DB);
+    console.table([load]);
+    console.log(`PASS: production-sized backlog reached the live edge in ${load.latencyMs}ms and preserved ${load.fastGapBlocks} gap blocks.`);
+  }
 }
 
 main().catch((error) => {

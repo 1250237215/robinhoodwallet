@@ -120,10 +120,20 @@ function seedWallet(store, rules = {}) {
   });
 }
 
-function seedCursors(store, { fast = 100, deep = 100, gaps = [] } = {}) {
+function seedCursors(store, { fast = 100, deep = 100, gaps = [], fastGaps = [] } = {}) {
   store.setMeta('robinhood:monitor:cursor', String(fast));
+  store.setMeta('robinhood:monitor:fast-gaps', JSON.stringify(fastGaps));
   store.setMeta('robinhood:monitor:deep-live-cursor', String(deep));
   store.setMeta('robinhood:monitor:deep-gaps', JSON.stringify(gaps));
+}
+
+function readFastGaps(store) {
+  const value = JSON.parse(store.getMeta('robinhood:monitor:fast-gaps') || '[]');
+  assert.ok(Array.isArray(value), 'fast gaps must be persisted as a JSON array');
+  return value.map((range) => ({
+    fromBlock: Number(range.fromBlock ?? range.from),
+    toBlock: Number(range.toBlock ?? range.to)
+  }));
 }
 
 function fastBuySellRpc({ head = 101, fullBlocks } = {}) {
@@ -236,6 +246,231 @@ test('a permanently pending deep RPC cannot delay fast buy and sell events', {
   assert.deepEqual(emitted.map((event) => event.eventType).sort(), ['buy', 'sell']);
   assert.equal(monitor.getSnapshot().health.fastBacklogBlocks, 0);
   assert.ok(Number.isFinite(monitor.getSnapshot().health.fastLastRangeDurationMs));
+});
+
+test('fast live backlog scans the newest window first and persists older log gaps', {
+  timeout: TEST_TIMEOUT_MS
+}, async (t) => {
+  const store = createRobinhoodStore(':memory:');
+  seedWallet(store, {
+    buy: { enabled: true },
+    sell: { enabled: false },
+    transfer: { enabled: false },
+    token_create: { enabled: false }
+  });
+  seedCursors(store, { fast: 90, deep: 100 });
+  const ranges = [];
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    fastLiveBlockSpan: 3,
+    fastGapBlockSpan: 2,
+    rpcClient: {
+      async getBlockNumber() {
+        return 100;
+      },
+      async getLogs(filter) {
+        ranges.push([filter.fromBlock, filter.toBlock]);
+        return [];
+      }
+    }
+  });
+  t.after(() => {
+    monitor.close();
+    store.close();
+  });
+
+  await within(monitor.pollOnce(), 'fast newest-window poll');
+  assert.deepEqual(ranges, [[98, 100]]);
+  assert.equal(store.getMeta('robinhood:monitor:cursor'), '100');
+  assert.deepEqual(readFastGaps(store), [{ fromBlock: 91, toBlock: 97 }]);
+  assert.equal(monitor.getSnapshot().health.fastBacklogBlocks, 0);
+  assert.equal(monitor.getSnapshot().health.fastGapBlocks, 7);
+});
+
+test('a restarted monitor restores and advances a persisted fast gap', {
+  timeout: TEST_TIMEOUT_MS
+}, async (t) => {
+  const store = createRobinhoodStore(':memory:');
+  seedWallet(store, {
+    buy: { enabled: true },
+    sell: { enabled: false },
+    transfer: { enabled: false },
+    token_create: { enabled: false }
+  });
+  seedCursors(store, {
+    fast: 100,
+    deep: 100,
+    fastGaps: [{ fromBlock: 91, toBlock: 97 }]
+  });
+  const ranges = [];
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    fastGapBlockSpan: 2,
+    rpcClient: {
+      async getBlockNumber() {
+        return 100;
+      },
+      async getLogs(filter) {
+        ranges.push([filter.fromBlock, filter.toBlock]);
+        return [];
+      }
+    }
+  });
+  t.after(() => {
+    monitor.close();
+    store.close();
+  });
+
+  await within(monitor.pollFastGapOnce(), 'restored fast-gap poll');
+  assert.deepEqual(ranges, [[91, 92]]);
+  assert.equal(store.getMeta('robinhood:monitor:cursor'), '100');
+  assert.deepEqual(readFastGaps(store), [{ fromBlock: 93, toBlock: 97 }]);
+});
+
+test('a pending fast-gap scan cannot block current buy detection', {
+  timeout: TEST_TIMEOUT_MS
+}, async (t) => {
+  const store = createRobinhoodStore(':memory:');
+  const gapStarted = deferred();
+  seedWallet(store, {
+    buy: { enabled: true },
+    sell: { enabled: false },
+    transfer: { enabled: false },
+    token_create: { enabled: false }
+  });
+  seedCursors(store, {
+    fast: 101,
+    deep: 101,
+    fastGaps: [{ fromBlock: 90, toBlock: 99 }]
+  });
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    fastGapBlockSpan: 2,
+    rpcClient: {
+      async getBlockNumber() {
+        return 102;
+      },
+      async getLogs(filter, { signal } = {}) {
+        if (filter.fromBlock === 90) {
+          gapStarted.resolve();
+          return pendingUntilAbort(signal);
+        }
+        return [transferLog({ direction: 'incoming', transactionHash: buyHash, logIndex: 1, blockNumber: 102 })];
+      },
+      async getTransactionsByHashes(hashes) {
+        return hashes.map((transactionHash) => ({ hash: transactionHash, from: wallet, to: router }));
+      },
+      async getTransactionReceipts(hashes) {
+        return hashes.map((transactionHash) => ({
+          transactionHash,
+          status: '0x1',
+          logs: [{ topics: [V2_SWAP_TOPIC] }]
+        }));
+      },
+      async getBlocksByNumbers(numbers) {
+        return numbers.map((blockNumber) => block(blockNumber));
+      }
+    }
+  });
+  t.after(() => {
+    monitor.close();
+    store.close();
+  });
+  const emitted = [];
+  monitor.subscribe((message) => {
+    if (message.type === 'event') emitted.push(message.data);
+  });
+
+  const gapPoll = monitor.pollFastGapOnce();
+  void gapPoll.catch(() => {});
+  await within(gapStarted.promise, 'fast-gap RPC start');
+  await within(monitor.pollOnce(), 'live buy while fast-gap RPC is pending');
+  assert.equal(store.getMeta('robinhood:monitor:cursor'), '102');
+  assert.deepEqual(emitted.map((event) => event.eventType), ['buy']);
+  assert.equal(monitor.getSnapshot().health.rpcProtection.active, false);
+});
+
+test('fast-gap RPC errors do not activate live fast-lane protection', {
+  timeout: TEST_TIMEOUT_MS
+}, async (t) => {
+  const store = createRobinhoodStore(':memory:');
+  seedWallet(store, {
+    buy: { enabled: true },
+    sell: { enabled: false },
+    transfer: { enabled: false },
+    token_create: { enabled: false }
+  });
+  seedCursors(store, {
+    fast: 100,
+    deep: 100,
+    fastGaps: [{ fromBlock: 90, toBlock: 99 }]
+  });
+  const gapError = new Error('RPC failed with HTTP 429 in fast gap');
+  gapError.status = 429;
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    rpcClient: {
+      async getBlockNumber() {
+        return 100;
+      },
+      async getLogs() {
+        throw gapError;
+      }
+    }
+  });
+  t.after(() => {
+    monitor.close();
+    store.close();
+  });
+
+  await assert.rejects(within(monitor.pollFastGapOnce(), 'fast-gap error'), /429 in fast gap/);
+  assert.equal(monitor.getSnapshot().health.fastGapConsecutiveErrors, 1);
+  assert.equal(monitor.getSnapshot().health.consecutiveErrors, 0);
+  assert.equal(monitor.getSnapshot().health.rpcProtection.active, false);
+});
+
+test('a newly enabled fast wallet never replays an older persisted gap', {
+  timeout: TEST_TIMEOUT_MS
+}, async (t) => {
+  const store = createRobinhoodStore(':memory:');
+  seedWallet(store, {
+    buy: { enabled: true },
+    sell: { enabled: false },
+    transfer: { enabled: false },
+    token_create: { enabled: false }
+  });
+  seedCursors(store, {
+    fast: 101,
+    deep: 101,
+    fastGaps: [{ fromBlock: 90, toBlock: 99 }]
+  });
+  store.setMeta('robinhood:monitor:fast-wallet-starts', '{}');
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    fastGapBlockSpan: 10,
+    rpcClient: {
+      async getBlockNumber() {
+        return 101;
+      },
+      async getLogs() {
+        return [transferLog({ direction: 'incoming', transactionHash: buyHash, logIndex: 1, blockNumber: 90 })];
+      },
+      async getTransactionsByHashes() {
+        throw new Error('old fast-gap candidates must be filtered before transaction lookup');
+      },
+      async getTransactionReceipts() {
+        throw new Error('old fast-gap candidates must be filtered before receipt lookup');
+      }
+    }
+  });
+  t.after(() => {
+    monitor.close();
+    store.close();
+  });
+
+  await within(monitor.pollFastGapOnce(), 'new fast-wallet gap guard');
+  assert.equal(store.listMonitorEvents().length, 0);
+  assert.equal(JSON.parse(store.getMeta('robinhood:monitor:fast-wallet-starts'))[wallet], 101);
 });
 
 test('deep-lane errors do not activate fast RPC protection', {

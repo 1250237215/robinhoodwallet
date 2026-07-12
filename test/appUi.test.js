@@ -575,6 +575,7 @@ test('real-time monitoring is a first-level page that replaces the research work
     'monitor-latest-block',
     'monitor-block-lag',
     'monitor-fast-backlog',
+    'monitor-fast-gap',
     'monitor-fast-duration',
     'monitor-deep-status',
     'monitor-deep-live-backlog',
@@ -594,12 +595,13 @@ test('real-time monitoring is a first-level page that replaces the research work
 test('monitor health exposes compact fast and deep lane diagnostics', () => {
   const healthGrid = indexHtml.match(/<dl class="monitor-health-grid" aria-label="实时监控状态">[\s\S]*?<\/dl>/)?.[0] || '';
   assert.equal((healthGrid.match(/<div>/g) || []).length, 6);
-  assert.match(healthGrid, /快线积压[\s\S]*id="monitor-fast-backlog"[\s\S]*id="monitor-fast-duration"/);
+  assert.match(healthGrid, /快线积压[\s\S]*id="monitor-fast-backlog"[\s\S]*id="monitor-fast-gap"[\s\S]*id="monitor-fast-duration"/);
   assert.match(healthGrid, /深扫状态[\s\S]*id="monitor-deep-status"[\s\S]*id="monitor-deep-live-backlog"[\s\S]*id="monitor-deep-gap"[\s\S]*id="monitor-deep-duration"/);
   assert.doesNotMatch(healthGrid, /<(?:section|article)\b/);
 
   for (const field of [
     'fastBacklogBlocks',
+    'fastGapBlocks',
     'fastLastRangeDurationMs',
     'deepLiveBacklogBlocks',
     'deepLastRangeDurationMs',
@@ -622,6 +624,7 @@ test('monitor health exposes compact fast and deep lane diagnostics', () => {
   assert.match(appJs, /function formatMonitorBlockCount\(value\)/);
   assert.match(appJs, /function formatMonitorRangeDuration\(value\)/);
   assert.match(appJs, /elements\.monitorFastBacklog\.textContent = formatMonitorBlockCount\(health\.fastBacklogBlocks\)/);
+  assert.match(appJs, /elements\.monitorFastGap\.textContent = `缺口 \$\{formatMonitorBlockCount\(health\.fastGapBlocks\)\}`/);
   assert.match(appJs, /elements\.monitorDeepStatus\.textContent = formatMonitorDeepStatus\(health\.deepStatus\)/);
   assert.match(appJs, /elements\.monitorDeepLiveBacklog\.textContent = `实时 \$\{formatMonitorBlockCount\(health\.deepLiveBacklogBlocks\)\}`/);
   assert.match(appJs, /elements\.monitorDeepGap\.textContent = `缺口 \$\{formatMonitorBlockCount\(health\.deepGapBlocks\)\}`/);

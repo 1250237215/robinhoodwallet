@@ -47,6 +47,9 @@ Configuration is supplied through environment variables. Common settings are:
 | `ROBINHOOD_MONITOR_WALLET_TOPIC_CHUNK_SIZE` | `100` | Wallet topics per log request |
 | `ROBINHOOD_MONITOR_LOG_CONCURRENCY` | `2` | Maximum concurrent wallet-log requests |
 | `ROBINHOOD_MONITOR_RECOVERY_SUCCESSES` | `20` | Healthy polls required to leave protected mode |
+| `ROBINHOOD_MONITOR_FAST_LIVE_BLOCK_SPAN` | `50` | Latest log blocks scanned before historical fast-lane gaps |
+| `ROBINHOOD_MONITOR_FAST_GAP_BLOCK_SPAN` | `100` | Historical log blocks scanned by each low-priority pass |
+| `ROBINHOOD_MONITOR_FAST_GAP_POLL_INTERVAL_MS` | `5000` | Delay between low-priority fast-lane gap passes |
 | `ROBINHOOD_MONITOR_DEEP_POLL_INTERVAL_MS` | `500` | Native-transfer/direct-deployment live polling interval |
 | `ROBINHOOD_MONITOR_DEEP_LIVE_BLOCK_SPAN` | `20` | Latest full blocks scanned by each deep live pass |
 | `ROBINHOOD_MONITOR_DEEP_GAP_BLOCK_SPAN` | `20` | Historical full blocks scanned by each low-priority backfill pass |
