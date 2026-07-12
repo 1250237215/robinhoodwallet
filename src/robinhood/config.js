@@ -106,8 +106,16 @@ export function createRobinhoodConfig(env = process.env) {
     rpcMaxRetryDelayMs: boundedNumber(env.ROBINHOOD_RPC_MAX_RETRY_DELAY_MS, 15_000, 100, 60_000),
     rpcBatchSize: boundedNumber(env.ROBINHOOD_RPC_BATCH_SIZE, 50, 1, 100),
     rpcBatchDelayMs: boundedNumber(env.ROBINHOOD_RPC_BATCH_DELAY_MS, 350, 0, 5_000),
-    monitorPollIntervalMs: boundedNumber(env.ROBINHOOD_MONITOR_POLL_INTERVAL_MS, 1_000, 250, 60_000),
+    monitorPollIntervalMs: boundedNumber(env.ROBINHOOD_MONITOR_POLL_INTERVAL_MS, 500, 250, 60_000),
+    monitorDegradedPollIntervalMs: boundedNumber(
+      env.ROBINHOOD_MONITOR_DEGRADED_POLL_INTERVAL_MS,
+      1_000,
+      250,
+      60_000
+    ),
     monitorMaxBlockSpan: boundedNumber(env.ROBINHOOD_MONITOR_MAX_BLOCK_SPAN, 500, 1, 10_000),
-    monitorWalletTopicChunkSize: boundedNumber(env.ROBINHOOD_MONITOR_WALLET_TOPIC_CHUNK_SIZE, 50, 1, 100)
+    monitorWalletTopicChunkSize: boundedNumber(env.ROBINHOOD_MONITOR_WALLET_TOPIC_CHUNK_SIZE, 100, 1, 100),
+    monitorLogConcurrency: Math.floor(boundedNumber(env.ROBINHOOD_MONITOR_LOG_CONCURRENCY, 2, 1, 2)),
+    monitorRecoverySuccesses: Math.floor(boundedNumber(env.ROBINHOOD_MONITOR_RECOVERY_SUCCESSES, 20, 1, 1_000))
   };
 }

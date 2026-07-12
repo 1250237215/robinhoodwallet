@@ -42,9 +42,12 @@ test('uses verified Robinhood mainnet addresses and bounded scan settings', () =
   assert.equal(config.autoScanLimit, 20);
   assert.equal(config.rpcMaxRetries, 6);
   assert.equal(config.rpcBatchDelayMs, 350);
-  assert.equal(config.monitorPollIntervalMs, 1_000);
+  assert.equal(config.monitorPollIntervalMs, 500);
+  assert.equal(config.monitorDegradedPollIntervalMs, 1_000);
   assert.equal(config.monitorMaxBlockSpan, 500);
-  assert.equal(config.monitorWalletTopicChunkSize, 50);
+  assert.equal(config.monitorWalletTopicChunkSize, 100);
+  assert.equal(config.monitorLogConcurrency, 2);
+  assert.equal(config.monitorRecoverySuccesses, 20);
 });
 
 test('keeps dynamic smart-money thresholds configurable and strict multiple above the base', () => {

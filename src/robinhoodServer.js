@@ -638,8 +638,11 @@ export async function startRobinhoodStandaloneServer(env = process.env, { monito
     store,
     rpcClient,
     pollIntervalMs: config.monitorPollIntervalMs,
+    degradedPollIntervalMs: config.monitorDegradedPollIntervalMs,
     maxBlockSpan: config.monitorMaxBlockSpan,
     walletTopicChunkSize: config.monitorWalletTopicChunkSize,
+    walletLogConcurrency: config.monitorLogConcurrency,
+    recoverySuccesses: config.monitorRecoverySuccesses,
     barkNotifier
   });
   const server = createRobinhoodStandaloneServer({

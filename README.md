@@ -42,8 +42,11 @@ Configuration is supplied through environment variables. Common settings are:
 | `ROBINHOOD_RPC_URL` | Robinhood Chain public RPC | Chain reads and monitoring |
 | `ROBINHOOD_DATA_FILE` | `data/robinhood.sqlite` | Persistent SQLite database |
 | `ROBINHOOD_MIN_ENTRY_USD` | `500` | Default per-token wallet entry floor |
-| `ROBINHOOD_MONITOR_POLL_INTERVAL_MS` | `1000` | Idle monitor polling interval |
-| `ROBINHOOD_MONITOR_WALLET_TOPIC_CHUNK_SIZE` | `50` | Wallet topics per log request |
+| `ROBINHOOD_MONITOR_POLL_INTERVAL_MS` | `500` | Fast-mode idle polling interval |
+| `ROBINHOOD_MONITOR_DEGRADED_POLL_INTERVAL_MS` | `1000` | Protected-mode polling interval |
+| `ROBINHOOD_MONITOR_WALLET_TOPIC_CHUNK_SIZE` | `100` | Wallet topics per log request |
+| `ROBINHOOD_MONITOR_LOG_CONCURRENCY` | `2` | Maximum concurrent wallet-log requests |
+| `ROBINHOOD_MONITOR_RECOVERY_SUCCESSES` | `20` | Healthy polls required to leave protected mode |
 | `ROBINHOOD_REQUEST_TIMEOUT_MS` | `20000` | External request timeout |
 
 See `src/robinhood/config.js` for all bounded settings and defaults.

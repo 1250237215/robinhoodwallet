@@ -404,7 +404,13 @@ test('standalone startup wires the holder-first scanner and its two data clients
     assert.equal(running.service.scanToken, scanTokenHolders);
     assert.equal(running.service.debotClient instanceof RobinhoodDebotClient, true);
     assert.equal(running.service.holderClient instanceof RobinhoodHolderClient, true);
-    assert.equal(running.monitor.getSnapshot().health.running, true);
+    const health = running.monitor.getSnapshot().health;
+    assert.equal(health.running, true);
+    assert.equal(health.fastPollIntervalMs, 500);
+    assert.equal(health.degradedPollIntervalMs, 1_000);
+    assert.equal(health.walletTopicChunkSize, 100);
+    assert.equal(health.maxLogConcurrency, 2);
+    assert.equal(health.rpcProtection.recoverySuccessesRequired, 20);
   } finally {
     running.service.close();
     running.monitor.close();

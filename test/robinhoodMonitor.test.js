@@ -22,6 +22,21 @@ function quantity(value) {
   return `0x${Number(value).toString(16)}`;
 }
 
+function indexedWallet(index) {
+  return `0x${Number(index).toString(16).padStart(40, '0')}`;
+}
+
+function addMonitoredWallets(store, count) {
+  for (let index = 1; index <= count; index += 1) {
+    store.upsertWalletAnnotation({
+      address: indexedWallet(index),
+      status: 'active',
+      createdAt: 1,
+      updatedAt: 1
+    });
+  }
+}
+
 function abiString(value) {
   const data = Buffer.from(value, 'utf8').toString('hex');
   const padded = data.padEnd(Math.ceil(data.length / 64) * 64, '0');
@@ -44,6 +59,151 @@ test('formats even the smallest token amount without a minimum-value filter', ()
   assert.equal(formatTokenAmount(1n, 18), '0.000000000000000001');
   assert.equal(formatTokenAmount(1_234_500n, 6), '1.2345');
   assert.equal(formatTokenAmount(42n, 0), '42');
+});
+
+test('scans 100-wallet topic chunks with at most two concurrent log requests', async () => {
+  const store = createRobinhoodStore(':memory:');
+  addMonitoredWallets(store, 201);
+  store.setMeta('robinhood:monitor:cursor', '10');
+  const chunkSizes = [];
+  let activeRequests = 0;
+  let maxActiveRequests = 0;
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    rpcClient: {
+      async getBlockNumber() {
+        return 11;
+      },
+      async getLogs(filter) {
+        const recipients = filter.topics[2];
+        chunkSizes.push(Array.isArray(recipients) ? recipients.length : 1);
+        activeRequests += 1;
+        maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+        await new Promise((resolve) => setImmediate(resolve));
+        activeRequests -= 1;
+        return [];
+      }
+    }
+  });
+
+  await monitor.pollOnce();
+  assert.deepEqual(chunkSizes, [100, 100, 1]);
+  assert.equal(maxActiveRequests, 2);
+  assert.equal(store.getMeta('robinhood:monitor:cursor'), '11');
+  assert.deepEqual(
+    {
+      pollIntervalMs: monitor.getSnapshot().health.pollIntervalMs,
+      fastPollIntervalMs: monitor.getSnapshot().health.fastPollIntervalMs,
+      degradedPollIntervalMs: monitor.getSnapshot().health.degradedPollIntervalMs,
+      walletTopicChunkSize: monitor.getSnapshot().health.walletTopicChunkSize,
+      logConcurrency: monitor.getSnapshot().health.logConcurrency,
+      maxLogConcurrency: monitor.getSnapshot().health.maxLogConcurrency
+    },
+    {
+      pollIntervalMs: 500,
+      fastPollIntervalMs: 500,
+      degradedPollIntervalMs: 1_000,
+      walletTopicChunkSize: 100,
+      logConcurrency: 2,
+      maxLogConcurrency: 2
+    }
+  );
+  monitor.close();
+  store.close();
+});
+
+test('rate pressure activates single-request protection and healthy polls restore fast mode', async () => {
+  const store = createRobinhoodStore(':memory:');
+  addMonitoredWallets(store, 201);
+  store.setMeta('robinhood:monitor:cursor', '20');
+  let head = 21;
+  let failWithRateLimit = true;
+  let activeRequests = 0;
+  let maxActiveRequests = 0;
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    recoverySuccesses: 2,
+    rpcClient: {
+      async getBlockNumber() {
+        return head;
+      },
+      async getLogs() {
+        if (failWithRateLimit) {
+          const error = new Error('RPC failed with HTTP 429: rate limit exceeded');
+          error.status = 429;
+          throw error;
+        }
+        activeRequests += 1;
+        maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+        await new Promise((resolve) => setImmediate(resolve));
+        activeRequests -= 1;
+        return [];
+      }
+    }
+  });
+
+  await assert.rejects(monitor.pollOnce(), /429/);
+  let snapshot = monitor.getSnapshot();
+  assert.equal(snapshot.status, 'degraded');
+  assert.equal(snapshot.health.pollIntervalMs, 1_000);
+  assert.equal(snapshot.health.logConcurrency, 1);
+  assert.equal(snapshot.health.rpcProtection.active, true);
+  assert.equal(snapshot.health.rpcProtection.healthyPolls, 0);
+  assert.equal(store.getMeta('robinhood:monitor:cursor'), '20');
+
+  failWithRateLimit = false;
+  head = 22;
+  maxActiveRequests = 0;
+  await monitor.pollOnce();
+  snapshot = monitor.getSnapshot();
+  assert.equal(maxActiveRequests, 1);
+  assert.equal(snapshot.ok, true);
+  assert.equal(snapshot.status, 'degraded');
+  assert.equal(snapshot.health.rpcProtection.healthyPolls, 1);
+
+  head = 23;
+  maxActiveRequests = 0;
+  await monitor.pollOnce();
+  snapshot = monitor.getSnapshot();
+  assert.equal(maxActiveRequests, 1, 'the recovery poll itself remains protected');
+  assert.equal(snapshot.status, 'live');
+  assert.equal(snapshot.health.pollIntervalMs, 500);
+  assert.equal(snapshot.health.logConcurrency, 2);
+  assert.equal(snapshot.health.rpcProtection.active, false);
+  assert.ok(snapshot.health.rpcProtection.lastRecoveredAt);
+
+  head = 24;
+  maxActiveRequests = 0;
+  await monitor.pollOnce();
+  assert.equal(maxActiveRequests, 2);
+  monitor.close();
+  store.close();
+});
+
+test('two consecutive ordinary RPC failures also activate protection', async () => {
+  const store = createRobinhoodStore(':memory:');
+  store.upsertWalletAnnotation({ address: walletA, status: 'active', createdAt: 1, updatedAt: 1 });
+  store.setMeta('robinhood:monitor:cursor', '30');
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    rpcClient: {
+      async getBlockNumber() {
+        return 31;
+      },
+      async getLogs() {
+        throw new Error('temporary upstream failure');
+      }
+    }
+  });
+
+  await assert.rejects(monitor.pollOnce(), /temporary upstream failure/);
+  assert.equal(monitor.getSnapshot().health.rpcProtection.active, false);
+  await assert.rejects(monitor.pollOnce(), /temporary upstream failure/);
+  assert.equal(monitor.getSnapshot().health.rpcProtection.active, true);
+  assert.equal(monitor.getSnapshot().health.logConcurrency, 1);
+  assert.equal(monitor.getSnapshot().health.pollIntervalMs, 1_000);
+  monitor.close();
+  store.close();
 });
 
 test('monitors only confirmed non-excluded wallets, verifies swaps, and persists exact events', async () => {

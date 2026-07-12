@@ -169,6 +169,18 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function boundedInteger(value, fallback, minimum, maximum) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(minimum, Math.min(maximum, Math.floor(number)));
+}
+
+function isRpcPressureError(error) {
+  const message = errorMessage(error);
+  return Number(error?.status) === 429 || error?.kind === 'timeout' || error?.name === 'TimeoutError' ||
+    /(?:^|\D)429(?:\D|$)|too many requests|rate.?limit|timed?\s*out|timeout/i.test(message);
+}
+
 function canFallbackFromTopicOr(error) {
   const message = errorMessage(error);
   return Number(error?.code) === -32602 || /invalid.{0,30}topics?|topics?.{0,30}(?:array|limit|unsupported)/i.test(message);
@@ -183,9 +195,12 @@ export class RobinhoodWalletMonitor {
   constructor({
     store,
     rpcClient,
-    pollIntervalMs = 1_000,
+    pollIntervalMs = 500,
+    degradedPollIntervalMs = 1_000,
     maxBlockSpan = 500,
-    walletTopicChunkSize = 50,
+    walletTopicChunkSize = 100,
+    walletLogConcurrency = 2,
+    recoverySuccesses = 20,
     now = Date.now,
     setTimer = setTimeout,
     clearTimer = clearTimeout,
@@ -200,9 +215,15 @@ export class RobinhoodWalletMonitor {
     }
     this.store = store;
     this.rpcClient = rpcClient;
-    this.pollIntervalMs = Math.max(250, Math.floor(Number(pollIntervalMs) || 1_000));
-    this.maxBlockSpan = Math.max(1, Math.floor(Number(maxBlockSpan) || 500));
-    this.walletTopicChunkSize = Math.max(1, Math.min(100, Math.floor(Number(walletTopicChunkSize) || 50)));
+    this.pollIntervalMs = boundedInteger(pollIntervalMs, 500, 250, 60_000);
+    this.degradedPollIntervalMs = Math.max(
+      this.pollIntervalMs,
+      boundedInteger(degradedPollIntervalMs, 1_000, 250, 60_000)
+    );
+    this.maxBlockSpan = boundedInteger(maxBlockSpan, 500, 1, 10_000);
+    this.walletTopicChunkSize = boundedInteger(walletTopicChunkSize, 100, 1, 100);
+    this.walletLogConcurrency = boundedInteger(walletLogConcurrency, 2, 1, 2);
+    this.recoverySuccesses = boundedInteger(recoverySuccesses, 20, 1, 1_000);
     this.now = now;
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
@@ -228,6 +249,13 @@ export class RobinhoodWalletMonitor {
     this.pollPromise = null;
     this.abortController = null;
     this.listeners = new Set();
+    this.rpcProtection = {
+      active: false,
+      activeSince: null,
+      reason: '',
+      healthyPolls: 0,
+      lastRecoveredAt: null
+    };
     this.alertedTokens = new Set(
       (this.store.listMonitorTokenAlerts?.() || [])
         .map((alert) => normalizeAddress(alert.tokenAddress))
@@ -413,7 +441,7 @@ export class RobinhoodWalletMonitor {
       ? 'stopped'
       : !this.settings.enabled
         ? 'disabled'
-        : this.health.consecutiveErrors > 0
+        : this.health.consecutiveErrors > 0 || this.rpcProtection.active
           ? 'degraded'
           : this.health.monitoredWallets === 0
             ? 'waiting_for_wallets'
@@ -430,7 +458,16 @@ export class RobinhoodWalletMonitor {
         started: this.started,
         running: this.started && !this.closed,
         syncing: Boolean(this.pollPromise),
-        pollIntervalMs: this.pollIntervalMs
+        pollIntervalMs: this.#effectivePollIntervalMs(),
+        fastPollIntervalMs: this.pollIntervalMs,
+        degradedPollIntervalMs: this.degradedPollIntervalMs,
+        walletTopicChunkSize: this.walletTopicChunkSize,
+        logConcurrency: this.#effectiveLogConcurrency(),
+        maxLogConcurrency: this.walletLogConcurrency,
+        rpcProtection: {
+          ...this.rpcProtection,
+          recoverySuccessesRequired: this.recoverySuccesses
+        }
       },
       events: eventLimit > 0 ? this.getEvents({ limit: eventLimit }) : [],
       clusters: this.getClusters(),
@@ -460,9 +497,10 @@ export class RobinhoodWalletMonitor {
       }
       const lag = Number(this.health.lagBlocks);
       const caughtUp = !Number.isFinite(lag) || lag <= 0;
+      const pollIntervalMs = this.#effectivePollIntervalMs();
       const backoff = this.health.consecutiveErrors
-        ? Math.min(15_000, this.pollIntervalMs * (2 ** Math.min(4, this.health.consecutiveErrors)))
-        : caughtUp ? this.pollIntervalMs : 10;
+        ? Math.min(15_000, pollIntervalMs * (2 ** Math.min(4, this.health.consecutiveErrors)))
+        : caughtUp ? pollIntervalMs : 10;
       this.#schedule(backoff);
     }, Math.max(0, delay));
     this.timer?.unref?.();
@@ -506,6 +544,7 @@ export class RobinhoodWalletMonitor {
       this.health.lastError = '';
       this.health.consecutiveErrors = 0;
       this.health.lagBlocks = Math.max(0, chainHead - (this.cursor ?? chainHead));
+      this.#recordHealthyPoll();
       this.#emit('health', this.getSnapshot({ eventLimit: 0 }).health);
       return this.getSnapshot();
     } catch (error) {
@@ -513,6 +552,9 @@ export class RobinhoodWalletMonitor {
       this.health.lastError = errorMessage(error);
       this.health.lastErrorAt = new Date(this.now()).toISOString();
       this.health.consecutiveErrors += 1;
+      if (isRpcPressureError(error) || this.health.consecutiveErrors >= 2) {
+        this.#activateRpcProtection(error);
+      }
       this.health.lagBlocks = this.health.chainHead === null || this.cursor === null
         ? null
         : Math.max(0, this.health.chainHead - this.cursor);
@@ -527,6 +569,33 @@ export class RobinhoodWalletMonitor {
     this.cursor = Number(blockNumber);
     this.health.lastProcessedBlock = this.cursor;
     this.store.setMeta(MONITOR_CURSOR_KEY, String(this.cursor));
+  }
+
+  #effectivePollIntervalMs() {
+    return this.rpcProtection.active ? this.degradedPollIntervalMs : this.pollIntervalMs;
+  }
+
+  #effectiveLogConcurrency() {
+    return this.rpcProtection.active ? 1 : this.walletLogConcurrency;
+  }
+
+  #activateRpcProtection(error) {
+    const now = new Date(this.now()).toISOString();
+    if (!this.rpcProtection.active) this.rpcProtection.activeSince = now;
+    this.rpcProtection.active = true;
+    this.rpcProtection.reason = errorMessage(error);
+    this.rpcProtection.healthyPolls = 0;
+  }
+
+  #recordHealthyPoll() {
+    if (!this.rpcProtection.active) return;
+    this.rpcProtection.healthyPolls += 1;
+    if (this.rpcProtection.healthyPolls < this.recoverySuccesses) return;
+    this.rpcProtection.active = false;
+    this.rpcProtection.activeSince = null;
+    this.rpcProtection.reason = '';
+    this.rpcProtection.healthyPolls = 0;
+    this.rpcProtection.lastRecoveredAt = new Date(this.now()).toISOString();
   }
 
   #reconcileBarkAlerts(notifyNew) {
@@ -630,45 +699,65 @@ export class RobinhoodWalletMonitor {
   }
 
   async #getIncomingTransfers(fromBlock, toBlock, walletAddresses, signal) {
-    const rows = [];
+    const chunks = [];
     for (let index = 0; index < walletAddresses.length; index += this.walletTopicChunkSize) {
-      const chunk = walletAddresses.slice(index, index + this.walletTopicChunkSize);
-      const topics = chunk.map(topicForAddress);
-      const filter = {
-        fromBlock,
-        toBlock,
-        topics: [ERC20_TRANSFER_TOPIC, null, topics.length === 1 ? topics[0] : topics]
-      };
-      try {
-        rows.push(...await this.rpcClient.getLogs(filter, {
-          signal,
-          initialWindow: Math.max(1, toBlock - fromBlock + 1),
-          minWindow: 1,
-          maxWindow: this.maxBlockSpan
-        }));
-      } catch (error) {
-        if (chunk.length === 1 || !canFallbackFromTopicOr(error)) throw error;
-        for (const wallet of chunk) {
-          rows.push(...await this.rpcClient.getLogs({
-            fromBlock,
-            toBlock,
-            topics: [ERC20_TRANSFER_TOPIC, null, topicForAddress(wallet)]
-          }, {
-            signal,
-            initialWindow: Math.max(1, toBlock - fromBlock + 1),
-            minWindow: 1,
-            maxWindow: this.maxBlockSpan
-          }));
+      chunks.push(walletAddresses.slice(index, index + this.walletTopicChunkSize));
+    }
+    const chunkRows = new Array(chunks.length);
+    let nextIndex = 0;
+    let firstError = null;
+    const worker = async () => {
+      while (!firstError) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= chunks.length) return;
+        try {
+          chunkRows[index] = await this.#getIncomingTransferChunk(fromBlock, toBlock, chunks[index], signal);
+        } catch (error) {
+          firstError ||= error;
         }
       }
-    }
+    };
+    const concurrency = Math.min(this.#effectiveLogConcurrency(), chunks.length);
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    if (firstError) throw firstError;
+
     const seen = new Set();
-    return rows.filter((log) => {
+    return chunkRows.flat().filter((log) => {
       const key = eventKey(log);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
+  }
+
+  async #getIncomingTransferChunk(fromBlock, toBlock, chunk, signal) {
+    const topics = chunk.map(topicForAddress);
+    const options = {
+      signal,
+      initialWindow: Math.max(1, toBlock - fromBlock + 1),
+      minWindow: 1,
+      maxWindow: this.maxBlockSpan
+    };
+    try {
+      return await this.rpcClient.getLogs({
+        fromBlock,
+        toBlock,
+        topics: [ERC20_TRANSFER_TOPIC, null, topics.length === 1 ? topics[0] : topics]
+      }, options);
+    } catch (error) {
+      if (chunk.length === 1 || !canFallbackFromTopicOr(error)) throw error;
+      const rows = [];
+      for (const wallet of chunk) {
+        throwIfAborted(signal);
+        rows.push(...await this.rpcClient.getLogs({
+          fromBlock,
+          toBlock,
+          topics: [ERC20_TRANSFER_TOPIC, null, topicForAddress(wallet)]
+        }, options));
+      }
+      return rows;
+    }
   }
 
   #candidateFromLog(log) {
