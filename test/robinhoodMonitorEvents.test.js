@@ -97,7 +97,7 @@ test('classifies outgoing swap logs as sells and non-swap logs as transfers with
       },
       async getBlocksByNumbers(numbers, { includeTransactions }) {
         assert.deepEqual(numbers, [101]);
-        assert.equal(includeTransactions, true);
+        assert.equal(includeTransactions, false);
         return [{ number: quantity(101), timestamp: quantity(2_000_000_000), transactions: [] }];
       },
       async getTransactionsByHashes(hashes) {
@@ -144,6 +144,7 @@ test('detects native transfers and direct ERC-20 deployments from full blocks', 
   });
   cacheToken(store);
   store.setMeta('robinhood:monitor:cursor', '100');
+  store.setMeta('robinhood:monitor:deep-live-cursor', '100');
   const nativeHash = hash('3a');
   const createHash = hash('3b');
   const notifications = [];
@@ -186,7 +187,7 @@ test('detects native transfers and direct ERC-20 deployments from full blocks', 
     }
   });
 
-  await monitor.pollOnce();
+  await monitor.pollDeepOnce();
   await new Promise((resolve) => setImmediate(resolve));
   const events = store.listMonitorEvents().sort((left, right) => left.logIndex - right.logIndex);
   assert.equal(events.length, 2);

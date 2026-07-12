@@ -6,6 +6,7 @@
   "scripts": {
     "build:robinhood": "esbuild src/robinhoodServer.js --bundle --platform=node --format=esm --minify --legal-comments=external --outfile=dist/robinhood-server.mjs",
     "classify:wallets": "node scripts/classify-robinhood-wallets.mjs",
+    "verify:monitor:rpc": "node scripts/verify-robinhood-monitor-latency.mjs",
     "start": "node src/server.js",
     "test": "node --test"
   },

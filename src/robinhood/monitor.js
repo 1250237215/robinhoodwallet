@@ -13,6 +13,9 @@ export const WALLET_EVENT_TYPES = WALLET_MONITOR_EVENT_TYPES;
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 const HASH_PATTERN = /^0x[0-9a-f]{64}$/;
 const MONITOR_CURSOR_KEY = 'robinhood:monitor:cursor';
+const MONITOR_DEEP_LIVE_CURSOR_KEY = 'robinhood:monitor:deep-live-cursor';
+const MONITOR_DEEP_GAPS_KEY = 'robinhood:monitor:deep-gaps';
+const MONITOR_DEEP_WALLET_STARTS_KEY = 'robinhood:monitor:deep-wallet-starts';
 const MONITOR_ENABLED_KEY = 'robinhood:monitor:enabled';
 const MONITOR_THRESHOLD_KEY = 'robinhood:monitor:threshold';
 const MONITOR_WINDOW_SECONDS_KEY = 'robinhood:monitor:window-seconds';
@@ -213,6 +216,47 @@ function boundedInteger(value, fallback, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, Math.floor(number)));
 }
 
+function parseJson(value, fallback) {
+  if (typeof value !== 'string' || !value.trim()) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeBlockRanges(value) {
+  if (!Array.isArray(value)) return [];
+  const ranges = value
+    .map((range) => ({
+      fromBlock: parseInteger(range?.fromBlock ?? range?.from),
+      toBlock: parseInteger(range?.toBlock ?? range?.to)
+    }))
+    .filter((range) => range.fromBlock !== null && range.toBlock !== null && range.fromBlock <= range.toBlock)
+    .sort((left, right) => left.fromBlock - right.fromBlock || left.toBlock - right.toBlock);
+  const merged = [];
+  for (const range of ranges) {
+    const previous = merged.at(-1);
+    if (previous && range.fromBlock <= previous.toBlock + 1) {
+      previous.toBlock = Math.max(previous.toBlock, range.toBlock);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  return merged;
+}
+
+function countRangeBlocks(ranges) {
+  return ranges.reduce((total, range) => total + range.toBlock - range.fromBlock + 1, 0);
+}
+
+function normalizeDeepWalletStarts(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return new Map();
+  return new Map(Object.entries(value)
+    .map(([address, blockNumber]) => [normalizeAddress(address), parseInteger(blockNumber)])
+    .filter(([address, blockNumber]) => ADDRESS_PATTERN.test(address) && blockNumber !== null));
+}
+
 function isRpcPressureError(error) {
   const message = errorMessage(error);
   return Number(error?.status) === 429 || error?.kind === 'timeout' || error?.name === 'TimeoutError' ||
@@ -239,7 +283,14 @@ export class RobinhoodWalletMonitor {
     walletTopicChunkSize = 100,
     walletLogConcurrency = 2,
     recoverySuccesses = 20,
+    deepPollIntervalMs = 500,
+    deepDegradedPollIntervalMs = 1_500,
+    deepLiveBlockSpan = 20,
+    deepGapBlockSpan = 20,
+    deepGapPollIntervalMs = 5_000,
+    tokenMetadataBudgetMs = 1_500,
     now = Date.now,
+    monotonicNow = () => performance.now(),
     setTimer = setTimeout,
     clearTimer = clearTimeout,
     barkNotifier = null,
@@ -263,7 +314,17 @@ export class RobinhoodWalletMonitor {
     this.walletTopicChunkSize = boundedInteger(walletTopicChunkSize, 100, 1, 100);
     this.walletLogConcurrency = boundedInteger(walletLogConcurrency, 2, 1, 2);
     this.recoverySuccesses = boundedInteger(recoverySuccesses, 20, 1, 1_000);
+    this.deepPollIntervalMs = boundedInteger(deepPollIntervalMs, 500, 250, 60_000);
+    this.deepDegradedPollIntervalMs = Math.max(
+      this.deepPollIntervalMs,
+      boundedInteger(deepDegradedPollIntervalMs, 1_500, 250, 60_000)
+    );
+    this.deepLiveBlockSpan = boundedInteger(deepLiveBlockSpan, 20, 1, 100);
+    this.deepGapBlockSpan = boundedInteger(deepGapBlockSpan, 20, 1, 100);
+    this.deepGapPollIntervalMs = boundedInteger(deepGapPollIntervalMs, 5_000, 1_000, 60_000);
+    this.tokenMetadataBudgetMs = boundedInteger(tokenMetadataBudgetMs, 1_500, 250, 4_000);
     this.now = now;
+    this.monotonicNow = monotonicNow;
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
     this.barkNotifier = barkNotifier;
@@ -286,11 +347,22 @@ export class RobinhoodWalletMonitor {
       barkVolume: Math.max(0, Math.min(10, parseInteger(this.store.getMeta(MONITOR_BARK_VOLUME_KEY), 5)))
     };
     this.cursor = parseInteger(this.store.getMeta(MONITOR_CURSOR_KEY));
+    this.deepCursor = parseInteger(this.store.getMeta(MONITOR_DEEP_LIVE_CURSOR_KEY));
+    this.deepGaps = normalizeBlockRanges(parseJson(this.store.getMeta(MONITOR_DEEP_GAPS_KEY), []));
+    this.deepWalletStarts = normalizeDeepWalletStarts(
+      parseJson(this.store.getMeta(MONITOR_DEEP_WALLET_STARTS_KEY), {})
+    );
     this.started = false;
     this.closed = false;
     this.timer = null;
     this.pollPromise = null;
     this.abortController = null;
+    this.deepTimer = null;
+    this.deepPollPromise = null;
+    this.deepAbortController = null;
+    this.gapTimer = null;
+    this.gapPollPromise = null;
+    this.gapAbortController = null;
     this.listeners = new Set();
     this.rpcProtection = {
       active: false,
@@ -314,7 +386,27 @@ export class RobinhoodWalletMonitor {
       lastErrorAt: null,
       lastError: '',
       consecutiveErrors: 0,
-      eventsDetected: 0
+      eventsDetected: 0,
+      fastEventsDetected: 0,
+      fastBacklogBlocks: null,
+      fastLastRangeDurationMs: null,
+      deepChainHead: null,
+      deepLiveCursor: this.deepCursor,
+      deepLiveBacklogBlocks: null,
+      deepLastRangeDurationMs: null,
+      deepGapBlocks: countRangeBlocks(this.deepGaps),
+      deepMonitoredWallets: 0,
+      deepLastPollAt: null,
+      deepLastSuccessAt: null,
+      deepLastErrorAt: null,
+      deepLastError: '',
+      deepConsecutiveErrors: 0,
+      deepEventsDetected: 0,
+      deepGapLastRangeDurationMs: null,
+      deepGapLastSuccessAt: null,
+      deepGapLastErrorAt: null,
+      deepGapLastError: '',
+      deepGapConsecutiveErrors: 0
     };
     this.#reconcileBarkAlerts(false);
   }
@@ -322,7 +414,9 @@ export class RobinhoodWalletMonitor {
   start() {
     if (this.closed || this.started) return this.getSnapshot();
     this.started = true;
-    this.#schedule(0);
+    this.#scheduleFast(0);
+    this.#scheduleDeep(0);
+    this.#scheduleGap(this.deepGapPollIntervalMs);
     return this.getSnapshot();
   }
 
@@ -330,9 +424,17 @@ export class RobinhoodWalletMonitor {
     this.closed = true;
     this.started = false;
     if (this.timer) this.clearTimer(this.timer);
+    if (this.deepTimer) this.clearTimer(this.deepTimer);
+    if (this.gapTimer) this.clearTimer(this.gapTimer);
     this.timer = null;
+    this.deepTimer = null;
+    this.gapTimer = null;
     this.abortController?.abort(new Error('Robinhood wallet monitor stopped'));
+    this.deepAbortController?.abort(new Error('Robinhood wallet deep monitor stopped'));
+    this.gapAbortController?.abort(new Error('Robinhood wallet gap monitor stopped'));
     this.abortController = null;
+    this.deepAbortController = null;
+    this.gapAbortController = null;
     this.#emit('close', { stoppedAt: new Date(this.now()).toISOString() });
     this.listeners.clear();
   }
@@ -396,7 +498,10 @@ export class RobinhoodWalletMonitor {
     }
     this.#reconcileBarkAlerts(false);
     this.#emit('snapshot', this.getSnapshot());
-    if (this.started && !this.closed) this.#schedule(0, true);
+    if (this.started && !this.closed) {
+      this.#scheduleFast(0, true);
+      this.#scheduleDeep(0, true);
+    }
     return this.getSnapshot();
   }
 
@@ -481,6 +586,7 @@ export class RobinhoodWalletMonitor {
   }
 
   getSnapshot({ eventLimit = 100 } = {}) {
+    const deepStatus = this.#deepStatus();
     const status = this.closed
       ? 'stopped'
       : !this.settings.enabled
@@ -499,12 +605,22 @@ export class RobinhoodWalletMonitor {
       barkTargets: this.listBarkTargets(),
       health: {
         ...this.health,
+        deepStatus,
         started: this.started,
         running: this.started && !this.closed,
         syncing: Boolean(this.pollPromise),
+        deepSyncing: Boolean(this.deepPollPromise),
+        deepGapSyncing: Boolean(this.gapPollPromise),
         pollIntervalMs: this.#effectivePollIntervalMs(),
         fastPollIntervalMs: this.pollIntervalMs,
         degradedPollIntervalMs: this.degradedPollIntervalMs,
+        deepPollIntervalMs: this.deepPollIntervalMs,
+        deepEffectivePollIntervalMs: this.#effectiveDeepPollIntervalMs(),
+        deepDegradedPollIntervalMs: this.deepDegradedPollIntervalMs,
+        deepLiveBlockSpan: this.deepLiveBlockSpan,
+        deepGapBlockSpan: this.deepGapBlockSpan,
+        deepGapPollIntervalMs: this.deepGapPollIntervalMs,
+        tokenMetadataBudgetMs: this.tokenMetadataBudgetMs,
         walletTopicChunkSize: this.walletTopicChunkSize,
         logConcurrency: this.#effectiveLogConcurrency(),
         maxLogConcurrency: this.walletLogConcurrency,
@@ -522,13 +638,31 @@ export class RobinhoodWalletMonitor {
   async pollOnce() {
     if (this.closed) return this.getSnapshot();
     if (this.pollPromise) return this.pollPromise;
-    this.pollPromise = this.#poll().finally(() => {
+    this.pollPromise = this.#pollFast().finally(() => {
       this.pollPromise = null;
     });
     return this.pollPromise;
   }
 
-  #schedule(delay, replace = false) {
+  async pollDeepOnce() {
+    if (this.closed) return this.getSnapshot();
+    if (this.deepPollPromise) return this.deepPollPromise;
+    this.deepPollPromise = this.#pollDeep().finally(() => {
+      this.deepPollPromise = null;
+    });
+    return this.deepPollPromise;
+  }
+
+  async pollGapOnce() {
+    if (this.closed) return this.getSnapshot();
+    if (this.gapPollPromise) return this.gapPollPromise;
+    this.gapPollPromise = this.#pollGap().finally(() => {
+      this.gapPollPromise = null;
+    });
+    return this.gapPollPromise;
+  }
+
+  #scheduleFast(delay, replace = false) {
     if (!this.started || this.closed) return;
     if (replace && this.timer) this.clearTimer(this.timer);
     else if (this.timer) return;
@@ -537,7 +671,7 @@ export class RobinhoodWalletMonitor {
       try {
         await this.pollOnce();
       } catch {
-        // Health is updated in #poll; the next pass retries from the same cursor.
+        // Health is updated in #pollFast; the next pass retries from the same cursor.
       }
       const lag = Number(this.health.lagBlocks);
       const caughtUp = !Number.isFinite(lag) || lag <= 0;
@@ -545,12 +679,53 @@ export class RobinhoodWalletMonitor {
       const backoff = this.health.consecutiveErrors
         ? Math.min(15_000, pollIntervalMs * (2 ** Math.min(4, this.health.consecutiveErrors)))
         : caughtUp ? pollIntervalMs : 10;
-      this.#schedule(backoff);
+      this.#scheduleFast(backoff);
     }, Math.max(0, delay));
     this.timer?.unref?.();
   }
 
-  async #poll() {
+  #scheduleDeep(delay, replace = false) {
+    if (!this.started || this.closed) return;
+    if (replace && this.deepTimer) this.clearTimer(this.deepTimer);
+    else if (this.deepTimer) return;
+    this.deepTimer = this.setTimer(async () => {
+      this.deepTimer = null;
+      try {
+        await this.pollDeepOnce();
+      } catch {
+        // Deep health is isolated from the fast lane and retries independently.
+      }
+      const lag = Number(this.health.deepLiveBacklogBlocks);
+      const caughtUp = !Number.isFinite(lag) || lag <= 0;
+      const pollIntervalMs = this.#effectiveDeepPollIntervalMs();
+      const backoff = this.health.deepConsecutiveErrors
+        ? Math.min(15_000, pollIntervalMs * (2 ** Math.min(4, this.health.deepConsecutiveErrors)))
+        : caughtUp ? pollIntervalMs : 10;
+      this.#scheduleDeep(backoff);
+    }, Math.max(0, delay));
+    this.deepTimer?.unref?.();
+  }
+
+  #scheduleGap(delay, replace = false) {
+    if (!this.started || this.closed) return;
+    if (replace && this.gapTimer) this.clearTimer(this.gapTimer);
+    else if (this.gapTimer) return;
+    this.gapTimer = this.setTimer(async () => {
+      this.gapTimer = null;
+      try {
+        await this.pollGapOnce();
+      } catch {
+        // Historical gaps are low priority and never slow either live lane.
+      }
+      const backoff = this.health.deepGapConsecutiveErrors
+        ? Math.min(30_000, this.deepGapPollIntervalMs * (2 ** Math.min(3, this.health.deepGapConsecutiveErrors)))
+        : this.deepGapPollIntervalMs;
+      this.#scheduleGap(backoff);
+    }, Math.max(0, delay));
+    this.gapTimer?.unref?.();
+  }
+
+  async #pollFast() {
     const polledAt = new Date(this.now()).toISOString();
     this.health.lastPollAt = polledAt;
     this.abortController = new AbortController();
@@ -574,7 +749,9 @@ export class RobinhoodWalletMonitor {
           this.#advanceCursor(chainHead);
         } else {
           const toBlock = Math.min(chainHead, this.cursor + this.maxBlockSpan);
-          const events = await this.#scanRange(this.cursor + 1, toBlock, wallets, signal);
+          const startedAt = this.monotonicNow();
+          const events = await this.#scanFastRange(this.cursor + 1, toBlock, wallets, signal);
+          this.health.fastLastRangeDurationMs = Math.max(0, Math.round(this.monotonicNow() - startedAt));
           detectedEvents = events;
           this.#advanceCursor(toBlock);
           for (const event of events) this.#emit('event', event);
@@ -588,6 +765,7 @@ export class RobinhoodWalletMonitor {
       this.health.lastError = '';
       this.health.consecutiveErrors = 0;
       this.health.lagBlocks = Math.max(0, chainHead - (this.cursor ?? chainHead));
+      this.health.fastBacklogBlocks = this.health.lagBlocks;
       this.#recordHealthyPoll();
       this.#emit('health', this.getSnapshot({ eventLimit: 0 }).health);
       return this.getSnapshot();
@@ -602,10 +780,115 @@ export class RobinhoodWalletMonitor {
       this.health.lagBlocks = this.health.chainHead === null || this.cursor === null
         ? null
         : Math.max(0, this.health.chainHead - this.cursor);
+      this.health.fastBacklogBlocks = this.health.lagBlocks;
       this.#emit('health', this.getSnapshot({ eventLimit: 0 }).health);
       throw error;
     } finally {
       this.abortController = null;
+    }
+  }
+
+  async #pollDeep() {
+    this.health.deepLastPollAt = new Date(this.now()).toISOString();
+    this.deepAbortController = new AbortController();
+    const { signal } = this.deepAbortController;
+    try {
+      const chainHead = await this.rpcClient.getBlockNumber({ signal });
+      this.health.deepChainHead = chainHead;
+      const wallets = this.#monitoredWalletMap();
+      const deepWallets = this.#deepWalletAddresses(wallets);
+      this.health.deepMonitoredWallets = deepWallets.size;
+      this.#synchronizeDeepWalletStarts(deepWallets, chainHead);
+
+      let detectedEvents = [];
+      if (this.deepCursor === null || this.deepCursor > chainHead) {
+        this.#clearDeepGaps();
+        this.#advanceDeepCursor(chainHead);
+      } else if (!this.settings.enabled || deepWallets.size === 0) {
+        this.#clearDeepGaps();
+        this.#advanceDeepCursor(chainHead);
+      } else if (chainHead > this.deepCursor) {
+        // Keep the live edge first; older blocks are persisted for the independent gap worker.
+        const fromBlock = Math.max(this.deepCursor + 1, chainHead - this.deepLiveBlockSpan + 1);
+        if (fromBlock > this.deepCursor + 1) this.#enqueueDeepGap(this.deepCursor + 1, fromBlock - 1);
+        const startedAt = this.monotonicNow();
+        const scan = await this.#scanDeepRange(fromBlock, chainHead, wallets, signal);
+        detectedEvents = scan.events;
+        this.health.deepLastRangeDurationMs = Math.max(0, Math.round(this.monotonicNow() - startedAt));
+        this.#advanceDeepCursor(chainHead);
+        for (const blockNumber of scan.retryBlocks) this.#enqueueDeepGap(blockNumber, blockNumber);
+        for (const event of detectedEvents) this.#emit('event', event);
+        if (detectedEvents.length) this.#emit('snapshot', this.getSnapshot());
+      }
+
+      this.health.deepLastSuccessAt = new Date(this.now()).toISOString();
+      this.health.deepLastError = '';
+      this.health.deepConsecutiveErrors = 0;
+      this.health.deepLiveBacklogBlocks = Math.max(0, chainHead - (this.deepCursor ?? chainHead));
+      this.health.deepGapBlocks = countRangeBlocks(this.deepGaps);
+      this.#emit('health', this.getSnapshot({ eventLimit: 0 }).health);
+      return this.getSnapshot();
+    } catch (error) {
+      if (this.closed || signal.aborted) return null;
+      this.health.deepLastError = errorMessage(error);
+      this.health.deepLastErrorAt = new Date(this.now()).toISOString();
+      this.health.deepConsecutiveErrors += 1;
+      this.health.deepLiveBacklogBlocks = this.health.deepChainHead === null || this.deepCursor === null
+        ? null
+        : Math.max(0, this.health.deepChainHead - this.deepCursor);
+      this.health.deepGapBlocks = countRangeBlocks(this.deepGaps);
+      this.#emit('health', this.getSnapshot({ eventLimit: 0 }).health);
+      throw error;
+    } finally {
+      this.deepAbortController = null;
+    }
+  }
+
+  async #pollGap() {
+    if (!this.settings.enabled || this.deepGaps.length === 0) {
+      this.health.deepGapLastError = '';
+      this.health.deepGapConsecutiveErrors = 0;
+      return this.getSnapshot();
+    }
+    const wallets = this.#monitoredWalletMap();
+    const deepWallets = this.#deepWalletAddresses(wallets);
+    if (deepWallets.size === 0) {
+      this.#clearDeepGaps();
+      this.health.deepGapLastError = '';
+      this.health.deepGapConsecutiveErrors = 0;
+      return this.getSnapshot();
+    }
+    const liveEdge = Math.max(this.deepCursor ?? 0, this.health.deepChainHead ?? 0);
+    this.#synchronizeDeepWalletStarts(deepWallets, liveEdge);
+    this.gapAbortController = new AbortController();
+    const { signal } = this.gapAbortController;
+    try {
+      const range = this.deepGaps[0];
+      const fromBlock = range.fromBlock;
+      const toBlock = Math.min(range.toBlock, fromBlock + this.deepGapBlockSpan - 1);
+      const startedAt = this.monotonicNow();
+      const scan = await this.#scanDeepRange(fromBlock, toBlock, wallets, signal);
+      this.health.deepGapLastRangeDurationMs = Math.max(0, Math.round(this.monotonicNow() - startedAt));
+      this.#removeDeepGap(fromBlock, toBlock);
+      for (const blockNumber of scan.retryBlocks) this.#enqueueDeepGap(blockNumber, blockNumber);
+      for (const event of scan.events) this.#emit('event', event);
+      if (scan.events.length) this.#emit('snapshot', this.getSnapshot());
+      this.health.deepGapLastSuccessAt = new Date(this.now()).toISOString();
+      this.health.deepGapLastError = '';
+      this.health.deepGapConsecutiveErrors = 0;
+      this.health.deepGapBlocks = countRangeBlocks(this.deepGaps);
+      this.#emit('health', this.getSnapshot({ eventLimit: 0 }).health);
+      return this.getSnapshot();
+    } catch (error) {
+      if (this.closed || signal.aborted) return null;
+      this.health.deepGapLastError = errorMessage(error);
+      this.health.deepGapLastErrorAt = new Date(this.now()).toISOString();
+      this.health.deepGapConsecutiveErrors += 1;
+      this.health.deepGapBlocks = countRangeBlocks(this.deepGaps);
+      this.#emit('health', this.getSnapshot({ eventLimit: 0 }).health);
+      throw error;
+    } finally {
+      this.gapAbortController = null;
     }
   }
 
@@ -615,8 +898,94 @@ export class RobinhoodWalletMonitor {
     this.store.setMeta(MONITOR_CURSOR_KEY, String(this.cursor));
   }
 
+  #advanceDeepCursor(blockNumber) {
+    this.deepCursor = Number(blockNumber);
+    this.health.deepLiveCursor = this.deepCursor;
+    this.store.setMeta(MONITOR_DEEP_LIVE_CURSOR_KEY, String(this.deepCursor));
+  }
+
+  #enqueueDeepGap(fromBlock, toBlock) {
+    if (fromBlock > toBlock) return;
+    this.deepGaps = normalizeBlockRanges([...this.deepGaps, { fromBlock, toBlock }]);
+    this.#persistDeepGaps();
+  }
+
+  #persistDeepGaps() {
+    this.health.deepGapBlocks = countRangeBlocks(this.deepGaps);
+    this.store.setMeta(MONITOR_DEEP_GAPS_KEY, JSON.stringify(this.deepGaps));
+  }
+
+  #removeDeepGap(fromBlock, toBlock) {
+    const remaining = [];
+    for (const range of this.deepGaps) {
+      if (range.toBlock < fromBlock || range.fromBlock > toBlock) {
+        remaining.push(range);
+        continue;
+      }
+      if (range.fromBlock < fromBlock) {
+        remaining.push({ fromBlock: range.fromBlock, toBlock: fromBlock - 1 });
+      }
+      if (range.toBlock > toBlock) {
+        remaining.push({ fromBlock: toBlock + 1, toBlock: range.toBlock });
+      }
+    }
+    this.deepGaps = normalizeBlockRanges(remaining);
+    this.#persistDeepGaps();
+  }
+
+  #clearDeepGaps() {
+    if (this.deepGaps.length === 0) return;
+    this.deepGaps = [];
+    this.#persistDeepGaps();
+  }
+
+  #monitoredWalletMap() {
+    return new Map(this.store.listMonitoredWalletAnnotations()
+      .map((annotation) => [normalizeAddress(annotation.address), annotation])
+      .filter(([address]) => ADDRESS_PATTERN.test(address)));
+  }
+
+  #deepWalletAddresses(wallets) {
+    return new Set([
+      ...this.#walletsForRule(wallets, 'transfer'),
+      ...this.#walletsForRule(wallets, 'token_create')
+    ]);
+  }
+
+  #synchronizeDeepWalletStarts(wallets, chainHead) {
+    let changed = false;
+    for (const address of this.deepWalletStarts.keys()) {
+      if (wallets.has(address)) continue;
+      this.deepWalletStarts.delete(address);
+      changed = true;
+    }
+    for (const address of wallets) {
+      if (this.deepWalletStarts.has(address)) continue;
+      this.deepWalletStarts.set(address, chainHead);
+      changed = true;
+    }
+    if (!changed) return;
+    this.store.setMeta(MONITOR_DEEP_WALLET_STARTS_KEY, JSON.stringify(Object.fromEntries(this.deepWalletStarts)));
+  }
+
+  #deepStatus() {
+    if (!this.settings.enabled || this.health.deepMonitoredWallets === 0) return 'disabled';
+    if (this.health.deepConsecutiveErrors > 0 || this.health.deepGapConsecutiveErrors > 0) {
+      return this.health.deepLastSuccessAt ? 'degraded' : 'error';
+    }
+    if (this.deepGaps.length > 0) return 'backfilling';
+    if (this.health.deepLiveBacklogBlocks === 0) return 'caught_up';
+    return 'idle';
+  }
+
   #effectivePollIntervalMs() {
     return this.rpcProtection.active ? this.degradedPollIntervalMs : this.pollIntervalMs;
+  }
+
+  #effectiveDeepPollIntervalMs() {
+    return this.health.deepConsecutiveErrors > 0
+      ? this.deepDegradedPollIntervalMs
+      : this.deepPollIntervalMs;
   }
 
   #effectiveLogConcurrency() {
@@ -676,23 +1045,17 @@ export class RobinhoodWalletMonitor {
     }
   }
 
-  async #scanRange(fromBlock, toBlock, wallets, signal) {
+  async #scanFastRange(fromBlock, toBlock, wallets, signal) {
     const buyWallets = this.#walletsForRule(wallets, 'buy');
     const sellWallets = this.#walletsForRule(wallets, 'sell');
     const transferWallets = this.#walletsForRule(wallets, 'transfer');
     const tokenCreateWallets = this.#walletsForRule(wallets, 'token_create');
     const outboundWallets = new Set([...sellWallets, ...transferWallets]);
-    const needsTransactionBlocks = transferWallets.size > 0 || tokenCreateWallets.size > 0;
-    const [trackedLogs, transactionBlocks] = await Promise.all([
-      this.#getTrackedLogs(fromBlock, toBlock, {
-        buyWallets: [...buyWallets],
-        outboundWallets: [...outboundWallets],
-        watchNoxa: tokenCreateWallets.size > 0
-      }, signal),
-      needsTransactionBlocks
-        ? this.#getBlocksInRange(fromBlock, toBlock, { includeTransactions: true, signal })
-        : Promise.resolve([])
-    ]);
+    const trackedLogs = await this.#getTrackedLogs(fromBlock, toBlock, {
+      buyWallets: [...buyWallets],
+      outboundWallets: [...outboundWallets],
+      watchNoxa: tokenCreateWallets.size > 0
+    }, signal);
 
     const transferCandidates = [
       ...trackedLogs.incoming.map((log) => this.#transferCandidateFromLog(log, 'incoming')),
@@ -702,28 +1065,20 @@ export class RobinhoodWalletMonitor {
     const noxaCandidates = trackedLogs.noxa
       .map((log) => this.#noxaCandidateFromLog(log))
       .filter((candidate) => candidate && tokenCreateWallets.has(candidate.walletAddress));
-    const fullBlockCandidates = this.#fullBlockCandidates(transactionBlocks, {
-      transferWallets,
-      tokenCreateWallets
-    });
-    const rawCandidates = [...transferCandidates, ...noxaCandidates, ...fullBlockCandidates];
+    const rawCandidates = [...transferCandidates, ...noxaCandidates];
     if (!rawCandidates.length) return [];
 
     const transactionHashes = [...new Set(transferCandidates.map((candidate) => candidate.txHash))];
-    const receiptHashes = [...new Set(
-      [...transferCandidates, ...fullBlockCandidates].map((candidate) => candidate.txHash)
-    )];
     const [transactions, receipts] = await Promise.all([
       transactionHashes.length
         ? this.rpcClient.getTransactionsByHashes(transactionHashes, { signal })
         : Promise.resolve([]),
-      receiptHashes.length
-        ? this.rpcClient.getTransactionReceipts(receiptHashes, { signal })
+      transactionHashes.length
+        ? this.rpcClient.getTransactionReceipts(transactionHashes, { signal })
         : Promise.resolve([])
     ]);
     const transactionByHash = new Map(transactionHashes.map((hash, index) => [hash, transactions[index]]));
-    for (const candidate of fullBlockCandidates) transactionByHash.set(candidate.txHash, candidate.transaction);
-    const receiptByHash = new Map(receiptHashes.map((hash, index) => [hash, receipts[index]]));
+    const receiptByHash = new Map(transactionHashes.map((hash, index) => [hash, receipts[index]]));
 
     const prepared = [];
     for (const candidate of rawCandidates) {
@@ -731,33 +1086,19 @@ export class RobinhoodWalletMonitor {
       if (!annotation || annotation.status === 'excluded') continue;
       if (candidate.source === 'noxa') {
         if (hasEnabledRule(annotation, 'token_create')) {
-          prepared.push({ ...candidate, eventType: 'token_create', assetType: 'erc20', platform: 'noxa' });
+          prepared.push({
+            ...candidate,
+            eventType: 'token_create',
+            assetType: 'erc20',
+            platform: 'noxa',
+            requireCompleteMetadata: false
+          });
         }
         continue;
       }
       const transaction = transactionByHash.get(candidate.txHash);
       const receipt = receiptByHash.get(candidate.txHash);
       if (!receiptSucceeded(receipt)) continue;
-      if (candidate.source === 'direct_create') {
-        const tokenAddress = normalizeAddress(receipt?.contractAddress);
-        if (hasEnabledRule(annotation, 'token_create') && ADDRESS_PATTERN.test(tokenAddress)) {
-          prepared.push({
-            ...candidate,
-            tokenAddress,
-            rawTokenAmount: '0',
-            eventType: 'token_create',
-            assetType: 'erc20',
-            platform: 'direct'
-          });
-        }
-        continue;
-      }
-      if (candidate.source === 'native') {
-        if (hasEnabledRule(annotation, 'transfer')) {
-          prepared.push({ ...candidate, eventType: 'transfer', assetType: 'native', platform: '' });
-        }
-        continue;
-      }
       if (normalizeAddress(transaction?.from) !== candidate.walletAddress) continue;
       const swap = receiptHasSwap(receipt);
       if (candidate.direction === 'incoming' && swap && !this.quoteTokenAddresses.has(candidate.tokenAddress) &&
@@ -782,16 +1123,59 @@ export class RobinhoodWalletMonitor {
         prepared.push({ ...candidate, eventType: 'transfer', assetType: 'erc20', platform: '' });
       }
     }
-    if (!prepared.length) return [];
+    return (await this.#persistCandidates(prepared, wallets, signal, { lane: 'fast' })).events;
+  }
+
+  async #scanDeepRange(fromBlock, toBlock, wallets, signal) {
+    const transferWallets = this.#walletsForRule(wallets, 'transfer');
+    const tokenCreateWallets = this.#walletsForRule(wallets, 'token_create');
+    if (transferWallets.size === 0 && tokenCreateWallets.size === 0) return { events: [], retryBlocks: [] };
+    const blocks = await this.#getBlocksInRange(fromBlock, toBlock, {
+      includeTransactions: true,
+      batchSize: Math.max(this.deepLiveBlockSpan, this.deepGapBlockSpan),
+      signal
+    });
+    const candidates = this.#fullBlockCandidates(blocks, { transferWallets, tokenCreateWallets })
+      .filter((candidate) => candidate.blockNumber >= (this.deepWalletStarts.get(candidate.walletAddress) ?? fromBlock));
+    if (!candidates.length) return { events: [], retryBlocks: [] };
+    const receiptHashes = [...new Set(candidates.map((candidate) => candidate.txHash))];
+    const receipts = await this.rpcClient.getTransactionReceipts(receiptHashes, { signal });
+    const receiptByHash = new Map(receiptHashes.map((hash, index) => [hash, receipts[index]]));
+    const prepared = [];
+    for (const candidate of candidates) {
+      const annotation = wallets.get(candidate.walletAddress);
+      const receipt = receiptByHash.get(candidate.txHash);
+      if (!annotation || annotation.status === 'excluded' || !receiptSucceeded(receipt)) continue;
+      if (candidate.source === 'direct_create') {
+        const tokenAddress = normalizeAddress(receipt?.contractAddress);
+        if (!hasEnabledRule(annotation, 'token_create') || !ADDRESS_PATTERN.test(tokenAddress)) continue;
+        prepared.push({
+          ...candidate,
+          tokenAddress,
+          rawTokenAmount: '0',
+          eventType: 'token_create',
+          assetType: 'erc20',
+          platform: 'direct',
+          requireCompleteMetadata: true
+        });
+      } else if (candidate.source === 'native' && hasEnabledRule(annotation, 'transfer')) {
+        prepared.push({ ...candidate, eventType: 'transfer', assetType: 'native', platform: '' });
+      }
+    }
+    const blockTimestampByNumber = new Map(blocks.map((block) => [
+      rpcInteger(block?.number),
+      rpcInteger(block?.timestamp, unixSeconds(this.now))
+    ]));
+    return this.#persistCandidates(prepared, wallets, signal, { lane: 'deep', blockTimestampByNumber });
+  }
+
+  async #persistCandidates(prepared, wallets, signal, { lane, blockTimestampByNumber = new Map() } = {}) {
+    if (!prepared.length) return { events: [], retryBlocks: [] };
 
     const deduped = [...new Map(prepared.map((candidate) => [
       `${candidate.txHash}:${candidate.logIndex}`,
       candidate
     ])).values()];
-    const blockTimestampByNumber = new Map(transactionBlocks.map((block) => [
-      rpcInteger(block?.number),
-      rpcInteger(block?.timestamp, unixSeconds(this.now))
-    ]));
     const missingBlockNumbers = [...new Set(deduped
       .map((candidate) => candidate.blockNumber)
       .filter((blockNumber) => !blockTimestampByNumber.has(blockNumber)))];
@@ -808,6 +1192,7 @@ export class RobinhoodWalletMonitor {
     const metadataRows = await this.#getTokenMetadataRows(tokenAddresses, signal);
     const metadataByAddress = new Map(tokenAddresses.map((address, index) => [address, metadataRows[index]]));
     const detected = [];
+    const retryBlocks = new Set();
     for (const candidate of deduped) {
       throwIfAborted(signal);
       if (!this.settings.enabled) continue;
@@ -820,7 +1205,12 @@ export class RobinhoodWalletMonitor {
       const metadata = candidate.assetType === 'native'
         ? { symbol: 'ETH', name: 'Ether', decimals: 18, complete: true }
         : metadataByAddress.get(candidate.tokenAddress);
-      if (!metadata || candidate.eventType === 'token_create' && !metadata.complete) continue;
+      if (!metadata || candidate.requireCompleteMetadata && !metadata.complete) {
+        if (lane === 'deep' && candidate.requireCompleteMetadata && metadata?.timedOut) {
+          retryBlocks.add(candidate.blockNumber);
+        }
+        continue;
+      }
       const result = this.store.insertMonitorEvent({
         ...candidate,
         walletAlias: annotation?.alias || '',
@@ -837,9 +1227,11 @@ export class RobinhoodWalletMonitor {
       const event = publicEvent(result.event);
       detected.push(event);
       this.health.eventsDetected += 1;
+      if (lane === 'deep') this.health.deepEventsDetected += 1;
+      else this.health.fastEventsDetected += 1;
       this.#notifyWalletEvent(event);
     }
-    return detected;
+    return { events: detected, retryBlocks: [...retryBlocks] };
   }
 
   #walletsForRule(wallets, eventType) {
@@ -1039,9 +1431,9 @@ export class RobinhoodWalletMonitor {
     );
   }
 
-  async #getBlocksByNumbers(blockNumbers, { includeTransactions = false, signal } = {}) {
+  async #getBlocksByNumbers(blockNumbers, { includeTransactions = false, batchSize, signal } = {}) {
     if (this.rpcClient.getBlocksByNumbers) {
-      return this.rpcClient.getBlocksByNumbers(blockNumbers, { includeTransactions, signal });
+      return this.rpcClient.getBlocksByNumbers(blockNumbers, { includeTransactions, batchSize, signal });
     }
     const blocks = [];
     for (let index = 0; index < blockNumbers.length; index += 25) {
@@ -1059,11 +1451,34 @@ export class RobinhoodWalletMonitor {
       while (nextIndex < addresses.length) {
         const index = nextIndex;
         nextIndex += 1;
-        rows[index] = await this.#getTokenMetadata(addresses[index], signal);
+        rows[index] = await this.#getTokenMetadataWithinBudget(addresses[index], signal);
       }
     };
     await Promise.all(Array.from({ length: Math.min(8, addresses.length) }, () => worker()));
     return rows;
+  }
+
+  async #getTokenMetadataWithinBudget(address, signal) {
+    let timer = null;
+    const fallback = {
+      address,
+      symbol: fallbackSymbol(address),
+      name: address,
+      decimals: 18,
+      complete: false,
+      timedOut: true,
+      updatedAt: unixSeconds(this.now)
+    };
+    const metadata = this.#getTokenMetadata(address, signal).catch(() => fallback);
+    const timeout = new Promise((resolve) => {
+      timer = this.setTimer(() => resolve(fallback), this.tokenMetadataBudgetMs);
+      timer?.unref?.();
+    });
+    try {
+      return await Promise.race([metadata, timeout]);
+    } finally {
+      if (timer) this.clearTimer(timer);
+    }
   }
 
   #notifyWalletEvent(event) {

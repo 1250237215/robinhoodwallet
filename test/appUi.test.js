@@ -574,6 +574,12 @@ test('real-time monitoring is a first-level page that replaces the research work
     'monitor-wallet-count',
     'monitor-latest-block',
     'monitor-block-lag',
+    'monitor-fast-backlog',
+    'monitor-fast-duration',
+    'monitor-deep-status',
+    'monitor-deep-live-backlog',
+    'monitor-deep-gap',
+    'monitor-deep-duration',
     'monitor-cluster-list',
     'monitor-event-feed'
   ]) {
@@ -583,6 +589,48 @@ test('real-time monitoring is a first-level page that replaces the research work
   assert.match(appJs, /elements\.researchBoard\.hidden = showingMonitor/);
   assert.match(appJs, /elements\.monitorPage\.hidden = !showingMonitor/);
   assert.match(appJs, /if \(state\.activeTab === 'monitor'\)[\s\S]*startMonitorPage/);
+});
+
+test('monitor health exposes compact fast and deep lane diagnostics', () => {
+  const healthGrid = indexHtml.match(/<dl class="monitor-health-grid" aria-label="实时监控状态">[\s\S]*?<\/dl>/)?.[0] || '';
+  assert.equal((healthGrid.match(/<div>/g) || []).length, 6);
+  assert.match(healthGrid, /快线积压[\s\S]*id="monitor-fast-backlog"[\s\S]*id="monitor-fast-duration"/);
+  assert.match(healthGrid, /深扫状态[\s\S]*id="monitor-deep-status"[\s\S]*id="monitor-deep-live-backlog"[\s\S]*id="monitor-deep-gap"[\s\S]*id="monitor-deep-duration"/);
+  assert.doesNotMatch(healthGrid, /<(?:section|article)\b/);
+
+  for (const field of [
+    'fastBacklogBlocks',
+    'fastLastRangeDurationMs',
+    'deepLiveBacklogBlocks',
+    'deepLastRangeDurationMs',
+    'deepGapBlocks'
+  ]) {
+    const snake = field.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+    assert.match(appJs, new RegExp(`health\\.${field}, health\\.${snake}`));
+  }
+  assert.match(appJs, /firstValue\(health, \['deepStatus', 'deep_status'\]/);
+  for (const [status, label] of [
+    ['disabled', '停用'],
+    ['idle', '待命'],
+    ['backfilling', '回补中'],
+    ['caught_up', '已追平'],
+    ['degraded', '降级'],
+    ['error', '异常']
+  ]) {
+    assert.equal(appJs.includes(`${status}: '${label}'`), true, `missing deep status ${status}`);
+  }
+  assert.match(appJs, /function formatMonitorBlockCount\(value\)/);
+  assert.match(appJs, /function formatMonitorRangeDuration\(value\)/);
+  assert.match(appJs, /elements\.monitorFastBacklog\.textContent = formatMonitorBlockCount\(health\.fastBacklogBlocks\)/);
+  assert.match(appJs, /elements\.monitorDeepStatus\.textContent = formatMonitorDeepStatus\(health\.deepStatus\)/);
+  assert.match(appJs, /elements\.monitorDeepLiveBacklog\.textContent = `实时 \$\{formatMonitorBlockCount\(health\.deepLiveBacklogBlocks\)\}`/);
+  assert.match(appJs, /elements\.monitorDeepGap\.textContent = `缺口 \$\{formatMonitorBlockCount\(health\.deepGapBlocks\)\}`/);
+  assert.match(appJs, /elements\.monitorDeepDuration\.textContent = `上轮 \$\{formatMonitorRangeDuration\(health\.deepLastRangeDurationMs\)\}`/);
+
+  assert.match(stylesCss, /\.monitor-health-grid \{[\s\S]*grid-template-columns: repeat\(6, minmax\(0, 1fr\)\)/);
+  assert.match(stylesCss, /@media \(max-width: 960px\)[\s\S]*\.monitor-health-grid \{[\s\S]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
+  assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.monitor-health-grid \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(stylesCss, /\.monitor-health-grid \.monitor-health-details \{[\s\S]*flex-wrap: wrap/);
 });
 
 test('monitor settings persist a bounded threshold and customizable alert window', () => {

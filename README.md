@@ -47,6 +47,11 @@ Configuration is supplied through environment variables. Common settings are:
 | `ROBINHOOD_MONITOR_WALLET_TOPIC_CHUNK_SIZE` | `100` | Wallet topics per log request |
 | `ROBINHOOD_MONITOR_LOG_CONCURRENCY` | `2` | Maximum concurrent wallet-log requests |
 | `ROBINHOOD_MONITOR_RECOVERY_SUCCESSES` | `20` | Healthy polls required to leave protected mode |
+| `ROBINHOOD_MONITOR_DEEP_POLL_INTERVAL_MS` | `500` | Native-transfer/direct-deployment live polling interval |
+| `ROBINHOOD_MONITOR_DEEP_LIVE_BLOCK_SPAN` | `20` | Latest full blocks scanned by each deep live pass |
+| `ROBINHOOD_MONITOR_DEEP_GAP_BLOCK_SPAN` | `20` | Historical full blocks scanned by each low-priority backfill pass |
+| `ROBINHOOD_MONITOR_DEEP_GAP_POLL_INTERVAL_MS` | `5000` | Delay between low-priority deep gap passes |
+| `ROBINHOOD_MONITOR_TOKEN_METADATA_BUDGET_MS` | `1500` | Per-event metadata wait budget before a fallback label is used |
 | `ROBINHOOD_NOXA_LAUNCH_FACTORY` | Official Robinhood Noxa factory | Noxa `TokenLaunched` event source |
 | `ROBINHOOD_REQUEST_TIMEOUT_MS` | `20000` | External request timeout |
 

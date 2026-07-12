@@ -2727,7 +2727,7 @@ select:hover {
 .monitor-health-grid {
   min-width: 0;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   margin: 10px 0 0;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -2780,6 +2780,35 @@ select:hover {
   font-size: 9px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.monitor-health-grid .monitor-health-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 7px;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.monitor-health-details > span {
+  white-space: nowrap;
+}
+
+#monitor-deep-status[data-status="caught_up"] {
+  color: var(--positive);
+}
+
+#monitor-deep-status[data-status="degraded"] {
+  color: var(--warning);
+}
+
+#monitor-deep-status[data-status="error"] {
+  color: var(--negative);
+}
+
+#monitor-deep-status[data-status="disabled"] {
+  color: var(--muted);
 }
 
 .monitor-workspace {
@@ -3334,6 +3363,18 @@ select:hover {
     grid-template-columns: minmax(0, 1fr) auto;
   }
 
+  .monitor-health-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .monitor-health-grid > div:nth-child(3n) {
+    border-right: 0;
+  }
+
+  .monitor-health-grid > div:nth-child(-n + 3) {
+    border-bottom: 1px solid var(--line);
+  }
+
   .monitor-title-block {
     grid-column: 1 / -1;
   }
@@ -3623,11 +3664,15 @@ select:hover {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .monitor-health-grid > div:nth-child(2) {
+  .monitor-health-grid > div:nth-child(3n) {
+    border-right: 1px solid var(--line);
+  }
+
+  .monitor-health-grid > div:nth-child(even) {
     border-right: 0;
   }
 
-  .monitor-health-grid > div:nth-child(-n + 2) {
+  .monitor-health-grid > div:nth-child(-n + 4) {
     border-bottom: 1px solid var(--line);
   }
 

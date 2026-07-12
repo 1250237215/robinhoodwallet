@@ -20,6 +20,15 @@ const MONITOR_EVENT_LABELS = Object.freeze({
   token_create: '创建代币'
 });
 
+const MONITOR_DEEP_STATUS_LABELS = Object.freeze({
+  disabled: '停用',
+  idle: '待命',
+  backfilling: '回补中',
+  caught_up: '已追平',
+  degraded: '降级',
+  error: '异常'
+});
+
 const MONITOR_TIER_LABELS = Object.freeze({
   core: '核心钱包',
   watch: '普通观察钱包',
@@ -143,6 +152,12 @@ const elements = {
   monitorLastBlockTime: document.querySelector('#monitor-last-block-time'),
   monitorBlockLag: document.querySelector('#monitor-block-lag'),
   monitorTransportLabel: document.querySelector('#monitor-transport-label'),
+  monitorFastBacklog: document.querySelector('#monitor-fast-backlog'),
+  monitorFastDuration: document.querySelector('#monitor-fast-duration'),
+  monitorDeepStatus: document.querySelector('#monitor-deep-status'),
+  monitorDeepLiveBacklog: document.querySelector('#monitor-deep-live-backlog'),
+  monitorDeepGap: document.querySelector('#monitor-deep-gap'),
+  monitorDeepDuration: document.querySelector('#monitor-deep-duration'),
   monitorClusterTitle: document.querySelector('#monitor-cluster-title'),
   monitorClusterSummary: document.querySelector('#monitor-cluster-summary'),
   monitorWindowChipLabel: document.querySelector('#monitor-window-chip-label'),
@@ -502,6 +517,35 @@ function formatMonitorWindowDuration(value = state.monitorWindowSeconds) {
   return `${formatInteger(seconds)} 秒`;
 }
 
+function formatMonitorBlockCount(value) {
+  const count = finiteNumber(value);
+  if (count === null) return '--';
+  return `${Math.max(0, Math.floor(count)).toLocaleString('en-US')} 块`;
+}
+
+function formatMonitorRangeDuration(value) {
+  const duration = finiteNumber(value);
+  if (duration === null) return '--';
+  const milliseconds = Math.max(0, duration);
+  if (milliseconds < 1_000) return `${Math.round(milliseconds)} ms`;
+  if (milliseconds < 60_000) {
+    return `${(milliseconds / 1_000).toLocaleString('zh-CN', { maximumFractionDigits: 1 })} 秒`;
+  }
+  if (milliseconds < 3_600_000) {
+    const minutes = Math.floor(milliseconds / 60_000);
+    const seconds = Math.floor((milliseconds % 60_000) / 1_000);
+    return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`;
+  }
+  const hours = Math.floor(milliseconds / 3_600_000);
+  const minutes = Math.floor((milliseconds % 3_600_000) / 60_000);
+  return minutes ? `${hours} 小时 ${minutes} 分` : `${hours} 小时`;
+}
+
+function formatMonitorDeepStatus(value) {
+  const status = String(value || '').trim().toLowerCase();
+  return MONITOR_DEEP_STATUS_LABELS[status] || String(value || '').trim() || '--';
+}
+
 function readStoredMonitorThreshold() {
   try {
     return clampMonitorThreshold(window.localStorage.getItem(MONITOR_THRESHOLD_STORAGE_KEY), 3);
@@ -750,6 +794,12 @@ function monitorHealthValues() {
     ),
     latestBlock,
     lag: explicitLag ?? (chainHead !== null && latestBlock !== null ? Math.max(0, chainHead - latestBlock) : null),
+    fastBacklogBlocks: finiteNumber(health.fastBacklogBlocks, health.fast_backlog_blocks),
+    fastLastRangeDurationMs: finiteNumber(health.fastLastRangeDurationMs, health.fast_last_range_duration_ms),
+    deepLiveBacklogBlocks: finiteNumber(health.deepLiveBacklogBlocks, health.deep_live_backlog_blocks),
+    deepLastRangeDurationMs: finiteNumber(health.deepLastRangeDurationMs, health.deep_last_range_duration_ms),
+    deepGapBlocks: finiteNumber(health.deepGapBlocks, health.deep_gap_blocks),
+    deepStatus: String(firstValue(health, ['deepStatus', 'deep_status'], '') || '').trim(),
     lastBlockAt: firstValue(health, ['lastBlockAt', 'last_block_at', 'updatedAt', 'updated_at', 'lastPollAt'], null),
     error: String(firstValue(health, ['error', 'lastError', 'message'], '') || '')
   };
@@ -874,6 +924,13 @@ function renderMonitorHealth() {
     : state.monitorTransport === 'polling'
       ? '每 2 秒轮询'
       : '正在建立连接';
+  elements.monitorFastBacklog.textContent = formatMonitorBlockCount(health.fastBacklogBlocks);
+  elements.monitorFastDuration.textContent = `上轮 ${formatMonitorRangeDuration(health.fastLastRangeDurationMs)}`;
+  elements.monitorDeepStatus.dataset.status = health.deepStatus.toLowerCase() || 'unknown';
+  elements.monitorDeepStatus.textContent = formatMonitorDeepStatus(health.deepStatus);
+  elements.monitorDeepLiveBacklog.textContent = `实时 ${formatMonitorBlockCount(health.deepLiveBacklogBlocks)}`;
+  elements.monitorDeepGap.textContent = `缺口 ${formatMonitorBlockCount(health.deepGapBlocks)}`;
+  elements.monitorDeepDuration.textContent = `上轮 ${formatMonitorRangeDuration(health.deepLastRangeDurationMs)}`;
 }
 
 function renderMonitorClusters() {

@@ -49,6 +49,12 @@ test('uses verified Robinhood mainnet addresses and bounded scan settings', () =
   assert.equal(config.monitorWalletTopicChunkSize, 100);
   assert.equal(config.monitorLogConcurrency, 2);
   assert.equal(config.monitorRecoverySuccesses, 20);
+  assert.equal(config.monitorDeepPollIntervalMs, 500);
+  assert.equal(config.monitorDeepDegradedPollIntervalMs, 1_500);
+  assert.equal(config.monitorDeepLiveBlockSpan, 20);
+  assert.equal(config.monitorDeepGapBlockSpan, 20);
+  assert.equal(config.monitorDeepGapPollIntervalMs, 5_000);
+  assert.equal(config.monitorTokenMetadataBudgetMs, 1_500);
   assert.equal(config.noxaLaunchFactory, ROBINHOOD_CHAIN.noxaLaunchFactory);
 });
 

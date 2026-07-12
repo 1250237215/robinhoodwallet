@@ -118,6 +118,27 @@ export function createRobinhoodConfig(env = process.env) {
     monitorWalletTopicChunkSize: boundedNumber(env.ROBINHOOD_MONITOR_WALLET_TOPIC_CHUNK_SIZE, 100, 1, 100),
     monitorLogConcurrency: Math.floor(boundedNumber(env.ROBINHOOD_MONITOR_LOG_CONCURRENCY, 2, 1, 2)),
     monitorRecoverySuccesses: Math.floor(boundedNumber(env.ROBINHOOD_MONITOR_RECOVERY_SUCCESSES, 20, 1, 1_000)),
+    monitorDeepPollIntervalMs: boundedNumber(env.ROBINHOOD_MONITOR_DEEP_POLL_INTERVAL_MS, 500, 250, 60_000),
+    monitorDeepDegradedPollIntervalMs: boundedNumber(
+      env.ROBINHOOD_MONITOR_DEEP_DEGRADED_POLL_INTERVAL_MS,
+      1_500,
+      250,
+      60_000
+    ),
+    monitorDeepLiveBlockSpan: Math.floor(boundedNumber(env.ROBINHOOD_MONITOR_DEEP_LIVE_BLOCK_SPAN, 20, 1, 100)),
+    monitorDeepGapBlockSpan: Math.floor(boundedNumber(env.ROBINHOOD_MONITOR_DEEP_GAP_BLOCK_SPAN, 20, 1, 100)),
+    monitorDeepGapPollIntervalMs: boundedNumber(
+      env.ROBINHOOD_MONITOR_DEEP_GAP_POLL_INTERVAL_MS,
+      5_000,
+      1_000,
+      60_000
+    ),
+    monitorTokenMetadataBudgetMs: boundedNumber(
+      env.ROBINHOOD_MONITOR_TOKEN_METADATA_BUDGET_MS,
+      1_500,
+      250,
+      4_000
+    ),
     noxaLaunchFactory: normalizeAddress(env.ROBINHOOD_NOXA_LAUNCH_FACTORY || ROBINHOOD_CHAIN.noxaLaunchFactory)
   };
 }

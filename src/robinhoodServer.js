@@ -677,6 +677,12 @@ export async function startRobinhoodStandaloneServer(env = process.env, { monito
     walletTopicChunkSize: config.monitorWalletTopicChunkSize,
     walletLogConcurrency: config.monitorLogConcurrency,
     recoverySuccesses: config.monitorRecoverySuccesses,
+    deepPollIntervalMs: config.monitorDeepPollIntervalMs,
+    deepDegradedPollIntervalMs: config.monitorDeepDegradedPollIntervalMs,
+    deepLiveBlockSpan: config.monitorDeepLiveBlockSpan,
+    deepGapBlockSpan: config.monitorDeepGapBlockSpan,
+    deepGapPollIntervalMs: config.monitorDeepGapPollIntervalMs,
+    tokenMetadataBudgetMs: config.monitorTokenMetadataBudgetMs,
     noxaLaunchFactory: config.noxaLaunchFactory,
     barkNotifier
   });
