@@ -51,6 +51,13 @@ Configuration is supplied through environment variables. Common settings are:
 
 See `src/robinhood/config.js` for all bounded settings and defaults.
 
+## Public database snapshot
+
+The `database/` directory contains a compressed production snapshot for public
+recovery and analysis. Bark targets and Bark settings were securely removed
+before publication. See `database/README.md` and `database/manifest.json` for
+the exact redactions, hashes, table counts, and restore precautions.
+
 ## Monitoring model
 
 The monitor scans incoming ERC-20 `Transfer` logs for confirmed wallets, then

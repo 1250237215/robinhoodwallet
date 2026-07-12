@@ -1,0 +1,33 @@
+{
+  "snapshot_created_at": "2026-07-12T11:56:00Z",
+  "source": "transactionally consistent production SQLite snapshot",
+  "archive": "robinhood-public.sqlite.gz",
+  "compression": "gzip -9",
+  "compressed_bytes": 4616349,
+  "compressed_sha256": "ef2f0041277dae77db100721cb928e43b38c6856f58f0a2ec27723ca85d2a9e7",
+  "uncompressed_bytes": 27099136,
+  "uncompressed_sha256": "26a9a45a62c683977b4066da284b4b1e6c2a1bfbfcd3dc1876f7fd5e60fa8a28",
+  "sqlite_quick_check": "ok",
+  "sqlite_freelist_pages": 0,
+  "redactions": {
+    "monitor_bark_targets_rows_removed": 1,
+    "bark_metadata_rows_removed": 2,
+    "bark_targets_remaining": 0,
+    "bark_metadata_rows_remaining": 0,
+    "exact_bark_endpoint_bytes_present": false,
+    "api_day_bytes_present": false,
+    "bark_metadata_bytes_present": false
+  },
+  "table_rows": {
+    "actions": 7790,
+    "jobs": 29,
+    "metadata": 9,
+    "monitor_bark_targets": 0,
+    "monitor_events": 7854,
+    "monitor_token_alerts": 59,
+    "monitor_token_metadata": 1128,
+    "tokens": 58,
+    "wallet_annotations": 333,
+    "wallet_summaries": 1149
+  }
+}
