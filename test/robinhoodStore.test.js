@@ -7,6 +7,13 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { createRobinhoodStore } from '../src/robinhood/store.js';
 
+const safeMonitorRules = {
+  buy: { enabled: true, sound: false, bark: false },
+  sell: { enabled: false, sound: false, bark: false },
+  transfer: { enabled: false, sound: false, bark: false },
+  token_create: { enabled: false, sound: false, bark: false }
+};
+
 test('persists tokens, actions, wallet summaries and metadata idempotently', () => {
   const store = createRobinhoodStore(':memory:');
   store.upsertToken({
@@ -52,6 +59,10 @@ test('persists wallet curation independently and deletes annotations idempotentl
     status: 'watch',
     classificationOverride: 'realized',
     monitorTier: 'high_frequency',
+    monitorRules: {
+      buy: { sound: true },
+      sell: { enabled: true, bark: true }
+    },
     createdAt: 100,
     updatedAt: 101
   });
@@ -70,6 +81,11 @@ test('persists wallet curation independently and deletes annotations idempotentl
   assert.equal(annotation.status, 'watch');
   assert.equal(annotation.classificationOverride, 'realized');
   assert.equal(annotation.monitorTier, 'high_frequency');
+  assert.deepEqual(annotation.monitorRules, {
+    ...safeMonitorRules,
+    buy: { enabled: true, sound: true, bark: false },
+    sell: { enabled: true, sound: false, bark: true }
+  });
   assert.equal(annotation.createdAt, 100);
   assert.equal(annotation.updatedAt, 102);
   assert.equal(store.listWalletAnnotations().length, 1);
@@ -115,17 +131,114 @@ test('migrates legacy wallet annotations with a persistent watch tier', (t) => {
     store.db.prepare('PRAGMA table_info(wallet_annotations)').all().some((column) => column.name === 'monitor_tier'),
     true
   );
+  assert.equal(
+    store.db.prepare('PRAGMA table_info(wallet_annotations)').all().some((column) => column.name === 'monitor_rules'),
+    true
+  );
   assert.equal(store.getWalletAnnotation(address).monitorTier, 'watch');
   assert.equal(store.getWalletAnnotation(unprofiledAddress).monitorTier, 'watch');
+  assert.deepEqual(store.getWalletAnnotation(address).monitorRules, safeMonitorRules);
   store.upsertWalletAnnotation({ address, monitorTier: 'high_frequency', updatedAt: 101 });
+  store.db.prepare('UPDATE wallet_annotations SET monitor_rules = ? WHERE address = ?').run('{bad', address);
   store.close();
 
   store = createRobinhoodStore(filename);
   assert.equal(store.getWalletAnnotation(address).monitorTier, 'high_frequency');
+  assert.deepEqual(store.getWalletAnnotation(address).monitorRules, safeMonitorRules);
   assert.throws(
     () => store.upsertWalletAnnotation({ address, monitorTier: 'vip', updatedAt: 102 }),
     /Unsupported wallet monitor tier/
   );
+  store.close();
+});
+
+test('migrates legacy monitor events to buy/token and persists generic event fields', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-monitor-event-migration-'));
+  const filename = path.join(directory, 'radar.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const wallet = '0x0000000000000000000000000000000000000002';
+  const token = '0x0000000000000000000000000000000000000003';
+  const counterparty = '0x0000000000000000000000000000000000000004';
+
+  const legacy = new DatabaseSync(filename);
+  legacy.exec(`
+    CREATE TABLE monitor_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      wallet_address TEXT NOT NULL,
+      wallet_alias TEXT NOT NULL DEFAULT '',
+      token_address TEXT NOT NULL,
+      token_symbol TEXT NOT NULL,
+      token_name TEXT NOT NULL,
+      token_amount TEXT NOT NULL,
+      raw_token_amount TEXT NOT NULL,
+      token_decimals INTEGER NOT NULL,
+      tx_hash TEXT NOT NULL,
+      log_index INTEGER NOT NULL,
+      block_number INTEGER NOT NULL,
+      block_timestamp INTEGER NOT NULL,
+      detected_at INTEGER NOT NULL,
+      UNIQUE(tx_hash, log_index)
+    )
+  `);
+  legacy.prepare(`
+    INSERT INTO monitor_events(
+      wallet_address, wallet_alias, token_address, token_symbol, token_name,
+      token_amount, raw_token_amount, token_decimals, tx_hash, log_index,
+      block_number, block_timestamp, detected_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(wallet, 'Legacy', token, 'OLD', 'Old token', '1', '1', 18, '0xaaa', 1, 10, 100, 101);
+  legacy.close();
+
+  const store = createRobinhoodStore(filename);
+  const [oldEvent] = store.listMonitorEvents();
+  assert.equal(oldEvent.eventType, 'buy');
+  assert.equal(oldEvent.assetType, 'token');
+  assert.equal(oldEvent.counterpartyAddress, '');
+  assert.equal(oldEvent.platform, '');
+  assert.equal(oldEvent.soundAlert, false);
+  assert.equal(oldEvent.barkAlert, false);
+
+  const inserted = store.insertMonitorEvent({
+    eventType: 'sell',
+    assetType: 'erc20',
+    walletAddress: wallet,
+    walletAlias: 'Desk',
+    counterpartyAddress: counterparty.toUpperCase().replace('0X', '0x'),
+    platform: 'RobinSwap',
+    tokenAddress: token,
+    tokenSymbol: 'NEW',
+    tokenName: 'New token',
+    tokenAmount: '2',
+    rawTokenAmount: '2',
+    tokenDecimals: 18,
+    txHash: '0xbbb',
+    logIndex: 2,
+    blockNumber: 11,
+    blockTimestamp: 102,
+    detectedAt: 103,
+    soundAlert: true,
+    barkAlert: true
+  });
+  assert.equal(inserted.inserted, true);
+  assert.deepEqual(
+    {
+      eventType: inserted.event.eventType,
+      assetType: inserted.event.assetType,
+      counterpartyAddress: inserted.event.counterpartyAddress,
+      platform: inserted.event.platform,
+      soundAlert: inserted.event.soundAlert,
+      barkAlert: inserted.event.barkAlert
+    },
+    {
+      eventType: 'sell',
+      assetType: 'erc20',
+      counterpartyAddress: counterparty,
+      platform: 'RobinSwap',
+      soundAlert: true,
+      barkAlert: true
+    }
+  );
+  assert.throws(() => store.insertMonitorEvent({ eventType: 'mint' }), /Unsupported monitor event type/);
   store.close();
 });
 

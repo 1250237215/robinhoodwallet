@@ -288,6 +288,7 @@ test('split overview, wallet, winner and job endpoints avoid dashboard fallback 
 test('combined server exposes filtered wallet curation PATCH and DELETE routes', async () => {
   let receivedFilters;
   let receivedPatch;
+  let receivedBatchLines;
   let deletedAddress;
   const service = {
     getDashboard(filters) {
@@ -308,6 +309,19 @@ test('combined server exposes filtered wallet curation PATCH and DELETE routes',
     updateWallet(address, patch) {
       receivedPatch = { address, patch };
       return { ok: true, wallet: { address, ...patch }, tokens: [] };
+    },
+    batchUpdateWallets(lines) {
+      receivedBatchLines = lines;
+      return {
+        ok: true,
+        total: 2,
+        created: 1,
+        restored: 0,
+        updated: 0,
+        duplicate: 0,
+        invalid: 1,
+        results: []
+      };
     },
     deleteWallet(address) {
       deletedAddress = address;
@@ -348,6 +362,14 @@ test('combined server exposes filtered wallet curation PATCH and DELETE routes',
     assert.equal(invalidTier.status, 400);
     assert.equal((await invalidTier.json()).code, 'INVALID_WALLET_UPDATE');
 
+    const invalidRules = await fetch(`${baseUrl}/api/robinhood/wallets/${wallet}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ monitorRules: { buy: { sound: 'yes' } } })
+    });
+    assert.equal(invalidRules.status, 400);
+    assert.equal((await invalidRules.json()).code, 'INVALID_WALLET_UPDATE');
+
     const patch = await fetch(`${baseUrl}/api/robinhood/wallets/${wallet}`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
@@ -355,7 +377,8 @@ test('combined server exposes filtered wallet curation PATCH and DELETE routes',
         alias: 'Desk alpha',
         status: 'watch',
         classificationOverride: 'realized',
-        monitorTier: 'high_frequency'
+        monitorTier: 'high_frequency',
+        monitorRules: { buy: { sound: true }, token_create: { enabled: true, bark: false } }
       })
     });
     assert.equal(patch.status, 200);
@@ -365,9 +388,28 @@ test('combined server exposes filtered wallet curation PATCH and DELETE routes',
         alias: 'Desk alpha',
         status: 'watch',
         classificationOverride: 'realized',
-        monitorTier: 'high_frequency'
+        monitorTier: 'high_frequency',
+        monitorRules: { buy: { sound: true }, token_create: { enabled: true, bark: false } }
       }
     });
+
+    const batchLines = `${wallet},Desk alpha\nnot-a-wallet`;
+    const batch = await fetch(`${baseUrl}/api/robinhood/wallets/batch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ lines: batchLines })
+    });
+    assert.equal(batch.status, 200);
+    assert.equal((await batch.json()).created, 1);
+    assert.equal(receivedBatchLines, batchLines);
+
+    const invalidBatch = await fetch(`${baseUrl}/api/robinhood/wallets/batch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ lines: new Array(501).fill(wallet) })
+    });
+    assert.equal(invalidBatch.status, 400);
+    assert.equal((await invalidBatch.json()).code, 'INVALID_WALLET_BATCH');
 
     const deletion = await fetch(`${baseUrl}/api/robinhood/wallets/${wallet}`, { method: 'DELETE' });
     assert.equal(deletion.status, 200);

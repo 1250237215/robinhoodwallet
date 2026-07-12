@@ -11,6 +11,14 @@ const REVIEW_SCAN_BATCH_GAP_MS = 5 * 60 * 1000;
 const MONITOR_POLL_INTERVAL_MS = 2_000;
 const MONITOR_THRESHOLD_STORAGE_KEY = 'robinhood-monitor-threshold';
 const MONITOR_SOUNDS = new Set(['alarm', 'bell', 'electronic', 'glass']);
+const MONITOR_EVENT_TYPES = Object.freeze(['buy', 'sell', 'transfer', 'token_create']);
+
+const MONITOR_EVENT_LABELS = Object.freeze({
+  buy: '买入',
+  sell: '卖出',
+  transfer: '转账',
+  token_create: '创建代币'
+});
 
 const MONITOR_TIER_LABELS = Object.freeze({
   core: '核心钱包',
@@ -81,8 +89,8 @@ const elements = {
   libraryFilterClear: document.querySelector('#library-filter-clear'),
   debotExportButton: document.querySelector('#debot-export-button'),
   manualWalletForm: document.querySelector('#manual-wallet-form'),
-  manualWalletAddress: document.querySelector('#manual-wallet-address'),
-  manualWalletNote: document.querySelector('#manual-wallet-note'),
+  manualWalletLines: document.querySelector('#manual-wallet-lines'),
+  manualWalletFeedback: document.querySelector('#manual-wallet-feedback'),
   manualWalletAddButton: document.querySelector('#manual-wallet-add-button'),
   resultsTitle: document.querySelector('#results-title'),
   resultsSummary: document.querySelector('#results-summary'),
@@ -107,6 +115,7 @@ const elements = {
   walletEditorStatus: document.querySelector('#wallet-editor-status'),
   walletEditorMonitorTier: document.querySelector('#wallet-editor-monitor-tier'),
   walletEditorClassification: document.querySelector('#wallet-editor-classification'),
+  walletMonitorRules: document.querySelector('#wallet-monitor-rules'),
   walletEditorNote: document.querySelector('#wallet-editor-note'),
   researchBoard: document.querySelector('#research-board'),
   monitorPage: document.querySelector('#monitor-page'),
@@ -263,6 +272,53 @@ function shortAddress(value) {
   const address = String(value || '');
   if (address.length < 14) return address || '--';
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
+}
+
+function normalizeMonitorRules(source) {
+  const record = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+  return Object.fromEntries(MONITOR_EVENT_TYPES.map((eventType) => {
+    const candidate = record[eventType] && typeof record[eventType] === 'object' ? record[eventType] : {};
+    const sound = candidate.sound === true;
+    const bark = candidate.bark === true;
+    const defaultEnabled = eventType === 'buy';
+    const enabled = (typeof candidate.enabled === 'boolean' ? candidate.enabled : defaultEnabled) || sound || bark;
+    return [eventType, { enabled, sound, bark }];
+  }));
+}
+
+function renderWalletMonitorRules(rules) {
+  const normalized = normalizeMonitorRules(rules);
+  for (const eventType of MONITOR_EVENT_TYPES) {
+    const row = elements.walletMonitorRules.querySelector(`[data-monitor-rule="${eventType}"]`);
+    if (!row) continue;
+    for (const field of ['enabled', 'sound', 'bark']) {
+      const checkbox = row.querySelector(`[data-rule-field="${field}"]`);
+      if (checkbox) checkbox.checked = normalized[eventType][field];
+    }
+  }
+}
+
+function readWalletMonitorRules() {
+  const rules = {};
+  for (const eventType of MONITOR_EVENT_TYPES) {
+    const row = elements.walletMonitorRules.querySelector(`[data-monitor-rule="${eventType}"]`);
+    const sound = row?.querySelector('[data-rule-field="sound"]')?.checked === true;
+    const bark = row?.querySelector('[data-rule-field="bark"]')?.checked === true;
+    const enabled = row?.querySelector('[data-rule-field="enabled"]')?.checked === true || sound || bark;
+    rules[eventType] = { enabled, sound, bark };
+  }
+  renderWalletMonitorRules(rules);
+  return rules;
+}
+
+function enforceWalletMonitorRuleDependency(event) {
+  const checkbox = event.target.closest('input[type="checkbox"][data-rule-field]');
+  const row = checkbox?.closest('[data-monitor-rule]');
+  if (!checkbox || !row) return;
+  const enabled = row.querySelector('[data-rule-field="enabled"]');
+  const sound = row.querySelector('[data-rule-field="sound"]');
+  const bark = row.querySelector('[data-rule-field="bark"]');
+  if ((sound.checked || bark.checked) && !enabled.checked) enabled.checked = true;
 }
 
 function formatNumber(value, fallback = '--') {
@@ -490,14 +546,28 @@ function normalizeTransactionHash(value) {
 function normalizeMonitorEvent(raw) {
   const source = raw && typeof raw === 'object' ? raw : {};
   const id = firstValue(source, ['id', 'eventId', 'event_id', 'sequence'], '');
+  const candidateType = String(firstValue(source, ['eventType', 'event_type', 'type'], 'buy')).toLowerCase();
+  const eventType = MONITOR_EVENT_TYPES.includes(candidateType) ? candidateType : 'buy';
   return {
     ...source,
     id: String(id ?? ''),
+    eventType,
+    assetType: String(firstValue(source, ['assetType', 'asset_type'], 'token') || 'token').toLowerCase(),
     walletAddress: normalizeAddress(firstValue(source, ['walletAddress', 'wallet_address', 'wallet', 'address'])),
     walletAlias: String(firstValue(source, ['walletAlias', 'wallet_alias', 'alias', 'walletName'], '') || ''),
     tokenAddress: normalizeAddress(firstValue(source, ['tokenAddress', 'token_address', 'token', 'contractAddress'])),
     tokenSymbol: String(firstValue(source, ['tokenSymbol', 'token_symbol', 'symbol', 'ticker'], 'TOKEN') || 'TOKEN'),
     tokenName: String(firstValue(source, ['tokenName', 'token_name', 'name'], '') || ''),
+    recipient: normalizeAddress(firstValue(source, [
+      'recipient',
+      'recipientAddress',
+      'recipient_address',
+      'counterpartyAddress',
+      'counterparty_address',
+      'to'
+    ])),
+    platform: String(firstValue(source, ['platform', 'protocol', 'dex', 'source'], '') || ''),
+    soundAlert: source.soundAlert === true || source.sound_alert === true,
     amount: firstValue(source, ['amount', 'tokenAmount', 'token_amount', 'amountIn', 'amount_in', 'spendAmount', 'value'], null),
     amountUsd: finiteNumber(source.amountUsd, source.amount_usd, source.spendUsd, source.valueUsd),
     amountSymbol: String(firstValue(source, ['amountSymbol', 'amount_symbol', 'spendSymbol', 'currency'], source.tokenAmount ? firstValue(source, ['tokenSymbol', 'token_symbol'], '') : '') || ''),
@@ -516,7 +586,7 @@ function monitorEventTimestamp(event) {
 
 function monitorEventKey(event) {
   if (event.id) return `id:${event.id}`;
-  return [event.txHash, event.walletAddress, event.tokenAddress, monitorEventTimestamp(event), event.blockNumber]
+  return [event.eventType, event.txHash, event.walletAddress, event.tokenAddress, event.recipient, monitorEventTimestamp(event), event.blockNumber]
     .map((value) => String(value || ''))
     .join(':');
 }
@@ -543,7 +613,7 @@ function mergeMonitorEvents(rawEvents) {
   const added = [];
   for (const rawEvent of Array.isArray(rawEvents) ? rawEvents : []) {
     const event = normalizeMonitorEvent(rawEvent);
-    if (!event.walletAddress || !event.tokenAddress) continue;
+    if (!event.walletAddress) continue;
     const key = monitorEventKey(event);
     if (state.monitorEventKeys.has(key)) continue;
     state.monitorEventKeys.add(key);
@@ -561,6 +631,7 @@ function computedMonitorClusters(now = Date.now()) {
   const windowMs = Math.max(1, state.monitorWindowSeconds) * 1000;
   const groups = new Map();
   for (const event of state.monitorEvents) {
+    if (event.eventType !== 'buy') continue;
     const timestamp = monitorEventTimestamp(event);
     if (!timestamp || timestamp < now - windowMs || timestamp > now + 30_000) continue;
     const key = monitorTokenKey(event);
@@ -632,6 +703,7 @@ function currentMonitorClusters() {
 }
 
 function formatMonitorAmount(event) {
+  if (event.eventType === 'token_create') return event.platform === 'noxa' ? 'Noxa 发币' : '直接部署';
   if (event.amountUsd !== null) return formatMoney(event.amountUsd);
   const amount = finiteNumber(event.amount);
   if (amount !== null) {
@@ -644,6 +716,12 @@ function formatMonitorAmount(event) {
   }
   const raw = String(event.amount ?? '').trim();
   return raw || '金额待解析';
+}
+
+function monitorPlatformLabel(value) {
+  if (value === 'noxa') return 'Noxa';
+  if (value === 'direct') return '直接部署';
+  return String(value || '');
 }
 
 function monitorHealthValues() {
@@ -785,7 +863,7 @@ function renderMonitorHealth() {
     ? health.error ? '需要检查' : waitingForWallets ? '等待地址' : '运行中'
     : '已暂停';
   elements.monitorHealthDetail.textContent = health.error || (state.monitorEnabled
-    ? waitingForWallets ? '确认地址入库后自动开始' : '任意金额买入均记录'
+    ? waitingForWallets ? '确认地址入库后自动开始' : '按钱包规则记录链上事件'
     : '保存设置可重新开启');
   elements.monitorWalletCount.textContent = formatInteger(health.walletCount);
   elements.monitorLatestBlock.textContent = health.latestBlock === null ? '--' : `#${formatInteger(health.latestBlock)}`;
@@ -858,8 +936,8 @@ function renderMonitorEvents() {
     elements.monitorEventFeed.innerHTML = `
       <div class="monitor-empty-state">
         <i data-lucide="radio-tower" aria-hidden="true"></i>
-        <strong>等待已确认地址买入</strong>
-        <span>任意金额的买入都会显示在这里。</span>
+        <strong>等待钱包动态</strong>
+        <span>符合钱包规则的新事件会显示在这里。</span>
       </div>
     `;
     refreshIcons(elements.monitorEventFeed);
@@ -867,26 +945,40 @@ function renderMonitorEvents() {
   }
   elements.monitorEventFeed.innerHTML = events.map((event) => {
     const walletLabel = event.walletAlias || shortAddress(event.walletAddress);
-    const symbol = event.tokenSymbol || 'TOKEN';
+    const eventType = MONITOR_EVENT_TYPES.includes(event.eventType) ? event.eventType : 'buy';
+    const symbol = event.tokenSymbol || (event.assetType === 'native' ? 'ETH' : 'TOKEN');
     const eventTime = event.blockTimestamp || event.detectedAt;
     const walletUrl = safeHttpUrl(event.debotAddressUrl) || `${DEBOT_ADDRESS_ROOT}/${event.walletAddress}`;
-    const tokenUrl = safeHttpUrl(event.debotTokenUrl) || `${DEBOT_TOKEN_ROOT}${event.tokenAddress}`;
+    const tokenUrl = event.tokenAddress
+      ? safeHttpUrl(event.debotTokenUrl) || `${DEBOT_TOKEN_ROOT}${event.tokenAddress}`
+      : '';
     const transactionUrl = safeHttpUrl(event.explorerTxUrl) || (event.txHash ? `${EXPLORER_ROOT}/tx/${event.txHash}` : '');
+    const recipientLabel = event.recipient ? shortAddress(event.recipient) : '';
+    const target = tokenUrl
+      ? `<a href="${escapeHtml(tokenUrl)}" target="_blank" rel="noopener noreferrer" title="在 DeBot 查看代币">${escapeHtml(symbol)}</a>`
+      : event.recipient
+        ? `<strong class="monitor-event-recipient-target" title="${escapeHtml(event.recipient)}">${escapeHtml(recipientLabel)}</strong>`
+        : `<strong class="monitor-event-recipient-target">${escapeHtml(symbol)}</strong>`;
     return `
-      <article class="monitor-event-item" data-event-id="${escapeHtml(event.id)}">
+      <article class="monitor-event-item" data-event-id="${escapeHtml(event.id)}" data-event-type="${eventType}">
         <time datetime="${escapeHtml(String(eventTime || ''))}">${escapeHtml(formatMonitorAge(eventTime))}</time>
         <div class="monitor-event-main">
           <div class="monitor-event-title">
+            <span class="monitor-event-type ${eventType}">${MONITOR_EVENT_LABELS[eventType]}</span>
             <a href="${escapeHtml(walletUrl)}" target="_blank" rel="noopener noreferrer" title="在 DeBot 查看地址">${escapeHtml(walletLabel)}</a>
             <i data-lucide="arrow-right" aria-hidden="true"></i>
-            <a href="${escapeHtml(tokenUrl)}" target="_blank" rel="noopener noreferrer" title="在 DeBot 查看代币">${escapeHtml(symbol)}</a>
+            ${target}
           </div>
-          <span>${escapeHtml(event.tokenName || shortAddress(event.tokenAddress))}</span>
+          <div class="monitor-event-meta">
+            <span>${escapeHtml(event.tokenName || (event.tokenAddress ? shortAddress(event.tokenAddress) : symbol))}</span>
+            ${event.recipient ? `<span title="${escapeHtml(event.recipient)}">接收方 ${escapeHtml(recipientLabel)}</span>` : ''}
+            ${event.platform ? `<span title="${escapeHtml(event.platform)}">平台 ${escapeHtml(monitorPlatformLabel(event.platform))}</span>` : ''}
+          </div>
         </div>
         <strong class="monitor-event-amount">${escapeHtml(formatMonitorAmount(event))}</strong>
         <div class="monitor-event-links">
           <a class="inline-icon-button" href="${escapeHtml(walletUrl)}" target="_blank" rel="noopener noreferrer" title="DeBot 地址" aria-label="在 DeBot 查看地址"><i data-lucide="wallet" aria-hidden="true"></i></a>
-          <a class="inline-icon-button" href="${escapeHtml(tokenUrl)}" target="_blank" rel="noopener noreferrer" title="DeBot 代币" aria-label="在 DeBot 查看代币"><i data-lucide="coins" aria-hidden="true"></i></a>
+          ${tokenUrl ? `<a class="inline-icon-button" href="${escapeHtml(tokenUrl)}" target="_blank" rel="noopener noreferrer" title="DeBot 代币" aria-label="在 DeBot 查看代币"><i data-lucide="coins" aria-hidden="true"></i></a>` : ''}
           ${transactionUrl ? `<a class="inline-icon-button" href="${escapeHtml(transactionUrl)}" target="_blank" rel="noopener noreferrer" title="Blockscout 交易" aria-label="在 Blockscout 查看交易"><i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a>` : ''}
         </div>
       </article>
@@ -950,6 +1042,7 @@ function applyMonitorPayload(payload, { initial = false } = {}) {
   const events = getCollection(record, ['events', 'buys', 'items']) || [];
   const added = mergeMonitorEvents(events);
   state.monitorConnected = record.ok !== false;
+  if (!initial) playMonitorEventSounds(added);
   synchronizeMonitorAlerts({ playNew: !initial && added.length > 0 });
   for (const tokenAddress of alertedTokenAddresses) {
     const normalized = normalizeAddress(tokenAddress);
@@ -972,6 +1065,16 @@ function synchronizeMonitorAlerts({ playNew = false } = {}) {
       }
     }
   }
+}
+
+function playMonitorEventSounds(events) {
+  if (!state.monitorSoundEnabled) return;
+  if (!events.some((event) => event.soundAlert === true)) return;
+  void playMonitorAlertSound().catch((error) => {
+    state.monitorSoundEnabled = false;
+    renderMonitorSoundStatus();
+    showToast(`声音提醒播放失败：${error.message}`, 'error');
+  });
 }
 
 async function playMonitorAlertSound() {
@@ -1163,10 +1266,11 @@ function parseMonitorStreamPayload(event) {
 
 function applyMonitorStreamEvent(event) {
   const payload = parseMonitorStreamPayload(event);
-  const rawEvent = payload.event || payload.buy || payload;
+  const rawEvent = payload.event || payload.buy || payload.sell || payload.transfer || payload.token_create || payload;
   const added = mergeMonitorEvents([rawEvent]);
   state.monitorConnected = true;
   state.monitorTransport = 'sse';
+  playMonitorEventSounds(added);
   synchronizeMonitorAlerts({ playNew: added.length > 0 });
   renderMonitorPage();
 }
@@ -1242,6 +1346,9 @@ function connectMonitorStream() {
   });
   source.addEventListener('event', applyMonitorStreamEvent);
   source.addEventListener('buy', applyMonitorStreamEvent);
+  source.addEventListener('sell', applyMonitorStreamEvent);
+  source.addEventListener('transfer', applyMonitorStreamEvent);
+  source.addEventListener('token_create', applyMonitorStreamEvent);
   source.addEventListener('health', (event) => {
     const payload = parseMonitorStreamPayload(event);
     state.monitorHealth = { ...state.monitorHealth, ...(payload.health || payload) };
@@ -1251,7 +1358,7 @@ function connectMonitorStream() {
   source.addEventListener('bark', () => void refreshBarkTargets());
   source.addEventListener('message', (event) => {
     const payload = parseMonitorStreamPayload(event);
-    if (payload.event || payload.buy || payload.walletAddress) applyMonitorStreamEvent(event);
+    if (payload.event || payload.buy || payload.sell || payload.transfer || payload.token_create || payload.walletAddress) applyMonitorStreamEvent(event);
     else applyMonitorPayload(payload);
   });
   source.addEventListener('error', () => {
@@ -3386,41 +3493,82 @@ async function excludeCandidate(address) {
   }
 }
 
-async function addManualWallet(event) {
+function walletBatchCount(record, key) {
+  const count = finiteNumber(record?.[key], record?.counts?.[key], record?.summary?.[key]);
+  return Math.max(0, Math.floor(count ?? 0));
+}
+
+function walletBatchInvalidRows(record) {
+  for (const candidate of [record?.invalidLines, record?.invalid_lines, record?.errors, record?.invalid]) {
+    if (Array.isArray(candidate)) return candidate;
+  }
+  return Array.isArray(record?.results)
+    ? record.results.filter((item) => String(firstValue(item, ['result', 'status', 'outcome'], '')).toLowerCase() === 'invalid')
+    : [];
+}
+
+function renderWalletBatchFeedback(record) {
+  const counts = Object.fromEntries(
+    ['created', 'restored', 'updated', 'duplicate', 'invalid'].map((key) => [key, walletBatchCount(record, key)])
+  );
+  const invalidRows = walletBatchInvalidRows(record);
+  const labels = {
+    created: '新增',
+    restored: '恢复',
+    updated: '更新',
+    duplicate: '重复',
+    invalid: '无效'
+  };
+  const details = invalidRows.map((item, index) => {
+    if (typeof item === 'string') return `<li>${escapeHtml(item)}</li>`;
+    const line = finiteNumber(item?.line, item?.lineNumber, item?.line_number) ?? index + 1;
+    const value = String(firstValue(item, ['value', 'input', 'text', 'raw', 'address'], '') || '');
+    const reason = String(firstValue(item, ['reason', 'message', 'error'], '地址格式无效') || '地址格式无效');
+    return `<li><strong>第 ${formatInteger(line)} 行</strong>${value ? `<code>${escapeHtml(value)}</code>` : ''}<span>${escapeHtml(reason)}</span></li>`;
+  }).join('');
+  elements.manualWalletFeedback.dataset.tone = counts.invalid > 0 ? 'warning' : 'success';
+  elements.manualWalletFeedback.hidden = false;
+  elements.manualWalletFeedback.innerHTML = `
+    <div class="manual-wallet-summary">
+      ${Object.entries(labels).map(([key, label]) => `<span data-batch-count="${key}"><strong>${formatInteger(counts[key])}</strong>${label}</span>`).join('')}
+    </div>
+    ${details ? `<ol class="manual-wallet-invalid-list">${details}</ol>` : ''}
+  `;
+}
+
+async function addManualWalletBatch(event) {
   event.preventDefault();
-  const address = normalizeAddress(elements.manualWalletAddress.value);
-  if (!address) {
-    elements.manualWalletAddress.setCustomValidity('请输入有效的钱包地址（0x + 40 位十六进制字符）');
-    elements.manualWalletAddress.reportValidity();
-    elements.manualWalletAddress.focus();
+  const lines = elements.manualWalletLines.value;
+  if (!lines.trim()) {
+    elements.manualWalletLines.setCustomValidity('请至少输入一个钱包地址');
+    elements.manualWalletLines.reportValidity();
+    elements.manualWalletLines.focus();
     return;
   }
 
-  elements.manualWalletAddress.setCustomValidity('');
-  const updatesExisting = Boolean(
-    state.data?.wallets?.some((wallet) => normalizeAddress(wallet.address) === address && wallet?.curated === true)
-  );
+  elements.manualWalletLines.setCustomValidity('');
   elements.manualWalletAddButton.disabled = true;
   try {
-    await fetchJson(`${API_ROOT}/wallets/${encodeURIComponent(address)}`, {
-      method: 'PATCH',
-      body: JSON.stringify({
-        status: 'active',
-        note: elements.manualWalletNote.value.trim()
-      })
+    const payload = await fetchJson(`${API_ROOT}/wallets/batch`, {
+      method: 'POST',
+      body: JSON.stringify({ lines })
     });
-    elements.manualWalletAddress.value = '';
-    elements.manualWalletNote.value = '';
+    const record = unwrapRecord(payload);
+    renderWalletBatchFeedback(record);
+    elements.manualWalletLines.value = '';
     elements.walletSearch.value = '';
     elements.walletStatus.value = '';
     elements.walletMonitorTier.value = 'all';
     elements.walletTag.value = '';
-    state.selectedAddress = address;
-    state.detailCache.delete(address);
-    showToast(updatesExisting ? '地址已存在，备注已更新' : '地址已加入地址库和实时监控');
+    state.detailCache.clear();
+    const processed = walletBatchCount(record, 'created') + walletBatchCount(record, 'restored') + walletBatchCount(record, 'updated');
+    showToast(`批量处理完成：${processed} 个地址已写入`);
     await loadData({ quiet: true });
   } catch (error) {
-    showToast(`添加地址失败：${error.message}`, 'error');
+    elements.manualWalletFeedback.dataset.tone = 'error';
+    elements.manualWalletFeedback.textContent = `批量添加失败：${error.message}`;
+    elements.manualWalletFeedback.hidden = false;
+    showToast(`批量添加失败：${error.message}`, 'error');
   } finally {
     elements.manualWalletAddButton.disabled = false;
   }
@@ -3436,6 +3584,7 @@ function openWalletEditor(wallet) {
   elements.walletEditorStatus.value = wallet.status || 'active';
   elements.walletEditorMonitorTier.value = walletMonitorTier(wallet) || 'watch';
   elements.walletEditorClassification.value = wallet.classificationOverride || '';
+  renderWalletMonitorRules(firstValue(wallet, ['monitorRules', 'monitor_rules'], {}));
   elements.walletEditorNote.value = wallet.note || '';
   elements.walletEditorExclude.hidden = wallet.status === 'excluded';
   elements.walletEditor.showModal();
@@ -3457,6 +3606,7 @@ async function saveWalletEditor(event) {
         status: elements.walletEditorStatus.value,
         monitorTier: elements.walletEditorMonitorTier.value,
         classificationOverride: elements.walletEditorClassification.value || null,
+        monitorRules: readWalletMonitorRules(),
         note: elements.walletEditorNote.value.trim()
       })
     });
@@ -3605,9 +3755,10 @@ elements.libraryFilterClear.addEventListener('click', () => {
   void loadData();
 });
 elements.debotExportButton.addEventListener('click', () => void exportConfirmedWalletsToDebot());
-elements.manualWalletForm.addEventListener('submit', addManualWallet);
-elements.manualWalletAddress.addEventListener('input', () => {
-  elements.manualWalletAddress.setCustomValidity('');
+elements.manualWalletForm.addEventListener('submit', addManualWalletBatch);
+elements.manualWalletLines.addEventListener('input', () => {
+  elements.manualWalletLines.setCustomValidity('');
+  elements.manualWalletFeedback.hidden = true;
 });
 
 elements.sort.addEventListener('change', () => renderResults());
@@ -3630,6 +3781,7 @@ elements.refreshButton.addEventListener('click', () => {
 elements.scanButton.addEventListener('click', () => void startScan());
 elements.manualForm.addEventListener('submit', addManualWinner);
 elements.walletEditorForm.addEventListener('submit', saveWalletEditor);
+elements.walletMonitorRules.addEventListener('change', enforceWalletMonitorRuleDependency);
 elements.walletEditorClose.addEventListener('click', () => elements.walletEditor.close());
 elements.walletEditorExclude.addEventListener('click', () => void excludeEditedWallet());
 elements.monitorSettingsForm.addEventListener('submit', saveMonitorSettings);

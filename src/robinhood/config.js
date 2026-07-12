@@ -20,7 +20,8 @@ export const ROBINHOOD_CHAIN = Object.freeze({
   v3Factory: normalizeAddress('0x1f7d7550b1b028f7571e69a784071f0205fd2efa'),
   v3Router: normalizeAddress('0xcaf681a66d020601342297493863e78c959e5cb2'),
   v2Factory: normalizeAddress('0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f'),
-  v2Router: normalizeAddress('0x89e5db8b5aa49aa85ac63f691524311aeb649eba')
+  v2Router: normalizeAddress('0x89e5db8b5aa49aa85ac63f691524311aeb649eba'),
+  noxaLaunchFactory: normalizeAddress('0xD9eC2db5f3D1b236843925949fe5bd8a3836FCcB')
 });
 
 function boundedNumber(value, fallback, minimum, maximum) {
@@ -116,6 +117,7 @@ export function createRobinhoodConfig(env = process.env) {
     monitorMaxBlockSpan: boundedNumber(env.ROBINHOOD_MONITOR_MAX_BLOCK_SPAN, 500, 1, 10_000),
     monitorWalletTopicChunkSize: boundedNumber(env.ROBINHOOD_MONITOR_WALLET_TOPIC_CHUNK_SIZE, 100, 1, 100),
     monitorLogConcurrency: Math.floor(boundedNumber(env.ROBINHOOD_MONITOR_LOG_CONCURRENCY, 2, 1, 2)),
-    monitorRecoverySuccesses: Math.floor(boundedNumber(env.ROBINHOOD_MONITOR_RECOVERY_SUCCESSES, 20, 1, 1_000))
+    monitorRecoverySuccesses: Math.floor(boundedNumber(env.ROBINHOOD_MONITOR_RECOVERY_SUCCESSES, 20, 1, 1_000)),
+    noxaLaunchFactory: normalizeAddress(env.ROBINHOOD_NOXA_LAUNCH_FACTORY || ROBINHOOD_CHAIN.noxaLaunchFactory)
   };
 }

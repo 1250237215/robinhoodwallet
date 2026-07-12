@@ -1,9 +1,14 @@
 import { ROBINHOOD_CHAIN } from './config.js';
 import { BARK_SOUNDS } from './bark.js';
+import { WALLET_MONITOR_EVENT_TYPES } from './monitorRules.js';
 
 export const ERC20_TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 export const V2_SWAP_TOPIC = '0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822';
 export const V3_SWAP_TOPIC = '0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67';
+export const NOXA_TOKEN_LAUNCHED_TOPIC = '0xdb51ea9ad51ab453a65a4cb7e60c3cb378c9501bb002609f8f97778fb6c4235a';
+export const NOXA_LAUNCH_FACTORY = '0xd9ec2db5f3d1b236843925949fe5bd8a3836fccb';
+
+export const WALLET_EVENT_TYPES = WALLET_MONITOR_EVENT_TYPES;
 
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 const HASH_PATTERN = /^0x[0-9a-f]{64}$/;
@@ -135,18 +140,51 @@ function decodeDecimals(value) {
 }
 
 function receiptHasSwap(receipt) {
-  if (rpcInteger(receipt?.status, 1) === 0) return false;
+  if (!receiptSucceeded(receipt)) return false;
   return (Array.isArray(receipt?.logs) ? receipt.logs : []).some((log) => {
     const topic = String(log?.topics?.[0] || '').toLowerCase();
     return topic === V2_SWAP_TOPIC || topic === V3_SWAP_TOPIC;
   });
 }
 
+function receiptSucceeded(receipt) {
+  return Boolean(receipt) && rpcInteger(receipt.status, 1) !== 0;
+}
+
+function ruleFor(annotation, eventType) {
+  const configured = annotation?.monitorRules?.[eventType];
+  return {
+    enabled: typeof configured?.enabled === 'boolean' ? configured.enabled : eventType === 'buy',
+    sound: configured?.sound === true,
+    bark: configured?.bark === true
+  };
+}
+
+function hasEnabledRule(annotation, eventType) {
+  return annotation?.status !== 'excluded' && ruleFor(annotation, eventType).enabled;
+}
+
+function rpcBigInt(value, fallback = null) {
+  if (typeof value === 'bigint') return value >= 0n ? value : fallback;
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
+  if (typeof value !== 'string' || !/^(?:0x[0-9a-f]+|[0-9]+)$/i.test(value)) return fallback;
+  try {
+    const parsed = BigInt(value);
+    return parsed >= 0n ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function emptyInput(value) {
+  return value === undefined || value === null || /^(?:0x0*)?$/i.test(String(value));
+}
+
 function eventLinks(event) {
   return {
     ...event,
     debotAddressUrl: `https://debot.ai/address/robinhood/${event.walletAddress}`,
-    debotTokenUrl: `${DEBOT_TOKEN_ROOT}${event.tokenAddress}`,
+    debotTokenUrl: ADDRESS_PATTERN.test(event.tokenAddress) ? `${DEBOT_TOKEN_ROOT}${event.tokenAddress}` : '',
     explorerTxUrl: `${ROBINHOOD_CHAIN.explorerUrl}/tx/${event.txHash}`
   };
 }
@@ -205,7 +243,8 @@ export class RobinhoodWalletMonitor {
     setTimer = setTimeout,
     clearTimer = clearTimeout,
     barkNotifier = null,
-    quoteTokenAddresses = [ROBINHOOD_CHAIN.weth, ROBINHOOD_CHAIN.usdg]
+    quoteTokenAddresses = [ROBINHOOD_CHAIN.weth, ROBINHOOD_CHAIN.usdg],
+    noxaLaunchFactory = NOXA_LAUNCH_FACTORY
   } = {}) {
     if (!store?.getMeta || !store?.setMeta || !store?.insertMonitorEvent) {
       throw new TypeError('A Robinhood monitor store is required');
@@ -229,6 +268,10 @@ export class RobinhoodWalletMonitor {
     this.clearTimer = clearTimer;
     this.barkNotifier = barkNotifier;
     this.quoteTokenAddresses = new Set(quoteTokenAddresses.map(normalizeAddress).filter((value) => ADDRESS_PATTERN.test(value)));
+    this.noxaLaunchFactory = normalizeAddress(noxaLaunchFactory);
+    if (!ADDRESS_PATTERN.test(this.noxaLaunchFactory)) {
+      throw new TypeError('A valid Noxa launch factory address is required');
+    }
     this.settings = {
       enabled: this.store.getMeta(MONITOR_ENABLED_KEY) !== 'false',
       threshold: Math.max(1, Math.min(1_000, parseInteger(this.store.getMeta(MONITOR_THRESHOLD_KEY), 3))),
@@ -392,6 +435,7 @@ export class RobinhoodWalletMonitor {
     const cutoff = unixSeconds(this.now) - this.settings.windowSeconds;
     const grouped = new Map();
     for (const event of this.store.listRecentMonitorEvents(cutoff, { limit: 50_000 })) {
+      if ((event.eventType || 'buy') !== 'buy') continue;
       let cluster = grouped.get(event.tokenAddress);
       if (!cluster) {
         cluster = {
@@ -633,53 +677,150 @@ export class RobinhoodWalletMonitor {
   }
 
   async #scanRange(fromBlock, toBlock, wallets, signal) {
-    const logs = await this.#getIncomingTransfers(fromBlock, toBlock, [...wallets.keys()], signal);
-    const candidates = logs
-      .map((log) => this.#candidateFromLog(log))
-      .filter((candidate) => candidate && wallets.has(candidate.walletAddress) &&
-        !this.quoteTokenAddresses.has(candidate.tokenAddress));
-    if (!candidates.length) return [];
-
-    const hashes = [...new Set(candidates.map((candidate) => candidate.txHash))];
-    const [transactions, receipts] = await Promise.all([
-      this.rpcClient.getTransactionsByHashes(hashes, { signal }),
-      this.rpcClient.getTransactionReceipts(hashes, { signal })
+    const buyWallets = this.#walletsForRule(wallets, 'buy');
+    const sellWallets = this.#walletsForRule(wallets, 'sell');
+    const transferWallets = this.#walletsForRule(wallets, 'transfer');
+    const tokenCreateWallets = this.#walletsForRule(wallets, 'token_create');
+    const outboundWallets = new Set([...sellWallets, ...transferWallets]);
+    const needsTransactionBlocks = transferWallets.size > 0 || tokenCreateWallets.size > 0;
+    const [trackedLogs, transactionBlocks] = await Promise.all([
+      this.#getTrackedLogs(fromBlock, toBlock, {
+        buyWallets: [...buyWallets],
+        outboundWallets: [...outboundWallets],
+        watchNoxa: tokenCreateWallets.size > 0
+      }, signal),
+      needsTransactionBlocks
+        ? this.#getBlocksInRange(fromBlock, toBlock, { includeTransactions: true, signal })
+        : Promise.resolve([])
     ]);
-    const transactionByHash = new Map(hashes.map((hash, index) => [hash, transactions[index]]));
-    const receiptByHash = new Map(hashes.map((hash, index) => [hash, receipts[index]]));
-    const valid = candidates.filter((candidate) => {
+
+    const transferCandidates = [
+      ...trackedLogs.incoming.map((log) => this.#transferCandidateFromLog(log, 'incoming')),
+      ...trackedLogs.outgoing.map((log) => this.#transferCandidateFromLog(log, 'outgoing'))
+    ].filter((candidate) => candidate && wallets.has(candidate.walletAddress) &&
+      !(candidate.direction === 'incoming' && this.quoteTokenAddresses.has(candidate.tokenAddress)));
+    const noxaCandidates = trackedLogs.noxa
+      .map((log) => this.#noxaCandidateFromLog(log))
+      .filter((candidate) => candidate && tokenCreateWallets.has(candidate.walletAddress));
+    const fullBlockCandidates = this.#fullBlockCandidates(transactionBlocks, {
+      transferWallets,
+      tokenCreateWallets
+    });
+    const rawCandidates = [...transferCandidates, ...noxaCandidates, ...fullBlockCandidates];
+    if (!rawCandidates.length) return [];
+
+    const transactionHashes = [...new Set(transferCandidates.map((candidate) => candidate.txHash))];
+    const receiptHashes = [...new Set(
+      [...transferCandidates, ...fullBlockCandidates].map((candidate) => candidate.txHash)
+    )];
+    const [transactions, receipts] = await Promise.all([
+      transactionHashes.length
+        ? this.rpcClient.getTransactionsByHashes(transactionHashes, { signal })
+        : Promise.resolve([]),
+      receiptHashes.length
+        ? this.rpcClient.getTransactionReceipts(receiptHashes, { signal })
+        : Promise.resolve([])
+    ]);
+    const transactionByHash = new Map(transactionHashes.map((hash, index) => [hash, transactions[index]]));
+    for (const candidate of fullBlockCandidates) transactionByHash.set(candidate.txHash, candidate.transaction);
+    const receiptByHash = new Map(receiptHashes.map((hash, index) => [hash, receipts[index]]));
+
+    const prepared = [];
+    for (const candidate of rawCandidates) {
+      const annotation = wallets.get(candidate.walletAddress);
+      if (!annotation || annotation.status === 'excluded') continue;
+      if (candidate.source === 'noxa') {
+        if (hasEnabledRule(annotation, 'token_create')) {
+          prepared.push({ ...candidate, eventType: 'token_create', assetType: 'erc20', platform: 'noxa' });
+        }
+        continue;
+      }
       const transaction = transactionByHash.get(candidate.txHash);
       const receipt = receiptByHash.get(candidate.txHash);
-      return normalizeAddress(transaction?.from) === candidate.walletAddress && receiptHasSwap(receipt);
-    });
-    if (!valid.length) return [];
-
-    const blockNumbers = [...new Set(valid.map((candidate) => candidate.blockNumber))];
-    const blocks = [];
-    for (let index = 0; index < blockNumbers.length; index += 25) {
-      throwIfAborted(signal);
-      blocks.push(...await Promise.all(
-        blockNumbers.slice(index, index + 25).map((blockNumber) =>
-          this.rpcClient.getBlockByNumber(blockNumber, { signal }))
-      ));
+      if (!receiptSucceeded(receipt)) continue;
+      if (candidate.source === 'direct_create') {
+        const tokenAddress = normalizeAddress(receipt?.contractAddress);
+        if (hasEnabledRule(annotation, 'token_create') && ADDRESS_PATTERN.test(tokenAddress)) {
+          prepared.push({
+            ...candidate,
+            tokenAddress,
+            rawTokenAmount: '0',
+            eventType: 'token_create',
+            assetType: 'erc20',
+            platform: 'direct'
+          });
+        }
+        continue;
+      }
+      if (candidate.source === 'native') {
+        if (hasEnabledRule(annotation, 'transfer')) {
+          prepared.push({ ...candidate, eventType: 'transfer', assetType: 'native', platform: '' });
+        }
+        continue;
+      }
+      if (normalizeAddress(transaction?.from) !== candidate.walletAddress) continue;
+      const swap = receiptHasSwap(receipt);
+      if (candidate.direction === 'incoming' && swap && !this.quoteTokenAddresses.has(candidate.tokenAddress) &&
+        hasEnabledRule(annotation, 'buy')) {
+        prepared.push({
+          ...candidate,
+          eventType: 'buy',
+          assetType: 'erc20',
+          counterpartyAddress: normalizeAddress(transaction?.to),
+          platform: ''
+        });
+      } else if (candidate.direction === 'outgoing' && swap && !this.quoteTokenAddresses.has(candidate.tokenAddress) &&
+        hasEnabledRule(annotation, 'sell')) {
+        prepared.push({
+          ...candidate,
+          eventType: 'sell',
+          assetType: 'erc20',
+          counterpartyAddress: normalizeAddress(candidate.counterpartyAddress || transaction?.to),
+          platform: ''
+        });
+      } else if (candidate.direction === 'outgoing' && !swap && hasEnabledRule(annotation, 'transfer')) {
+        prepared.push({ ...candidate, eventType: 'transfer', assetType: 'erc20', platform: '' });
+      }
     }
-    const blockTimestampByNumber = new Map(
-      blockNumbers.map((blockNumber, index) => [blockNumber, rpcInteger(blocks[index]?.timestamp, unixSeconds(this.now))])
-    );
-    const tokenAddresses = [...new Set(valid.map((candidate) => candidate.tokenAddress))];
-    const metadataRows = await Promise.all(
-      tokenAddresses.map((tokenAddress) => this.#getTokenMetadata(tokenAddress, signal))
-    );
+    if (!prepared.length) return [];
+
+    const deduped = [...new Map(prepared.map((candidate) => [
+      `${candidate.txHash}:${candidate.logIndex}`,
+      candidate
+    ])).values()];
+    const blockTimestampByNumber = new Map(transactionBlocks.map((block) => [
+      rpcInteger(block?.number),
+      rpcInteger(block?.timestamp, unixSeconds(this.now))
+    ]));
+    const missingBlockNumbers = [...new Set(deduped
+      .map((candidate) => candidate.blockNumber)
+      .filter((blockNumber) => !blockTimestampByNumber.has(blockNumber)))];
+    if (missingBlockNumbers.length) {
+      const blocks = await this.#getBlocksByNumbers(missingBlockNumbers, { signal });
+      missingBlockNumbers.forEach((blockNumber, index) => {
+        blockTimestampByNumber.set(blockNumber, rpcInteger(blocks[index]?.timestamp, unixSeconds(this.now)));
+      });
+    }
+
+    const tokenAddresses = [...new Set(deduped
+      .filter((candidate) => candidate.assetType === 'erc20')
+      .map((candidate) => candidate.tokenAddress))];
+    const metadataRows = await this.#getTokenMetadataRows(tokenAddresses, signal);
     const metadataByAddress = new Map(tokenAddresses.map((address, index) => [address, metadataRows[index]]));
     const detected = [];
-    for (const candidate of valid) {
+    for (const candidate of deduped) {
       throwIfAborted(signal);
       if (!this.settings.enabled) continue;
       const annotation = this.store.getWalletAnnotation
         ? this.store.getWalletAnnotation(candidate.walletAddress)
         : wallets.get(candidate.walletAddress);
       if (!annotation || annotation.status === 'excluded') continue;
-      const metadata = metadataByAddress.get(candidate.tokenAddress);
+      const rule = ruleFor(annotation, candidate.eventType);
+      if (!rule.enabled) continue;
+      const metadata = candidate.assetType === 'native'
+        ? { symbol: 'ETH', name: 'Ether', decimals: 18, complete: true }
+        : metadataByAddress.get(candidate.tokenAddress);
+      if (!metadata || candidate.eventType === 'token_create' && !metadata.complete) continue;
       const result = this.store.insertMonitorEvent({
         ...candidate,
         walletAlias: annotation?.alias || '',
@@ -688,51 +829,73 @@ export class RobinhoodWalletMonitor {
         tokenDecimals: metadata.decimals,
         tokenAmount: formatTokenAmount(candidate.rawTokenAmount, metadata.decimals),
         blockTimestamp: blockTimestampByNumber.get(candidate.blockNumber) ?? unixSeconds(this.now),
-        detectedAt: unixSeconds(this.now)
+        detectedAt: unixSeconds(this.now),
+        soundAlert: rule.sound,
+        barkAlert: rule.bark
       });
       if (!result.inserted) continue;
       const event = publicEvent(result.event);
       detected.push(event);
       this.health.eventsDetected += 1;
+      this.#notifyWalletEvent(event);
     }
     return detected;
   }
 
-  async #getIncomingTransfers(fromBlock, toBlock, walletAddresses, signal) {
-    const chunks = [];
-    for (let index = 0; index < walletAddresses.length; index += this.walletTopicChunkSize) {
-      chunks.push(walletAddresses.slice(index, index + this.walletTopicChunkSize));
+  #walletsForRule(wallets, eventType) {
+    return new Set([...wallets]
+      .filter(([, annotation]) => hasEnabledRule(annotation, eventType))
+      .map(([address]) => address));
+  }
+
+  async #getTrackedLogs(fromBlock, toBlock, { buyWallets, outboundWallets, watchNoxa }, signal) {
+    const tasks = [];
+    for (const [kind, addresses] of [['incoming', buyWallets], ['outgoing', outboundWallets]]) {
+      for (let index = 0; index < addresses.length; index += this.walletTopicChunkSize) {
+        tasks.push({ kind, wallets: addresses.slice(index, index + this.walletTopicChunkSize) });
+      }
     }
-    const chunkRows = new Array(chunks.length);
+    if (watchNoxa) tasks.push({ kind: 'noxa', wallets: [] });
+    const taskRows = new Array(tasks.length);
     let nextIndex = 0;
     let firstError = null;
     const worker = async () => {
       while (!firstError) {
         const index = nextIndex;
         nextIndex += 1;
-        if (index >= chunks.length) return;
+        if (index >= tasks.length) return;
         try {
-          chunkRows[index] = await this.#getIncomingTransferChunk(fromBlock, toBlock, chunks[index], signal);
+          const task = tasks[index];
+          taskRows[index] = task.kind === 'noxa'
+            ? await this.#getNoxaLaunchLogs(fromBlock, toBlock, signal)
+            : await this.#getTransferChunk(fromBlock, toBlock, task.wallets, task.kind, signal);
         } catch (error) {
           firstError ||= error;
         }
       }
     };
-    const concurrency = Math.min(this.#effectiveLogConcurrency(), chunks.length);
+    const concurrency = Math.min(this.#effectiveLogConcurrency(), tasks.length);
     await Promise.all(Array.from({ length: concurrency }, () => worker()));
     if (firstError) throw firstError;
 
-    const seen = new Set();
-    return chunkRows.flat().filter((log) => {
-      const key = eventKey(log);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
+    const result = { incoming: [], outgoing: [], noxa: [] };
+    const seen = { incoming: new Set(), outgoing: new Set(), noxa: new Set() };
+    tasks.forEach((task, index) => {
+      for (const log of taskRows[index] || []) {
+        const key = eventKey(log);
+        if (seen[task.kind].has(key)) continue;
+        seen[task.kind].add(key);
+        result[task.kind].push(log);
+      }
     });
+    return result;
   }
 
-  async #getIncomingTransferChunk(fromBlock, toBlock, chunk, signal) {
+  async #getTransferChunk(fromBlock, toBlock, chunk, direction, signal) {
     const topics = chunk.map(topicForAddress);
+    const walletTopicIndex = direction === 'outgoing' ? 1 : 2;
+    const filterTopics = [ERC20_TRANSFER_TOPIC, null, null];
+    filterTopics[walletTopicIndex] = topics.length === 1 ? topics[0] : topics;
     const options = {
       signal,
       initialWindow: Math.max(1, toBlock - fromBlock + 1),
@@ -743,7 +906,7 @@ export class RobinhoodWalletMonitor {
       return await this.rpcClient.getLogs({
         fromBlock,
         toBlock,
-        topics: [ERC20_TRANSFER_TOPIC, null, topics.length === 1 ? topics[0] : topics]
+        topics: filterTopics
       }, options);
     } catch (error) {
       if (chunk.length === 1 || !canFallbackFromTopicOr(error)) throw error;
@@ -753,17 +916,34 @@ export class RobinhoodWalletMonitor {
         rows.push(...await this.rpcClient.getLogs({
           fromBlock,
           toBlock,
-          topics: [ERC20_TRANSFER_TOPIC, null, topicForAddress(wallet)]
+          topics: walletTopicIndex === 1
+            ? [ERC20_TRANSFER_TOPIC, topicForAddress(wallet), null]
+            : [ERC20_TRANSFER_TOPIC, null, topicForAddress(wallet)]
         }, options));
       }
       return rows;
     }
   }
 
-  #candidateFromLog(log) {
+  #getNoxaLaunchLogs(fromBlock, toBlock, signal) {
+    return this.rpcClient.getLogs({
+      address: this.noxaLaunchFactory,
+      fromBlock,
+      toBlock,
+      topics: [NOXA_TOKEN_LAUNCHED_TOPIC]
+    }, {
+      signal,
+      initialWindow: Math.max(1, toBlock - fromBlock + 1),
+      minWindow: 1,
+      maxWindow: this.maxBlockSpan
+    });
+  }
+
+  #transferCandidateFromLog(log, direction) {
     if (log?.removed) return null;
     const tokenAddress = normalizeAddress(log?.address);
-    const walletAddress = addressFromTopic(log?.topics?.[2]);
+    const walletAddress = addressFromTopic(log?.topics?.[direction === 'outgoing' ? 1 : 2]);
+    const counterpartyAddress = addressFromTopic(log?.topics?.[direction === 'outgoing' ? 2 : 1]) || '';
     const txHash = String(log?.transactionHash || '').toLowerCase();
     const logIndex = rpcInteger(log?.logIndex);
     const blockNumber = rpcInteger(log?.blockNumber);
@@ -775,11 +955,142 @@ export class RobinhoodWalletMonitor {
     return {
       walletAddress,
       tokenAddress,
+      counterpartyAddress,
       rawTokenAmount: rawTokenAmount.toString(),
       txHash,
       logIndex,
-      blockNumber
+      blockNumber,
+      source: 'transfer_log',
+      direction
     };
+  }
+
+  #noxaCandidateFromLog(log) {
+    if (log?.removed || normalizeAddress(log?.address) !== this.noxaLaunchFactory ||
+      String(log?.topics?.[0] || '').toLowerCase() !== NOXA_TOKEN_LAUNCHED_TOPIC) return null;
+    const tokenAddress = addressFromTopic(log?.topics?.[1]);
+    const walletAddress = addressFromTopic(log?.topics?.[2]);
+    const txHash = String(log?.transactionHash || '').toLowerCase();
+    const logIndex = rpcInteger(log?.logIndex);
+    const blockNumber = rpcInteger(log?.blockNumber);
+    if (!tokenAddress || !walletAddress || !HASH_PATTERN.test(txHash) || logIndex === null || blockNumber === null) {
+      return null;
+    }
+    return {
+      walletAddress,
+      tokenAddress,
+      counterpartyAddress: this.noxaLaunchFactory,
+      rawTokenAmount: '0',
+      txHash,
+      logIndex,
+      blockNumber,
+      source: 'noxa'
+    };
+  }
+
+  #fullBlockCandidates(blocks, { transferWallets, tokenCreateWallets }) {
+    const candidates = [];
+    for (const block of blocks) {
+      const blockNumber = rpcInteger(block?.number);
+      if (blockNumber === null) continue;
+      for (const transaction of Array.isArray(block?.transactions) ? block.transactions : []) {
+        if (!transaction || typeof transaction !== 'object') continue;
+        const walletAddress = normalizeAddress(transaction.from);
+        const txHash = String(transaction.hash || '').toLowerCase();
+        if (!HASH_PATTERN.test(txHash)) continue;
+        if (transaction.to === null && tokenCreateWallets.has(walletAddress)) {
+          candidates.push({
+            walletAddress,
+            tokenAddress: '',
+            counterpartyAddress: '',
+            txHash,
+            logIndex: -2,
+            blockNumber,
+            transaction,
+            source: 'direct_create'
+          });
+          continue;
+        }
+        const value = rpcBigInt(transaction.value, 0n);
+        const counterpartyAddress = normalizeAddress(transaction.to);
+        if (transferWallets.has(walletAddress) && value > 0n && ADDRESS_PATTERN.test(counterpartyAddress) &&
+          emptyInput(transaction.input ?? transaction.data)) {
+          candidates.push({
+            walletAddress,
+            tokenAddress: '',
+            counterpartyAddress,
+            rawTokenAmount: value.toString(),
+            txHash,
+            logIndex: -1,
+            blockNumber,
+            transaction,
+            source: 'native'
+          });
+        }
+      }
+    }
+    return candidates;
+  }
+
+  async #getBlocksInRange(fromBlock, toBlock, options) {
+    return this.#getBlocksByNumbers(
+      Array.from({ length: toBlock - fromBlock + 1 }, (_, index) => fromBlock + index),
+      options
+    );
+  }
+
+  async #getBlocksByNumbers(blockNumbers, { includeTransactions = false, signal } = {}) {
+    if (this.rpcClient.getBlocksByNumbers) {
+      return this.rpcClient.getBlocksByNumbers(blockNumbers, { includeTransactions, signal });
+    }
+    const blocks = [];
+    for (let index = 0; index < blockNumbers.length; index += 25) {
+      throwIfAborted(signal);
+      blocks.push(...await Promise.all(blockNumbers.slice(index, index + 25).map((blockNumber) =>
+        this.rpcClient.getBlockByNumber(blockNumber, { includeTransactions, signal }))));
+    }
+    return blocks;
+  }
+
+  async #getTokenMetadataRows(addresses, signal) {
+    const rows = new Array(addresses.length);
+    let nextIndex = 0;
+    const worker = async () => {
+      while (nextIndex < addresses.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        rows[index] = await this.#getTokenMetadata(addresses[index], signal);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(8, addresses.length) }, () => worker()));
+    return rows;
+  }
+
+  #notifyWalletEvent(event) {
+    if (!event.barkAlert || !this.barkNotifier?.notifyWalletEvent) return;
+    void this.barkNotifier.notifyWalletEvent({
+      event,
+      sound: this.settings.barkSound,
+      volume: this.settings.barkVolume
+    }).then((delivery) => {
+      this.#emit('bark', {
+        eventId: event.id,
+        eventType: event.eventType,
+        walletAddress: event.walletAddress,
+        tokenAddress: event.tokenAddress,
+        delivery,
+        sentAt: new Date(this.now()).toISOString()
+      });
+    }).catch((error) => {
+      this.#emit('bark', {
+        eventId: event.id,
+        eventType: event.eventType,
+        walletAddress: event.walletAddress,
+        delivery: { attempted: 0, sent: 0, failed: 1 },
+        error: errorMessage(error),
+        sentAt: new Date(this.now()).toISOString()
+      });
+    });
   }
 
   async #getTokenMetadata(address, signal) {

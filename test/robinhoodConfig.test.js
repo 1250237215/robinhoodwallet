@@ -7,6 +7,7 @@ test('uses verified Robinhood mainnet addresses and bounded scan settings', () =
   assert.equal(ROBINHOOD_CHAIN.id, 4663);
   assert.equal(ROBINHOOD_CHAIN.weth, '0x0bd7d308f8e1639fab988df18a8011f41eacad73');
   assert.equal(ROBINHOOD_CHAIN.v3Factory, '0x1f7d7550b1b028f7571e69a784071f0205fd2efa');
+  assert.equal(ROBINHOOD_CHAIN.noxaLaunchFactory, '0xd9ec2db5f3d1b236843925949fe5bd8a3836fccb');
 
   const config = createRobinhoodConfig({
     ROBINHOOD_LOG_WINDOW: '999999999',
@@ -48,6 +49,7 @@ test('uses verified Robinhood mainnet addresses and bounded scan settings', () =
   assert.equal(config.monitorWalletTopicChunkSize, 100);
   assert.equal(config.monitorLogConcurrency, 2);
   assert.equal(config.monitorRecoverySuccesses, 20);
+  assert.equal(config.noxaLaunchFactory, ROBINHOOD_CHAIN.noxaLaunchFactory);
 });
 
 test('keeps dynamic smart-money thresholds configurable and strict multiple above the base', () => {

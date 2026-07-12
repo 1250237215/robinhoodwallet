@@ -9,8 +9,9 @@ import { RobinhoodDebotClient } from './robinhood/debotClient.js';
 import { RobinhoodHolderClient } from './robinhood/holderClient.js';
 import { scanTokenHolders } from './robinhood/holderScanner.js';
 import { createRobinhoodWalletMonitor } from './robinhood/monitor.js';
+import { validateWalletMonitorRulesPatch } from './robinhood/monitorRules.js';
 import { RobinhoodRpcClient } from './robinhood/rpcClient.js';
-import { createRobinhoodService } from './robinhood/service.js';
+import { createRobinhoodService, MAX_WALLET_BATCH_LINES } from './robinhood/service.js';
 import { createRobinhoodStore } from './robinhood/store.js';
 import { WALLET_MONITOR_TIERS } from './robinhood/tiering.js';
 
@@ -205,10 +206,36 @@ function walletPatch(body) {
     }
     patch.monitorTier = body.monitorTier;
   }
+  if (Object.hasOwn(body, 'monitorRules')) {
+    try {
+      patch.monitorRules = validateWalletMonitorRulesPatch(body.monitorRules);
+    } catch (error) {
+      throw new HttpError(
+        400,
+        error instanceof Error ? error.message : 'monitorRules is invalid',
+        'INVALID_WALLET_UPDATE'
+      );
+    }
+  }
   if (!Object.keys(patch).length) {
     throw new HttpError(400, 'No supported wallet fields were provided', 'INVALID_WALLET_UPDATE');
   }
   return patch;
+}
+
+function walletBatchLines(body) {
+  if (!Object.hasOwn(body, 'lines') || (typeof body.lines !== 'string' && !Array.isArray(body.lines))) {
+    throw new HttpError(400, 'lines must be a string or an array', 'INVALID_WALLET_BATCH');
+  }
+  const count = typeof body.lines === 'string' ? body.lines.split(/\r\n?|\n/).length : body.lines.length;
+  if (count > MAX_WALLET_BATCH_LINES) {
+    throw new HttpError(
+      400,
+      `Wallet batch cannot exceed ${MAX_WALLET_BATCH_LINES} lines`,
+      'INVALID_WALLET_BATCH'
+    );
+  }
+  return body.lines;
 }
 
 function monitorSettingsPatch(body) {
@@ -523,6 +550,13 @@ async function handleApi(req, res, url, service, monitor) {
     return true;
   }
 
+  if (url.pathname === '/api/robinhood/wallets/batch') {
+    if (req.method !== 'POST') methodNotAllowed(['POST']);
+    const body = await readJson(req, 8 * 1024 * 1024);
+    sendJson(res, 200, await service.batchUpdateWallets(walletBatchLines(body)));
+    return true;
+  }
+
   const walletMatch = url.pathname.match(/^\/api\/robinhood\/wallets?\/([^/]+)$/);
   if (walletMatch) {
     let value;
@@ -643,6 +677,7 @@ export async function startRobinhoodStandaloneServer(env = process.env, { monito
     walletTopicChunkSize: config.monitorWalletTopicChunkSize,
     walletLogConcurrency: config.monitorLogConcurrency,
     recoverySuccesses: config.monitorRecoverySuccesses,
+    noxaLaunchFactory: config.noxaLaunchFactory,
     barkNotifier
   });
   const server = createRobinhoodStandaloneServer({

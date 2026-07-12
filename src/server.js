@@ -12,7 +12,8 @@ import { RobinhoodDebotClient } from './robinhood/debotClient.js';
 import { RobinhoodHolderClient } from './robinhood/holderClient.js';
 import { scanTokenHolders } from './robinhood/holderScanner.js';
 import { RobinhoodPoolClient } from './robinhood/poolClient.js';
-import { createRobinhoodService } from './robinhood/service.js';
+import { validateWalletMonitorRulesPatch } from './robinhood/monitorRules.js';
+import { createRobinhoodService, MAX_WALLET_BATCH_LINES } from './robinhood/service.js';
 import { createRobinhoodStore } from './robinhood/store.js';
 import { WALLET_MONITOR_TIERS } from './robinhood/tiering.js';
 
@@ -335,10 +336,36 @@ function validatedWalletPatch(body) {
     }
     patch.monitorTier = body.monitorTier;
   }
+  if (Object.hasOwn(body, 'monitorRules')) {
+    try {
+      patch.monitorRules = validateWalletMonitorRulesPatch(body.monitorRules);
+    } catch (error) {
+      throw new HttpError(
+        400,
+        error instanceof Error ? error.message : 'monitorRules is invalid',
+        'INVALID_WALLET_UPDATE'
+      );
+    }
+  }
   if (!Object.keys(patch).length) {
     throw new HttpError(400, 'No supported wallet fields were provided', 'INVALID_WALLET_UPDATE');
   }
   return patch;
+}
+
+function validatedWalletBatchLines(body) {
+  if (!Object.hasOwn(body, 'lines') || (typeof body.lines !== 'string' && !Array.isArray(body.lines))) {
+    throw new HttpError(400, 'lines must be a string or an array', 'INVALID_WALLET_BATCH');
+  }
+  const count = typeof body.lines === 'string' ? body.lines.split(/\r\n?|\n/).length : body.lines.length;
+  if (count > MAX_WALLET_BATCH_LINES) {
+    throw new HttpError(
+      400,
+      `Wallet batch cannot exceed ${MAX_WALLET_BATCH_LINES} lines`,
+      'INVALID_WALLET_BATCH'
+    );
+  }
+  return body.lines;
 }
 
 function validatedAddress(value, kind) {
@@ -473,6 +500,13 @@ async function handleRobinhoodRequest(req, res, url, service) {
     );
     if (!result) throw new HttpError(404, 'Manual token has not been submitted', 'WINNER_NOT_FOUND');
     sendJson(res, result.accepted ? 202 : 200, result);
+    return true;
+  }
+
+  if (url.pathname === '/api/robinhood/wallets/batch') {
+    if (req.method !== 'POST') methodNotAllowed(['POST']);
+    const body = await readJsonBody(req, { maxBytes: 8 * 1024 * 1024 });
+    sendJson(res, 200, await service.batchUpdateWallets(validatedWalletBatchLines(body)));
     return true;
   }
 

@@ -194,7 +194,7 @@
           <div class="monitor-title-block">
             <span class="monitor-kicker">地址库链上动态</span>
             <div class="monitor-title-line">
-              <h2 id="monitor-page-title">实时买入监控</h2>
+              <h2 id="monitor-page-title">实时链上监控</h2>
               <span class="monitor-connection-badge" id="monitor-connection-badge" data-state="loading">
                 <span aria-hidden="true"></span>
                 <strong id="monitor-connection-text">正在连接</strong>
@@ -379,7 +379,7 @@
           <section class="monitor-feed-panel" aria-labelledby="monitor-feed-title">
             <header class="monitor-panel-head">
               <div>
-                <h3 id="monitor-feed-title">实时买入流水</h3>
+                <h3 id="monitor-feed-title">实时链上流水</h3>
                 <p id="monitor-feed-summary">按检测时间倒序</p>
               </div>
               <button class="inline-icon-button" id="monitor-refresh-button" type="button" title="刷新实时监控" aria-label="刷新实时监控">
@@ -389,8 +389,8 @@
             <div class="monitor-event-feed" id="monitor-event-feed" aria-live="polite">
               <div class="monitor-empty-state">
                 <i data-lucide="radio-tower" aria-hidden="true"></i>
-                <strong>等待已确认地址买入</strong>
-                <span>任意金额的买入都会显示在这里。</span>
+                <strong>等待钱包动态</strong>
+                <span>新事件会实时显示在这里。</span>
               </div>
             </div>
           </section>
@@ -437,18 +437,17 @@
           </div>
 
           <form class="manual-wallet-form" id="manual-wallet-form" hidden novalidate>
-            <label class="manual-wallet-address-field" for="manual-wallet-address">
-              <span class="sr-only">钱包地址</span>
-              <input id="manual-wallet-address" name="address" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="输入钱包地址 0x..." required />
+            <label class="manual-wallet-lines-field" for="manual-wallet-lines">
+              <span>批量添加已确认地址</span>
+              <textarea id="manual-wallet-lines" name="lines" rows="4" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="0x...&#10;0x...,备注" required></textarea>
             </label>
-            <label class="manual-wallet-note-field" for="manual-wallet-note">
-              <span class="sr-only">地址备注</span>
-              <input id="manual-wallet-note" name="note" type="text" maxlength="4000" autocomplete="off" placeholder="备注（可选）" />
-            </label>
-            <button class="command-button manual-wallet-add-button" id="manual-wallet-add-button" type="submit">
-              <i data-lucide="plus" aria-hidden="true"></i>
-              添加地址
-            </button>
+            <div class="manual-wallet-actions">
+              <button class="command-button manual-wallet-add-button" id="manual-wallet-add-button" type="submit">
+                <i data-lucide="list-plus" aria-hidden="true"></i>
+                批量添加
+              </button>
+            </div>
+            <div class="manual-wallet-feedback" id="manual-wallet-feedback" aria-live="polite" hidden></div>
           </form>
 
           <div class="table-scroll" id="results-container" aria-live="polite">
@@ -521,6 +520,39 @@
             </select>
           </label>
         </div>
+        <fieldset class="wallet-rule-matrix" id="wallet-monitor-rules">
+          <legend>钱包事件提醒</legend>
+          <div class="wallet-rule-header" aria-hidden="true">
+            <span>事件</span>
+            <span>监控</span>
+            <span>声音</span>
+            <span>Bark</span>
+          </div>
+          <div class="wallet-rule-row" data-monitor-rule="buy">
+            <span class="wallet-rule-name">买入</span>
+            <label title="监控买入"><input id="wallet-rule-buy-enabled" type="checkbox" data-rule-field="enabled" /><span class="sr-only">监控买入</span></label>
+            <label title="买入时播放声音"><input id="wallet-rule-buy-sound" type="checkbox" data-rule-field="sound" /><span class="sr-only">买入时播放声音</span></label>
+            <label title="买入时发送 Bark"><input id="wallet-rule-buy-bark" type="checkbox" data-rule-field="bark" /><span class="sr-only">买入时发送 Bark</span></label>
+          </div>
+          <div class="wallet-rule-row" data-monitor-rule="sell">
+            <span class="wallet-rule-name">卖出</span>
+            <label title="监控卖出"><input id="wallet-rule-sell-enabled" type="checkbox" data-rule-field="enabled" /><span class="sr-only">监控卖出</span></label>
+            <label title="卖出时播放声音"><input id="wallet-rule-sell-sound" type="checkbox" data-rule-field="sound" /><span class="sr-only">卖出时播放声音</span></label>
+            <label title="卖出时发送 Bark"><input id="wallet-rule-sell-bark" type="checkbox" data-rule-field="bark" /><span class="sr-only">卖出时发送 Bark</span></label>
+          </div>
+          <div class="wallet-rule-row" data-monitor-rule="transfer">
+            <span class="wallet-rule-name">转账</span>
+            <label title="监控转账"><input id="wallet-rule-transfer-enabled" type="checkbox" data-rule-field="enabled" /><span class="sr-only">监控转账</span></label>
+            <label title="转账时播放声音"><input id="wallet-rule-transfer-sound" type="checkbox" data-rule-field="sound" /><span class="sr-only">转账时播放声音</span></label>
+            <label title="转账时发送 Bark"><input id="wallet-rule-transfer-bark" type="checkbox" data-rule-field="bark" /><span class="sr-only">转账时发送 Bark</span></label>
+          </div>
+          <div class="wallet-rule-row" data-monitor-rule="token_create">
+            <span class="wallet-rule-name">创建代币</span>
+            <label title="监控创建代币"><input id="wallet-rule-token-create-enabled" type="checkbox" data-rule-field="enabled" /><span class="sr-only">监控创建代币</span></label>
+            <label title="创建代币时播放声音"><input id="wallet-rule-token-create-sound" type="checkbox" data-rule-field="sound" /><span class="sr-only">创建代币时播放声音</span></label>
+            <label title="创建代币时发送 Bark"><input id="wallet-rule-token-create-bark" type="checkbox" data-rule-field="bark" /><span class="sr-only">创建代币时发送 Bark</span></label>
+          </div>
+        </fieldset>
         <label class="editor-field">
           <span>备注</span>
           <textarea id="wallet-editor-note" name="note" rows="5" maxlength="4000"></textarea>

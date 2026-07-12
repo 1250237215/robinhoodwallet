@@ -143,6 +143,7 @@ test('standalone deployment server exposes a repeatable single-token Holder resc
 test('standalone wallet routes merge filters and expose validated PATCH and DELETE operations', async () => {
   let receivedFilters;
   let receivedPatch;
+  let receivedBatchLines;
   let deletes = 0;
   const service = {
     getDashboard(filters) {
@@ -163,6 +164,19 @@ test('standalone wallet routes merge filters and expose validated PATCH and DELE
     updateWallet(address, patch) {
       receivedPatch = { address, patch };
       return { ok: true, wallet: { address, ...patch } };
+    },
+    batchUpdateWallets(lines) {
+      receivedBatchLines = lines;
+      return {
+        ok: true,
+        total: 2,
+        created: 1,
+        restored: 1,
+        updated: 0,
+        duplicate: 0,
+        invalid: 0,
+        results: []
+      };
     },
     deleteWallet(address) {
       deletes += 1;
@@ -194,6 +208,14 @@ test('standalone wallet routes merge filters and expose validated PATCH and DELE
     assert.equal(invalidTier.status, 400);
     assert.equal((await invalidTier.json()).code, 'INVALID_WALLET_UPDATE');
 
+    const invalidRules = await fetch(`${baseUrl}/api/robinhood/wallets/${wallet}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ monitorRules: { token_create: { enabled: 1 } } })
+    });
+    assert.equal(invalidRules.status, 400);
+    assert.equal((await invalidRules.json()).code, 'INVALID_WALLET_UPDATE');
+
     const updated = await fetch(`${baseUrl}/api/robinhood/wallets/${wallet}`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
@@ -202,7 +224,8 @@ test('standalone wallet routes merge filters and expose validated PATCH and DELE
         tags: ['repeat-hit'],
         status: 'watch',
         classificationOverride: 'realized',
-        monitorTier: 'high_frequency'
+        monitorTier: 'high_frequency',
+        monitorRules: { transfer: { enabled: true, sound: false } }
       })
     });
     assert.equal(updated.status, 200);
@@ -213,9 +236,28 @@ test('standalone wallet routes merge filters and expose validated PATCH and DELE
         tags: ['repeat-hit'],
         status: 'watch',
         classificationOverride: 'realized',
-        monitorTier: 'high_frequency'
+        monitorTier: 'high_frequency',
+        monitorRules: { transfer: { enabled: true, sound: false } }
       }
     });
+
+    const batchLines = [wallet, `${token},Token-like wallet input`];
+    const batch = await fetch(`${baseUrl}/api/robinhood/wallets/batch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ lines: batchLines })
+    });
+    assert.equal(batch.status, 200);
+    assert.equal((await batch.json()).restored, 1);
+    assert.deepEqual(receivedBatchLines, batchLines);
+
+    const missingLines = await fetch(`${baseUrl}/api/robinhood/wallets/batch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ addresses: batchLines })
+    });
+    assert.equal(missingLines.status, 400);
+    assert.equal((await missingLines.json()).code, 'INVALID_WALLET_BATCH');
 
     const firstDelete = await fetch(`${baseUrl}/api/robinhood/wallets/${wallet}`, { method: 'DELETE' });
     const secondDelete = await fetch(`${baseUrl}/api/robinhood/wallets/${wallet}`, { method: 'DELETE' });
@@ -411,6 +453,7 @@ test('standalone startup wires the holder-first scanner and its two data clients
     assert.equal(health.walletTopicChunkSize, 100);
     assert.equal(health.maxLogConcurrency, 2);
     assert.equal(health.rpcProtection.recoverySuccessesRequired, 20);
+    assert.equal(running.monitor.noxaLaunchFactory, '0xd9ec2db5f3d1b236843925949fe5bd8a3836fccb');
   } finally {
     running.service.close();
     running.monitor.close();

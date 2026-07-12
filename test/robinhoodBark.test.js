@@ -97,3 +97,40 @@ test('records Bark delivery errors without exposing the endpoint', async () => {
   assert.equal(Object.hasOwn(publicRow, 'endpoint'), false);
   store.close();
 });
+
+test('sends an immediate per-wallet event with the transaction link', async () => {
+  const store = createRobinhoodStore(':memory:');
+  const requests = [];
+  const notifier = new RobinhoodBarkNotifier({
+    store,
+    fetchImpl: async (url) => {
+      requests.push(new URL(url));
+      return new Response(JSON.stringify({ code: 200 }), { status: 200 });
+    }
+  });
+  notifier.createTarget({ endpoint: 'device_key_123456' });
+  const result = await notifier.notifyWalletEvent({
+    sound: 'chime',
+    volume: 8,
+    event: {
+      eventType: 'transfer',
+      assetType: 'native',
+      walletAddress: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      walletAlias: 'Alpha',
+      counterpartyAddress: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      tokenSymbol: 'ETH',
+      tokenAmount: '1.25',
+      explorerTxUrl: 'https://robinhoodchain.blockscout.com/tx/0x1234'
+    }
+  });
+
+  assert.deepEqual(result, { attempted: 1, sent: 1, failed: 0 });
+  assert.equal(requests.length, 1);
+  assert.match(decodeURIComponent(requests[0].pathname), /Alpha 转出 ETH/);
+  assert.match(decodeURIComponent(requests[0].pathname), /1.25 ETH/);
+  assert.match(decodeURIComponent(requests[0].pathname), /0xbbbb...bbbb/);
+  assert.equal(requests[0].searchParams.get('sound'), 'chime');
+  assert.equal(requests[0].searchParams.get('volume'), '8');
+  assert.equal(requests[0].searchParams.get('url'), 'https://robinhoodchain.blockscout.com/tx/0x1234');
+  store.close();
+});

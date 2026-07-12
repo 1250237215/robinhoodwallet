@@ -2,9 +2,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+import {
+  defaultWalletMonitorRules,
+  normalizeWalletMonitorRules,
+  WALLET_MONITOR_EVENT_TYPES
+} from './monitorRules.js';
 import { WALLET_MONITOR_TIERS } from './tiering.js';
 
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
+const MONITOR_EVENT_TYPE_SET = new Set(WALLET_MONITOR_EVENT_TYPES);
+const DEFAULT_MONITOR_RULES_JSON = JSON.stringify(defaultWalletMonitorRules());
 
 function json(value) {
   return JSON.stringify(value ?? null);
@@ -65,6 +72,7 @@ export function createRobinhoodStore(filename) {
       status TEXT NOT NULL DEFAULT 'active',
       classification_override TEXT,
       monitor_tier TEXT NOT NULL DEFAULT 'watch' CHECK (monitor_tier IN ('core', 'watch', 'high_frequency')),
+      monitor_rules TEXT NOT NULL DEFAULT '${DEFAULT_MONITOR_RULES_JSON}',
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -83,8 +91,12 @@ export function createRobinhoodStore(filename) {
     );
     CREATE TABLE IF NOT EXISTS monitor_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_type TEXT NOT NULL DEFAULT 'buy',
+      asset_type TEXT NOT NULL DEFAULT 'token',
       wallet_address TEXT NOT NULL,
       wallet_alias TEXT NOT NULL DEFAULT '',
+      counterparty_address TEXT NOT NULL DEFAULT '',
+      platform TEXT NOT NULL DEFAULT '',
       token_address TEXT NOT NULL,
       token_symbol TEXT NOT NULL,
       token_name TEXT NOT NULL,
@@ -96,6 +108,8 @@ export function createRobinhoodStore(filename) {
       block_number INTEGER NOT NULL,
       block_timestamp INTEGER NOT NULL,
       detected_at INTEGER NOT NULL,
+      sound_alert INTEGER NOT NULL DEFAULT 0,
+      bark_alert INTEGER NOT NULL DEFAULT 0,
       UNIQUE(tx_hash, log_index)
     );
     CREATE TABLE IF NOT EXISTS monitor_bark_targets (
@@ -127,10 +141,55 @@ export function createRobinhoodStore(filename) {
   if (!walletAnnotationColumns.has('monitor_tier')) {
     db.exec("ALTER TABLE wallet_annotations ADD COLUMN monitor_tier TEXT NOT NULL DEFAULT 'watch'");
   }
+  if (!walletAnnotationColumns.has('monitor_rules')) {
+    db.exec(`ALTER TABLE wallet_annotations ADD COLUMN monitor_rules TEXT NOT NULL DEFAULT '${DEFAULT_MONITOR_RULES_JSON}'`);
+  }
   db.exec(`
     UPDATE wallet_annotations
     SET monitor_tier = 'watch'
     WHERE monitor_tier IS NULL OR monitor_tier NOT IN ('core', 'watch', 'high_frequency')
+  `);
+  const normalizeMonitorRulesStatement = db.prepare(
+    'UPDATE wallet_annotations SET monitor_rules = ? WHERE address = ?'
+  );
+  for (const row of db.prepare('SELECT address, monitor_rules FROM wallet_annotations').all()) {
+    const normalizedRules = json(normalizeWalletMonitorRules(parseJson(row.monitor_rules, null)));
+    if (row.monitor_rules !== normalizedRules) normalizeMonitorRulesStatement.run(normalizedRules, row.address);
+  }
+
+  const monitorEventColumns = new Set(
+    db.prepare('PRAGMA table_info(monitor_events)').all().map((column) => column.name)
+  );
+  const monitorEventMigrations = [
+    ['event_type', "TEXT NOT NULL DEFAULT 'buy'"],
+    ['asset_type', "TEXT NOT NULL DEFAULT 'token'"],
+    ['counterparty_address', "TEXT NOT NULL DEFAULT ''"],
+    ['platform', "TEXT NOT NULL DEFAULT ''"],
+    ['sound_alert', 'INTEGER NOT NULL DEFAULT 0'],
+    ['bark_alert', 'INTEGER NOT NULL DEFAULT 0']
+  ];
+  for (const [column, definition] of monitorEventMigrations) {
+    if (!monitorEventColumns.has(column)) db.exec(`ALTER TABLE monitor_events ADD COLUMN ${column} ${definition}`);
+  }
+  db.exec(`
+    UPDATE monitor_events
+    SET event_type = 'buy'
+    WHERE event_type IS NULL OR event_type NOT IN ('buy', 'sell', 'transfer', 'token_create');
+    UPDATE monitor_events
+    SET asset_type = 'token'
+    WHERE asset_type IS NULL OR trim(asset_type) = '';
+    UPDATE monitor_events
+    SET counterparty_address = ''
+    WHERE counterparty_address IS NULL;
+    UPDATE monitor_events
+    SET platform = ''
+    WHERE platform IS NULL;
+    UPDATE monitor_events
+    SET sound_alert = CASE WHEN sound_alert = 1 THEN 1 ELSE 0 END,
+        bark_alert = CASE WHEN bark_alert = 1 THEN 1 ELSE 0 END
+    WHERE sound_alert NOT IN (0, 1) OR bark_alert NOT IN (0, 1);
+    CREATE INDEX IF NOT EXISTS monitor_events_event_timestamp_idx
+      ON monitor_events(event_type, block_timestamp DESC);
   `);
   const upsertTokenStatement = db.prepare(`
     INSERT INTO tokens(address, symbol, name, logo, payload, updated_at)
@@ -150,8 +209,9 @@ export function createRobinhoodStore(filename) {
   `);
   const upsertWalletAnnotationStatement = db.prepare(`
     INSERT INTO wallet_annotations(
-      address, alias, note, tags, status, classification_override, monitor_tier, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      address, alias, note, tags, status, classification_override, monitor_tier, monitor_rules,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(address) DO UPDATE SET
       alias = excluded.alias,
       note = excluded.note,
@@ -159,6 +219,7 @@ export function createRobinhoodStore(filename) {
       status = excluded.status,
       classification_override = excluded.classification_override,
       monitor_tier = excluded.monitor_tier,
+      monitor_rules = excluded.monitor_rules,
       updated_at = excluded.updated_at
   `);
 
@@ -172,6 +233,7 @@ export function createRobinhoodStore(filename) {
       status: row.status,
       classificationOverride: row.classification_override,
       monitorTier: WALLET_MONITOR_TIERS.has(row.monitor_tier) ? row.monitor_tier : 'watch',
+      monitorRules: normalizeWalletMonitorRules(parseJson(row.monitor_rules, null)),
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at)
     };
@@ -193,8 +255,12 @@ export function createRobinhoodStore(filename) {
     if (!row) return null;
     return {
       id: Number(row.id),
+      eventType: MONITOR_EVENT_TYPE_SET.has(row.event_type) ? row.event_type : 'buy',
+      assetType: String(row.asset_type || 'token'),
       walletAddress: row.wallet_address,
       walletAlias: row.wallet_alias,
+      counterpartyAddress: String(row.counterparty_address || ''),
+      platform: String(row.platform || ''),
       tokenAddress: row.token_address,
       tokenSymbol: row.token_symbol,
       tokenName: row.token_name,
@@ -205,7 +271,9 @@ export function createRobinhoodStore(filename) {
       logIndex: Number(row.log_index),
       blockNumber: Number(row.block_number),
       blockTimestamp: Number(row.block_timestamp),
-      detectedAt: Number(row.detected_at)
+      detectedAt: Number(row.detected_at),
+      soundAlert: Boolean(row.sound_alert),
+      barkAlert: Boolean(row.bark_alert)
     };
   }
 
@@ -331,6 +399,10 @@ export function createRobinhoodStore(filename) {
       const updatedAt = Number(annotation.updatedAt ?? Math.floor(Date.now() / 1000));
       const monitorTier = String(annotation.monitorTier ?? existing?.monitor_tier ?? 'watch').toLowerCase();
       if (!WALLET_MONITOR_TIERS.has(monitorTier)) throw new TypeError('Unsupported wallet monitor tier');
+      const existingMonitorRules = normalizeWalletMonitorRules(parseJson(existing?.monitor_rules, null));
+      const monitorRules = annotation.monitorRules === undefined
+        ? existingMonitorRules
+        : normalizeWalletMonitorRules(annotation.monitorRules, existingMonitorRules);
       const tags = Array.isArray(annotation.tags)
         ? [...new Set(annotation.tags.map((tag) => String(tag).trim()).filter(Boolean))]
         : parseJson(existing?.tags, []);
@@ -344,6 +416,7 @@ export function createRobinhoodStore(filename) {
           ? existing?.classification_override ?? null
           : annotation.classificationOverride,
         monitorTier,
+        json(monitorRules),
         createdAt,
         updatedAt
       );
@@ -398,15 +471,22 @@ export function createRobinhoodStore(filename) {
       );
     },
     insertMonitorEvent(event) {
+      const eventType = String(event.eventType || 'buy').toLowerCase();
+      if (!MONITOR_EVENT_TYPE_SET.has(eventType)) throw new TypeError('Unsupported monitor event type');
       const result = db.prepare(`
         INSERT OR IGNORE INTO monitor_events(
-          wallet_address, wallet_alias, token_address, token_symbol, token_name,
+          event_type, asset_type, wallet_address, wallet_alias, counterparty_address, platform,
+          token_address, token_symbol, token_name,
           token_amount, raw_token_amount, token_decimals, tx_hash, log_index,
-          block_number, block_timestamp, detected_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          block_number, block_timestamp, detected_at, sound_alert, bark_alert
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
+        eventType,
+        String(event.assetType || 'token').trim().toLowerCase() || 'token',
         String(event.walletAddress || '').toLowerCase(),
         String(event.walletAlias || ''),
+        String(event.counterpartyAddress || '').toLowerCase(),
+        String(event.platform || ''),
         String(event.tokenAddress || '').toLowerCase(),
         String(event.tokenSymbol || event.tokenAddress || ''),
         String(event.tokenName || event.tokenSymbol || event.tokenAddress || ''),
@@ -417,7 +497,9 @@ export function createRobinhoodStore(filename) {
         Number(event.logIndex),
         Number(event.blockNumber),
         Number(event.blockTimestamp),
-        Number(event.detectedAt || Math.floor(Date.now() / 1000))
+        Number(event.detectedAt || Math.floor(Date.now() / 1000)),
+        event.soundAlert === true ? 1 : 0,
+        event.barkAlert === true ? 1 : 0
       );
       const row = db.prepare('SELECT * FROM monitor_events WHERE tx_hash = ? AND log_index = ?').get(
         String(event.txHash || '').toLowerCase(),

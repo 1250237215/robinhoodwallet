@@ -47,6 +47,7 @@ Configuration is supplied through environment variables. Common settings are:
 | `ROBINHOOD_MONITOR_WALLET_TOPIC_CHUNK_SIZE` | `100` | Wallet topics per log request |
 | `ROBINHOOD_MONITOR_LOG_CONCURRENCY` | `2` | Maximum concurrent wallet-log requests |
 | `ROBINHOOD_MONITOR_RECOVERY_SUCCESSES` | `20` | Healthy polls required to leave protected mode |
+| `ROBINHOOD_NOXA_LAUNCH_FACTORY` | Official Robinhood Noxa factory | Noxa `TokenLaunched` event source |
 | `ROBINHOOD_REQUEST_TIMEOUT_MS` | `20000` | External request timeout |
 
 See `src/robinhood/config.js` for all bounded settings and defaults.
@@ -60,10 +61,19 @@ the exact redactions, hashes, table counts, and restore precautions.
 
 ## Monitoring model
 
-The monitor scans incoming ERC-20 `Transfer` logs for confirmed wallets, then
-validates the originating transaction and requires a successful V2 or V3 swap
-event before recording a buy. Events are deduplicated by transaction hash and
-log index. Alert clusters count distinct wallets within the configured window.
+Each confirmed wallet has independent rules for buys, sells, outbound transfers,
+and token creation. Each rule controls detection, browser sound, and immediate
+Bark delivery. Existing wallets migrate with buy detection enabled and every new
+alert channel disabled.
+
+Buys and sells are classified from ERC-20 `Transfer` logs only after validating
+the originating wallet, successful receipt, and a V2 or V3 swap event. Outbound
+ERC-20 transfers without a swap are classified as transfers; full blocks cover
+plain native-coin transfers and direct ERC-20 deployments. Noxa launches are
+attributed from the official factory's indexed `TokenLaunched.deployer` event.
+Events are deduplicated by transaction hash and log index. The existing same-CA
+cluster alert counts only distinct-wallet buy events within the configured
+window.
 
 ## Deployment
 

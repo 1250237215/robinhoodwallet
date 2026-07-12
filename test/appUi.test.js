@@ -154,19 +154,20 @@ test('address library supports search, status, wallet group, tag filters and res
   assert.match(appJs, /state\.activeTab === 'all_round' && filters\.monitorTier !== 'all'/);
 });
 
-test('confirmed address library accepts a manual wallet and optional note', () => {
+test('confirmed address library accepts batch wallet lines with optional notes', () => {
   assert.match(indexHtml, /<form class="manual-wallet-form" id="manual-wallet-form" hidden novalidate>/);
-  assert.match(indexHtml, /id="manual-wallet-address"[^>]*placeholder="输入钱包地址 0x\.\.\."[^>]*required/);
-  assert.match(indexHtml, /id="manual-wallet-note"[^>]*maxlength="4000"[^>]*placeholder="备注（可选）"/);
-  assert.match(indexHtml, /id="manual-wallet-add-button"[^>]*type="submit"[\s\S]*data-lucide="plus"[\s\S]*添加地址/);
+  assert.match(indexHtml, /<textarea id="manual-wallet-lines"[^>]*name="lines"[^>]*placeholder="0x\.\.\.&#10;0x\.\.\.,备注"[^>]*required/);
+  assert.match(indexHtml, /id="manual-wallet-feedback"[^>]*aria-live="polite"[^>]*hidden/);
+  assert.match(indexHtml, /id="manual-wallet-add-button"[^>]*type="submit"[\s\S]*data-lucide="list-plus"[\s\S]*批量添加/);
   assert.match(appJs, /elements\.manualWalletForm\.hidden = !showingConfirmedLibrary/);
-  assert.match(appJs, /const address = normalizeAddress\(elements\.manualWalletAddress\.value\)/);
-  assert.match(appJs, /manualWalletAddress\.setCustomValidity\('请输入有效的钱包地址/);
-  assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/wallets\/\$\{encodeURIComponent\(address\)\}`/);
-  assert.match(appJs, /method: 'PATCH',[\s\S]*status: 'active',[\s\S]*note: elements\.manualWalletNote\.value\.trim\(\)/);
-  assert.match(appJs, /updatesExisting \? '地址已存在，备注已更新' : '地址已加入地址库和实时监控'/);
+  assert.match(appJs, /const lines = elements\.manualWalletLines\.value/);
+  assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/wallets\/batch`, \{[\s\S]*method: 'POST',[\s\S]*body: JSON\.stringify\(\{ lines \}\)/);
+  assert.match(appJs, /\['created', 'restored', 'updated', 'duplicate', 'invalid'\]\.map/);
+  assert.match(appJs, /record\.results\.filter\(\(item\)[\s\S]*=== 'invalid'/);
+  assert.match(appJs, /class="manual-wallet-invalid-list"/);
+  assert.match(appJs, /elements\.manualWalletLines\.value = ''/);
   assert.match(appJs, /await loadData\(\{ quiet: true \}\)/);
-  assert.match(stylesCss, /\.manual-wallet-form \{[\s\S]*grid-template-columns: minmax\(280px, 1\.25fr\) minmax\(180px, 0\.75fr\) auto/);
+  assert.match(stylesCss, /\.manual-wallet-form \{[\s\S]*grid-template-columns: minmax\(0, 1fr\) auto/);
   assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.manual-wallet-form \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
 });
 
@@ -302,6 +303,28 @@ test('wallet editor persists metadata and supports soft exclusion and restoratio
   assert.match(appJs, /elements\.walletEditor\.showModal\(\)/);
   assert.match(appJs, /state\.detailCache\.set\(address, payload\)/);
   assert.match(appJs, /renderWalletDetail\(updatedWallet, payload\)/);
+});
+
+test('wallet editor persists four event rules and alert choices imply monitoring', () => {
+  const matrix = indexHtml.match(/<fieldset class="wallet-rule-matrix" id="wallet-monitor-rules">[\s\S]*?<\/fieldset>/)?.[0] || '';
+  for (const [eventType, label] of [
+    ['buy', '买入'],
+    ['sell', '卖出'],
+    ['transfer', '转账'],
+    ['token_create', '创建代币']
+  ]) {
+    assert.match(matrix, new RegExp(`data-monitor-rule="${eventType}"[\\s\\S]*?wallet-rule-name">${label}<`));
+  }
+  assert.equal((matrix.match(/data-rule-field="enabled"/g) || []).length, 4);
+  assert.equal((matrix.match(/data-rule-field="sound"/g) || []).length, 4);
+  assert.equal((matrix.match(/data-rule-field="bark"/g) || []).length, 4);
+  assert.match(appJs, /MONITOR_EVENT_TYPES = Object\.freeze\(\['buy', 'sell', 'transfer', 'token_create'\]\)/);
+  assert.match(appJs, /const enabled = \(typeof candidate\.enabled === 'boolean'[\s\S]*\|\| sound \|\| bark/);
+  assert.match(appJs, /const enabled = row\?\.querySelector\('\[data-rule-field="enabled"\]'\)\?\.checked === true \|\| sound \|\| bark/);
+  assert.match(appJs, /if \(\(sound\.checked \|\| bark\.checked\) && !enabled\.checked\) enabled\.checked = true/);
+  assert.match(appJs, /firstValue\(wallet, \['monitorRules', 'monitor_rules'\], \{\}\)/);
+  assert.match(appJs, /monitorRules: readWalletMonitorRules\(\)/);
+  assert.match(stylesCss, /\.wallet-rule-row \{[\s\S]*grid-template-columns: minmax\(0, 1fr\) repeat\(3, 54px\)/);
 });
 
 test('confirmed wallets expose editable wallet groups without badging pending candidates', () => {
@@ -578,7 +601,7 @@ test('monitor settings persist a bounded threshold and customizable alert window
 
 test('monitoring prefers SSE event delivery and falls back to two-second incremental polling', () => {
   assert.match(appJs, /new EventSource\(`\$\{API_ROOT\}\/monitor\/stream`\)/);
-  for (const eventType of ['snapshot', 'event', 'buy', 'health']) {
+  for (const eventType of ['snapshot', 'event', 'buy', 'sell', 'transfer', 'token_create', 'health']) {
     assert.match(appJs, new RegExp(`source\\.addEventListener\\('${eventType}'`));
   }
   assert.match(appJs, /MONITOR_POLL_INTERVAL_MS = 2_000/);
@@ -610,15 +633,41 @@ test('custom-window clusters count distinct wallets and permanently deduplicate 
   assert.match(appJs, /playNew && state\.monitorSoundEnabled/);
 });
 
-test('sound activation is gesture-driven and every buy exposes DeBot and Blockscout links', () => {
+test('generic wallet events support native transfers, event metadata and safe links', () => {
+  assert.match(indexHtml, /id="monitor-page-title">实时链上监控</);
+  assert.match(indexHtml, /id="monitor-feed-title">实时链上流水</);
+  assert.match(indexHtml, /等待钱包动态/);
+  assert.match(appJs, /firstValue\(source, \['eventType', 'event_type', 'type'\], 'buy'\)/);
+  assert.match(appJs, /recipient: normalizeAddress\(firstValue\(source, \[[\s\S]*'counterpartyAddress'[\s\S]*'to'/);
+  assert.match(appJs, /platform: String\(firstValue\(source, \['platform', 'protocol', 'dex', 'source'\]/);
+  assert.match(appJs, /if \(!event\.walletAddress\) continue/);
+  assert.match(appJs, /if \(event\.eventType !== 'buy'\) continue/);
+  assert.match(appJs, /event\.tokenAddress[\s\S]*\? safeHttpUrl\(event\.debotTokenUrl\)[\s\S]*: ''/);
+  assert.match(appJs, /接收方 \$\{escapeHtml\(recipientLabel\)\}/);
+  assert.match(appJs, /function monitorPlatformLabel\(value\)/);
+  assert.match(appJs, /平台 \$\{escapeHtml\(monitorPlatformLabel\(event\.platform\)\)\}/);
+  assert.match(appJs, /event\.eventType === 'token_create'[^\n]+Noxa 发币[^\n]+直接部署/);
+  for (const [eventType, label] of [['buy', '买入'], ['sell', '卖出'], ['transfer', '转账'], ['token_create', '创建代币']]) {
+    assert.equal(appJs.includes(`${eventType}: '${label}'`), true, `missing monitor event label ${eventType}`);
+    assert.match(stylesCss, new RegExp(`\\.monitor-event-type\\.${eventType.replace('_', '_')}`));
+  }
+  const mergeSource = appJs.slice(appJs.indexOf('function mergeMonitorEvents'), appJs.indexOf('function computedMonitorClusters'));
+  assert.doesNotMatch(mergeSource, /!event\.tokenAddress/);
+  assert.match(stylesCss, /\.monitor-event-meta span \{[\s\S]*text-overflow: ellipsis/);
+});
+
+test('single-wallet browser sound is gesture-driven and strictly gated by soundAlert', () => {
   assert.match(indexHtml, /id="monitor-sound-button"[\s\S]*开启声音 \/ 试听/);
   assert.match(indexHtml, /id="monitor-sound-status"[^>]*data-enabled="false"/);
   assert.match(appJs, /elements\.monitorSoundButton\.addEventListener\('click'/);
   assert.match(appJs, /window\.AudioContext \|\| window\.webkitAudioContext/);
   assert.match(appJs, /声音提醒已开启/);
   assert.match(appJs, /声音提醒已关闭/);
+  assert.match(appJs, /soundAlert: source\.soundAlert === true \|\| source\.sound_alert === true/);
+  assert.match(appJs, /if \(!events\.some\(\(event\) => event\.soundAlert === true\)\) return/);
+  assert.match(appJs, /if \(!initial\) playMonitorEventSounds\(added\)/);
+  assert.match(appJs, /playMonitorEventSounds\(added\);[\s\S]*synchronizeMonitorAlerts/);
   assert.match(appJs, /const walletUrl = safeHttpUrl\(event\.debotAddressUrl\) \|\| `\$\{DEBOT_ADDRESS_ROOT\}\/\$\{event\.walletAddress\}`/);
-  assert.match(appJs, /const tokenUrl = safeHttpUrl\(event\.debotTokenUrl\) \|\| `\$\{DEBOT_TOKEN_ROOT\}\$\{event\.tokenAddress\}`/);
   assert.match(appJs, /const transactionUrl = safeHttpUrl\(event\.explorerTxUrl\) \|\| \(event\.txHash \? `\$\{EXPLORER_ROOT\}\/tx\/\$\{event\.txHash\}`/);
   assert.match(appJs, /金额不限/);
 });
@@ -669,4 +718,7 @@ test('real-time monitoring remains contained on narrow mobile screens', () => {
   assert.match(stylesCss, /\.monitor-settings-form \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(stylesCss, /\.monitor-window-field input,[\s\S]*\.monitor-settings-form \.monitor-enabled-control,[\s\S]*\.monitor-settings-form \.monitor-save-button \{[\s\S]*width: 100%/);
   assert.match(stylesCss, /\.monitor-bark-item \{[\s\S]*min-width: 0/);
+  assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.manual-wallet-lines-field,[\s\S]*\.manual-wallet-feedback \{[\s\S]*grid-column: 1/);
+  assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.wallet-rule-row \{[\s\S]*grid-template-columns: minmax\(0, 1fr\) repeat\(3, 46px\)/);
+  assert.match(stylesCss, /\.monitor-event-meta \{[\s\S]*min-width: 0[\s\S]*flex-wrap: wrap/);
 });

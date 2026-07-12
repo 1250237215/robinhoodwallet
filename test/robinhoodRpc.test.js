@@ -229,6 +229,29 @@ test('batch transaction and receipt lookups preserve input order across reversed
   assert.deepEqual(batches.map((batch) => batch.length), [2, 1, 2, 1]);
 });
 
+test('batch block lookups preserve order and request full transactions when enabled', async () => {
+  const batches = [];
+  const client = new RobinhoodRpcClient({
+    batchSize: 2,
+    batchDelayMs: 0,
+    fetchImpl: async (_url, options) => {
+      const requests = JSON.parse(options.body);
+      batches.push(requests);
+      return jsonResponse(requests.map((request) => ({
+        jsonrpc: '2.0',
+        id: request.id,
+        result: { number: request.params[0], transactions: request.params[1] ? [{}] : [] }
+      })).reverse());
+    }
+  });
+
+  const blocks = await client.getBlocksByNumbers([10, 11, 12], { includeTransactions: true });
+  assert.deepEqual(blocks.map((block) => block.number), ['0xa', '0xb', '0xc']);
+  assert.deepEqual(batches.map((batch) => batch.length), [2, 1]);
+  assert.equal(batches.flat().every((request) => request.method === 'eth_getBlockByNumber'), true);
+  assert.equal(batches.flat().every((request) => request.params[1] === true), true);
+});
+
 test('eth_call supports a block tag and optional state override', async () => {
   const stateOverride = { '0x1111111111111111111111111111111111111111': { balance: '0x1' } };
   const client = new RobinhoodRpcClient({

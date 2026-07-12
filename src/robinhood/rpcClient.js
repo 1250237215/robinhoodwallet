@@ -270,6 +270,25 @@ export class RobinhoodRpcClient {
     return this.request('eth_getBlockByNumber', [toBlockTag(blockNumber), Boolean(includeTransactions)], { signal });
   }
 
+  async getBlocksByNumbers(blockNumbers, { includeTransactions = false, batchSize = this.batchSize, signal } = {}) {
+    if (!Array.isArray(blockNumbers)) throw new TypeError('blockNumbers must be an array');
+    const size = asPositiveInteger(batchSize, this.batchSize);
+    const results = [];
+    for (let index = 0; index < blockNumbers.length; index += size) {
+      throwIfAborted(signal, 'eth_getBlockByNumber');
+      const chunk = blockNumbers.slice(index, index + size);
+      const values = await this.batchRequest(chunk.map((blockNumber) => ({
+        method: 'eth_getBlockByNumber',
+        params: [toBlockTag(blockNumber), Boolean(includeTransactions)]
+      })), { signal });
+      results.push(...values);
+      if (index + size < blockNumbers.length && this.batchDelayMs > 0) {
+        await this.sleep(this.batchDelayMs, { signal });
+      }
+    }
+    return results;
+  }
+
   async findBlockByTimestamp(timestamp, { lowBlock = 0, highBlock, signal } = {}) {
     const target = normalizeTimestamp(timestamp);
     let low = fromBlockInput(lowBlock, 'lowBlock');

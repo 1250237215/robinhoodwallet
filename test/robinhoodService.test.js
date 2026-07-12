@@ -808,6 +808,97 @@ test('persists, filters, and preserves wallet monitor tiers', (t) => {
   assert.throws(() => service.updateWallet(walletA, { monitorTier: 'vip' }), /Unsupported wallet monitor tier/);
 });
 
+test('merges strict per-event monitor rule patches into complete safe rules', (t) => {
+  const { service, store } = createService();
+  t.after(() => store.close());
+
+  const first = service.updateWallet(walletA, {
+    monitorRules: {
+      buy: { sound: true },
+      sell: { enabled: true, bark: true }
+    }
+  });
+  assert.deepEqual(first.wallet.monitorRules, {
+    buy: { enabled: true, sound: true, bark: false },
+    sell: { enabled: true, sound: false, bark: true },
+    transfer: { enabled: false, sound: false, bark: false },
+    token_create: { enabled: false, sound: false, bark: false }
+  });
+
+  const second = service.updateWallet(walletA, { monitorRules: { buy: { enabled: false } } });
+  assert.deepEqual(second.wallet.monitorRules, {
+    buy: { enabled: false, sound: true, bark: false },
+    sell: { enabled: true, sound: false, bark: true },
+    transfer: { enabled: false, sound: false, bark: false },
+    token_create: { enabled: false, sound: false, bark: false }
+  });
+  assert.deepEqual(store.getWalletAnnotation(walletA).monitorRules, second.wallet.monitorRules);
+
+  assert.throws(
+    () => service.updateWallet(walletA, { monitorRules: { mint: { enabled: true } } }),
+    /Unsupported monitorRules event/
+  );
+  assert.throws(
+    () => service.updateWallet(walletA, { monitorRules: { buy: { enabled: 'yes' } } }),
+    /must be a boolean/
+  );
+  assert.throws(
+    () => service.updateWallet(walletA, { monitorRules: { buy: { volume: true } } }),
+    /Unsupported monitorRules field/
+  );
+  assert.throws(
+    () => service.updateWallet(walletA, { monitorRules: {} }),
+    /must include at least one event/
+  );
+});
+
+test('batch imports wallets with partial success, deduplication, and note preservation', (t) => {
+  const { service, store } = createService();
+  t.after(() => store.close());
+  service.updateWallet(walletB, { status: 'excluded', note: 'Keep excluded note' });
+  service.updateWallet(walletC, { status: 'active', note: 'Old note' });
+  service.updateWallet(walletLegacy, { status: 'watch', note: 'Keep watch note' });
+
+  const result = service.batchUpdateWallets([
+    `${walletA.toUpperCase().replace('0X', '0x')},New wallet`,
+    walletB,
+    `${walletC},Updated note`,
+    `${walletC.toUpperCase().replace('0X', '0x')},Ignored duplicate note`,
+    walletLegacy,
+    'not-a-wallet',
+    '',
+    123
+  ]);
+
+  assert.deepEqual(result.counts, {
+    created: 1,
+    restored: 1,
+    updated: 1,
+    duplicate: 2,
+    invalid: 2
+  });
+  assert.equal(result.total, 7);
+  assert.equal(result.processed, 3);
+  assert.equal(result.valid, 5);
+  assert.equal(result.ignoredBlank, 1);
+  assert.deepEqual(result.results.map((entry) => entry.result), [
+    'created',
+    'restored',
+    'updated',
+    'duplicate',
+    'duplicate',
+    'invalid',
+    'invalid'
+  ]);
+  assert.equal(store.getWalletAnnotation(walletA).note, 'New wallet');
+  assert.equal(store.getWalletAnnotation(walletB).status, 'active');
+  assert.equal(store.getWalletAnnotation(walletB).note, 'Keep excluded note');
+  assert.equal(store.getWalletAnnotation(walletC).note, 'Updated note');
+  assert.equal(store.getWalletAnnotation(walletLegacy).status, 'watch');
+  assert.equal(store.getWalletAnnotation(walletLegacy).note, 'Keep watch note');
+  assert.throws(() => service.batchUpdateWallets(new Array(501).fill(walletA)), /cannot exceed 500 lines/);
+});
+
 test('an annotation-only smart wallet keeps the manual library ready before scan data exists', (t) => {
   const { service, store } = createService();
   t.after(() => store.close());

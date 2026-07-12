@@ -1,5 +1,10 @@
 import { buildWalletSummaries, discoveryMultiple } from './qualification.js';
 import { DEFAULT_SMART_SCORE_WEIGHTS } from './config.js';
+import {
+  applyWalletMonitorRulesPatch,
+  defaultWalletMonitorRules,
+  normalizeWalletMonitorRules
+} from './monitorRules.js';
 import { normalizeWalletMonitorTier, WALLET_MONITOR_TIERS } from './tiering.js';
 
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
@@ -16,6 +21,7 @@ const DEFAULT_FILTERS = Object.freeze({
 });
 
 const MAX_MIN_ENTRY_USD = 1_000_000_000;
+export const MAX_WALLET_BATCH_LINES = 500;
 
 function nowIso(now) {
   return new Date(now()).toISOString();
@@ -89,6 +95,7 @@ function walletAnnotationDefaults(address) {
     status: 'active',
     classificationOverride: null,
     monitorTier: 'watch',
+    monitorRules: defaultWalletMonitorRules(),
     createdAt: null,
     updatedAt: null
   };
@@ -103,7 +110,8 @@ function mergeWalletAnnotation(summary, annotation, address) {
     address: normalized,
     tags: normalizedTags(annotation?.tags),
     status: normalizedWalletStatus(annotation?.status),
-    monitorTier
+    monitorTier,
+    monitorRules: normalizeWalletMonitorRules(annotation?.monitorRules)
   };
   const computedClassification = summary?.classification || null;
   const classification = curation.classificationOverride || computedClassification;
@@ -805,6 +813,9 @@ export class RobinhoodService {
       ? String(patch.monitorTier || '').toLowerCase()
       : normalizeWalletMonitorTier(existing.monitorTier);
     if (!WALLET_MONITOR_TIERS.has(monitorTier)) throw new TypeError('Unsupported wallet monitor tier');
+    const monitorRules = Object.hasOwn(patch, 'monitorRules')
+      ? applyWalletMonitorRulesPatch(existing.monitorRules, patch.monitorRules)
+      : normalizeWalletMonitorRules(existing.monitorRules);
     if (Object.hasOwn(patch, 'tags') && !Array.isArray(patch.tags)) {
       throw new TypeError('Wallet tags must be an array');
     }
@@ -818,6 +829,7 @@ export class RobinhoodService {
       status,
       classificationOverride,
       monitorTier,
+      monitorRules,
       createdAt: existing.createdAt || now,
       updatedAt: now
     });
@@ -827,6 +839,144 @@ export class RobinhoodService {
       tokens: [],
       updatedAt: nowIso(this.now)
     };
+  }
+
+  batchUpdateWallets(lines) {
+    const sourceLines = typeof lines === 'string'
+      ? lines.split(/\r\n?|\n/)
+      : Array.isArray(lines)
+        ? lines
+        : null;
+    if (!sourceLines) throw new TypeError('Wallet batch lines must be a string or an array');
+    if (sourceLines.length > MAX_WALLET_BATCH_LINES) {
+      throw new TypeError(`Wallet batch cannot exceed ${MAX_WALLET_BATCH_LINES} lines`);
+    }
+
+    const response = {
+      ok: true,
+      total: 0,
+      processed: 0,
+      valid: 0,
+      created: 0,
+      restored: 0,
+      updated: 0,
+      duplicate: 0,
+      invalid: 0,
+      ignoredBlank: 0,
+      counts: {
+        created: 0,
+        restored: 0,
+        updated: 0,
+        duplicate: 0,
+        invalid: 0
+      },
+      results: []
+    };
+    const seen = new Map();
+
+    for (let index = 0; index < sourceLines.length; index += 1) {
+      const lineNumber = index + 1;
+      const sourceLine = sourceLines[index];
+      if (typeof sourceLine !== 'string') {
+        response.total += 1;
+        response.invalid += 1;
+        response.results.push({
+          line: lineNumber,
+          input: String(sourceLine).slice(0, 200),
+          result: 'invalid',
+          reason: 'Line must be a string'
+        });
+        continue;
+      }
+      const trimmed = sourceLine.trim();
+      if (!trimmed) {
+        response.ignoredBlank += 1;
+        continue;
+      }
+
+      response.total += 1;
+      const commaIndex = trimmed.indexOf(',');
+      const rawAddress = (commaIndex >= 0 ? trimmed.slice(0, commaIndex) : trimmed).trim();
+      const noteProvided = commaIndex >= 0;
+      const note = noteProvided ? trimmed.slice(commaIndex + 1).trim() : undefined;
+      const address = normalizeAddress(rawAddress);
+      if (!isRobinhoodAddress(address)) {
+        response.invalid += 1;
+        response.results.push({
+          line: lineNumber,
+          input: trimmed.slice(0, 200),
+          result: 'invalid',
+          reason: 'Invalid Robinhood wallet address'
+        });
+        continue;
+      }
+      if (noteProvided && note.length > 4000) {
+        response.invalid += 1;
+        response.results.push({
+          line: lineNumber,
+          address,
+          result: 'invalid',
+          reason: 'Wallet note is too long'
+        });
+        continue;
+      }
+      response.valid += 1;
+      if (seen.has(address)) {
+        response.duplicate += 1;
+        response.results.push({
+          line: lineNumber,
+          address,
+          result: 'duplicate',
+          reason: 'Duplicate address in this batch',
+          duplicateOf: seen.get(address)
+        });
+        continue;
+      }
+      seen.set(address, lineNumber);
+
+      const existing = this.store.getWalletAnnotation?.(address) || null;
+      let result;
+      let update;
+      if (!existing) {
+        result = 'created';
+        update = { status: 'active', ...(noteProvided ? { note } : {}) };
+      } else if (existing.status === 'excluded') {
+        result = 'restored';
+        update = { status: 'active', ...(noteProvided ? { note } : {}) };
+      } else if (noteProvided && note !== existing.note) {
+        result = 'updated';
+        update = { note };
+      } else {
+        response.duplicate += 1;
+        response.results.push({
+          line: lineNumber,
+          address,
+          result: 'duplicate',
+          reason: 'Wallet already exists with the same active state and note'
+        });
+        continue;
+      }
+
+      const updated = this.updateWallet(address, update);
+      response[result] += 1;
+      response.processed += 1;
+      response.results.push({
+        line: lineNumber,
+        address,
+        result,
+        walletStatus: updated.wallet.status,
+        note: updated.wallet.note
+      });
+    }
+
+    for (const outcome of ['created', 'restored', 'updated', 'duplicate', 'invalid']) {
+      response.counts[outcome] = response[outcome];
+    }
+    return response;
+  }
+
+  importWalletBatch(lines) {
+    return this.batchUpdateWallets(lines);
   }
 
   deleteWallet(address) {

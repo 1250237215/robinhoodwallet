@@ -91,6 +91,41 @@ function formatAlertWindow(value) {
   return normalized % 60 === 0 ? `${normalized / 60} 分钟` : `${normalized} 秒`;
 }
 
+function shortAddress(value) {
+  const address = String(value || '');
+  return /^0x[0-9a-f]{40}$/i.test(address)
+    ? `${address.slice(0, 6)}...${address.slice(-4)}`
+    : address;
+}
+
+function walletEventMessage(event) {
+  const labels = {
+    buy: '买入',
+    sell: '卖出',
+    transfer: '转出',
+    token_create: '发币'
+  };
+  const eventType = labels[event?.eventType] ? event.eventType : 'buy';
+  const label = labels[eventType];
+  const wallet = String(event?.walletAlias || '').trim() || shortAddress(event?.walletAddress);
+  const symbol = String(event?.tokenSymbol || (event?.assetType === 'native' ? 'ETH' : 'TOKEN'));
+  if (eventType === 'token_create') {
+    const platform = event?.platform === 'noxa' ? 'Noxa' : '直接部署';
+    return {
+      title: `${wallet} 发币`,
+      body: `${wallet} 通过${platform}创建 ${symbol}（${shortAddress(event?.tokenAddress)}）`
+    };
+  }
+  const amount = String(event?.tokenAmount || '0');
+  const recipient = eventType === 'transfer' && event?.counterpartyAddress
+    ? `，接收方 ${shortAddress(event.counterpartyAddress)}`
+    : '';
+  return {
+    title: `${wallet} ${label} ${symbol}`,
+    body: `${wallet} ${label} ${amount} ${symbol}${recipient}`
+  };
+}
+
 function notificationUrl(endpoint, { title, body, sound = 'alarm', volume = 5, url = '' } = {}) {
   const base = normalizeBarkEndpoint(endpoint);
   const request = new URL(`${base}/${encodeURIComponent(String(title || 'Robinhood 聪明钱提醒'))}/${encodeURIComponent(String(body || '监控地址出现集合买入'))}`);
@@ -179,6 +214,23 @@ export class RobinhoodBarkNotifier {
       sound,
       volume,
       url: cluster?.debotTokenUrl || ''
+    })));
+    return {
+      attempted: targets.length,
+      sent: results.filter((result) => result.status === 'fulfilled').length,
+      failed: results.filter((result) => result.status === 'rejected').length
+    };
+  }
+
+  async notifyWalletEvent({ event, sound = 'alarm', volume = 5 } = {}) {
+    const targets = this.store.listMonitorBarkTargets().filter((target) => target.enabled);
+    if (!targets.length) return { attempted: 0, sent: 0, failed: 0 };
+    const message = walletEventMessage(event);
+    const results = await Promise.allSettled(targets.map((target) => this.#send(target, {
+      ...message,
+      sound,
+      volume,
+      url: event?.explorerTxUrl || ''
     })));
     return {
       attempted: targets.length,
