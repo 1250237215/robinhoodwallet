@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Robinhood 聪明钱雷达</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="app-header">
+        <div class="brand-block">
+          <div class="chain-mark" aria-hidden="true">R</div>
+          <div class="brand-copy">
+            <h1>Robinhood 聪明钱雷达</h1>
+            <p>手工金狗、最近重扫候选与已确认地址库</p>
+          </div>
+        </div>
+
+        <dl class="header-stats" aria-label="数据概览">
+          <div>
+            <dt>最近重扫候选</dt>
+            <dd id="candidate-count">--</dd>
+          </div>
+          <div>
+            <dt>已确认地址</dt>
+            <dd id="wallet-count">--</dd>
+          </div>
+          <div>
+            <dt>手工金狗</dt>
+            <dd id="winner-count">--</dd>
+          </div>
+          <div>
+            <dt>更新时间</dt>
+            <dd id="updated-at">--</dd>
+          </div>
+          <div>
+            <dt>单币买入</dt>
+            <dd id="min-entry-summary">$500 起</dd>
+          </div>
+        </dl>
+
+        <div class="header-actions">
+          <button class="icon-button" id="refresh-button" type="button" title="刷新数据" aria-label="刷新数据">
+            <i data-lucide="refresh-cw" aria-hidden="true"></i>
+          </button>
+          <button class="icon-button primary" id="scan-button" type="button" title="重扫手工金狗" aria-label="重扫手工金狗">
+            <i data-lucide="radar" aria-hidden="true"></i>
+          </button>
+        </div>
+      </header>
+
+      <section class="system-status" id="system-status" data-state="loading" aria-live="polite">
+        <span class="status-indicator" aria-hidden="true"></span>
+        <div class="status-copy">
+          <strong id="status-title">正在读取链上索引</strong>
+          <span id="status-message">首次加载可能需要几秒。</span>
+        </div>
+        <span class="status-progress" id="status-progress"></span>
+      </section>
+
+      <section class="submission-dock" id="submission-dock" aria-label="提交金狗 CA">
+        <div class="submission-heading">
+          <span class="submission-eyebrow">金狗队列</span>
+          <h2>提交 CA</h2>
+        </div>
+        <form class="manual-token-form" id="manual-token-form" novalidate>
+          <label class="sr-only" for="manual-token-address">金狗 CA</label>
+          <textarea
+            id="manual-token-address"
+            name="address"
+            rows="2"
+            inputmode="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="0x..."
+            aria-describedby="manual-token-feedback"
+          ></textarea>
+          <div class="manual-token-actions">
+            <button class="command-button" type="submit">
+              <i data-lucide="scan-line" aria-hidden="true"></i>
+              加入分析
+            </button>
+            <span class="field-feedback" id="manual-token-feedback" aria-live="polite"></span>
+          </div>
+        </form>
+      </section>
+
+      <section class="workspace-toolbar" aria-label="研究条件">
+        <nav class="view-tabs" id="view-tabs" aria-label="地址分类">
+          <button class="tab-button" type="button" data-tab="monitor" aria-selected="false">
+            <i data-lucide="radio" aria-hidden="true"></i>
+            实时监控
+          </button>
+          <button class="tab-button is-active" type="button" data-tab="candidates" aria-selected="true">最近重扫候选</button>
+          <button class="tab-button" type="button" data-tab="all_round" aria-selected="false">已确认地址库</button>
+          <button class="tab-button" type="button" data-tab="winners" aria-selected="false">金狗队列</button>
+        </nav>
+
+        <form class="filter-form" id="filter-form">
+          <label class="filter-field compact-field">
+            <span>最少命中</span>
+            <input id="min-hits" name="minHits" type="number" min="0" max="100" step="1" value="1" />
+          </label>
+
+          <label class="filter-field compact-field">
+            <span>单币最低买入 ($)</span>
+            <input id="min-entry-input" name="minEntryUsd" type="number" min="0" max="1000000000" step="1" value="500" />
+          </label>
+
+          <fieldset class="filter-field multiple-field">
+            <legend>最低收益倍数</legend>
+            <div class="segmented-control" id="multiple-control">
+              <button class="is-active" type="button" data-strategy="smart" aria-pressed="true">智能</button>
+              <button type="button" data-multiple="5">5x</button>
+              <button type="button" data-multiple="10">10x</button>
+              <button type="button" data-multiple="50">50x</button>
+              <button type="button" data-multiple="100">100x</button>
+            </div>
+          </fieldset>
+
+          <label class="filter-field">
+            <span>收益模式</span>
+            <select id="profit-mode" name="mode">
+              <option value="both">已实现 + 未实现</option>
+              <option value="realized">只看已实现</option>
+              <option value="unrealized">只看未实现</option>
+            </select>
+          </label>
+
+          <label class="filter-field">
+            <span>归因置信度</span>
+            <select id="confidence" name="confidence">
+              <option value="all" selected>全部</option>
+              <option value="high">高置信</option>
+              <option value="medium">中等以上</option>
+            </select>
+          </label>
+
+          <label class="exclusion-control">
+            <input id="exclude-noise" name="excludeNoise" type="checkbox" checked />
+            <span>排除 Dev / 路由 / 池子 / 捆绑 / 对敲 / 高频撒网</span>
+          </label>
+
+          <button class="apply-button" type="submit">
+            <i data-lucide="list-filter" aria-hidden="true"></i>
+            应用条件
+          </button>
+        </form>
+
+        <form class="library-filter-form" id="library-filter-form">
+          <label class="library-search-field">
+            <i data-lucide="search" aria-hidden="true"></i>
+            <span class="sr-only">搜索地址库</span>
+            <input id="wallet-search" name="search" type="search" autocomplete="off" placeholder="搜索地址、别名、标签或备注" />
+          </label>
+          <label class="library-select-field">
+            <span>状态</span>
+            <select id="wallet-status" name="status">
+              <option value="" selected>活跃 + 观察</option>
+              <option value="active">仅活跃</option>
+              <option value="watch">仅观察</option>
+              <option value="excluded">已排除</option>
+              <option value="all">全部（含排除）</option>
+            </select>
+          </label>
+          <label class="library-select-field library-tier-field" id="wallet-monitor-tier-field" hidden>
+            <span>钱包分组</span>
+            <select id="wallet-monitor-tier" name="monitorTier">
+              <option value="all" selected>全部分组</option>
+              <option value="core">核心钱包</option>
+              <option value="watch">普通观察钱包</option>
+              <option value="high_frequency">高频钱包</option>
+            </select>
+          </label>
+          <label class="library-tag-field">
+            <span>标签</span>
+            <input id="wallet-tag" name="tag" type="text" autocomplete="off" placeholder="例如：早期" />
+          </label>
+          <button class="library-filter-clear" id="library-filter-clear" type="button" title="清除地址库筛选" aria-label="清除地址库筛选">
+            <i data-lucide="rotate-ccw" aria-hidden="true"></i>
+          </button>
+          <button class="debot-export-button" id="debot-export-button" type="button" hidden>
+            <i data-lucide="file-up" aria-hidden="true"></i>
+            导出到 DeBot
+          </button>
+        </form>
+      </section>
+
+      <section class="monitor-page" id="monitor-page" aria-labelledby="monitor-page-title" hidden>
+        <section class="monitor-control-band">
+          <div class="monitor-title-block">
+            <span class="monitor-kicker">地址库链上动态</span>
+            <div class="monitor-title-line">
+              <h2 id="monitor-page-title">实时买入监控</h2>
+              <span class="monitor-connection-badge" id="monitor-connection-badge" data-state="loading">
+                <span aria-hidden="true"></span>
+                <strong id="monitor-connection-text">正在连接</strong>
+              </span>
+            </div>
+            <p id="monitor-window-description">已确认地址 · 金额不限 · 60 秒滚动窗口</p>
+          </div>
+
+          <form class="monitor-settings-form" id="monitor-settings-form">
+            <label class="monitor-threshold-field" for="monitor-threshold">
+              <span id="monitor-threshold-label">60 秒同币提醒人数</span>
+              <input id="monitor-threshold" name="threshold" type="number" min="1" max="1000" step="1" value="3" inputmode="numeric" />
+            </label>
+            <label class="monitor-window-field" for="monitor-window-seconds">
+              <span>警报时间窗口（秒）</span>
+              <input id="monitor-window-seconds" name="windowSeconds" type="number" min="5" max="3600" step="1" value="60" inputmode="numeric" />
+            </label>
+            <label class="monitor-enabled-control">
+              <input id="monitor-enabled" name="enabled" type="checkbox" checked />
+              <span>运行监控</span>
+            </label>
+            <button class="monitor-save-button" id="monitor-save-button" type="submit">
+              <i data-lucide="save" aria-hidden="true"></i>
+              保存
+            </button>
+          </form>
+
+        </section>
+
+        <dl class="monitor-health-grid" aria-label="实时监控状态">
+          <div>
+            <dt><i data-lucide="shield-check" aria-hidden="true"></i>监控状态</dt>
+            <dd id="monitor-health-status">连接中</dd>
+            <span id="monitor-health-detail">正在读取服务状态</span>
+          </div>
+          <div>
+            <dt><i data-lucide="wallet-cards" aria-hidden="true"></i>已监控地址</dt>
+            <dd id="monitor-wallet-count">--</dd>
+            <span>仅已确认地址库</span>
+          </div>
+          <div>
+            <dt><i data-lucide="boxes" aria-hidden="true"></i>最新区块</dt>
+            <dd id="monitor-latest-block">--</dd>
+            <span id="monitor-last-block-time">等待新区块</span>
+          </div>
+          <div>
+            <dt><i data-lucide="timer" aria-hidden="true"></i>同步延迟</dt>
+            <dd id="monitor-block-lag">--</dd>
+            <span id="monitor-transport-label">正在建立连接</span>
+          </div>
+        </dl>
+
+        <section class="monitor-alert-panel" aria-labelledby="monitor-alert-title">
+          <header class="monitor-panel-head monitor-alert-head">
+            <div>
+              <h3 id="monitor-alert-title">警报通知</h3>
+              <p>浏览器声音与 Bark 推送同时触发</p>
+            </div>
+            <i data-lucide="bell-ring" aria-hidden="true"></i>
+          </header>
+
+          <div class="monitor-alert-layout">
+            <form class="monitor-sound-settings-form" id="monitor-sound-settings-form">
+              <div class="monitor-alert-section-title">
+                <i data-lucide="volume-2" aria-hidden="true"></i>
+                <strong>浏览器声音</strong>
+                <span class="monitor-sound-status" id="monitor-sound-status" data-enabled="false">
+                  <i data-lucide="volume-x" aria-hidden="true"></i>
+                  <span>未开启</span>
+                </span>
+              </div>
+              <div class="monitor-sound-fields">
+                <label class="monitor-sound-field" for="monitor-sound-select">
+                  <span>提示音</span>
+                  <select id="monitor-sound-select" name="sound">
+                    <option value="alarm">警报</option>
+                    <option value="bell">铃声</option>
+                    <option value="electronic">电子</option>
+                    <option value="glass">玻璃</option>
+                  </select>
+                </label>
+                <label class="monitor-volume-field" for="monitor-volume">
+                  <span>音量 <output id="monitor-volume-output" for="monitor-volume">70%</output></span>
+                  <input id="monitor-volume" name="volume" type="range" min="0" max="100" step="1" value="70" />
+                </label>
+              </div>
+              <div class="monitor-sound-controls">
+                <button class="monitor-save-button" id="monitor-sound-save-button" type="submit">
+                  <i data-lucide="save" aria-hidden="true"></i>
+                  保存声音
+                </button>
+                <button class="monitor-sound-button" id="monitor-sound-button" type="button">
+                  <i data-lucide="play" aria-hidden="true"></i>
+                  <span>开启声音 / 试听</span>
+                </button>
+                <button class="inline-icon-button monitor-mute-button" id="monitor-mute-button" type="button" title="关闭浏览器声音" aria-label="关闭浏览器声音" hidden>
+                  <i data-lucide="volume-x" aria-hidden="true"></i>
+                </button>
+              </div>
+            </form>
+
+            <div class="monitor-bark-manager">
+              <div class="monitor-alert-section-title">
+                <i data-lucide="smartphone" aria-hidden="true"></i>
+                <strong>Bark 推送</strong>
+                <span id="monitor-bark-count">0 个 API</span>
+              </div>
+              <form class="monitor-bark-settings-form" id="monitor-bark-settings-form">
+                <label class="monitor-sound-field" for="monitor-bark-sound-select">
+                  <span>Bark 提示音</span>
+                  <select id="monitor-bark-sound-select" name="barkSound">
+                    <option value="alarm">警报</option>
+                    <option value="bell">铃声</option>
+                    <option value="electronic">电子</option>
+                    <option value="glass">玻璃</option>
+                    <option value="anticipate">期待</option>
+                    <option value="birdsong">鸟鸣</option>
+                    <option value="bloom">绽放</option>
+                    <option value="calypso">卡利普索</option>
+                    <option value="chime">风铃</option>
+                    <option value="fanfare">号角</option>
+                    <option value="horn">喇叭</option>
+                    <option value="noir">黑色电影</option>
+                    <option value="suspense">悬念</option>
+                    <option value="telegraph">电报</option>
+                    <option value="tiptoes">轻步</option>
+                    <option value="typewriters">打字机</option>
+                    <option value="update">更新</option>
+                  </select>
+                </label>
+                <label class="monitor-volume-field" for="monitor-bark-volume">
+                  <span>Bark 响度 <output id="monitor-bark-volume-output" for="monitor-bark-volume">5 / 10</output></span>
+                  <input id="monitor-bark-volume" name="barkVolume" type="range" min="0" max="10" step="1" value="5" />
+                </label>
+                <button class="monitor-save-button" id="monitor-bark-settings-save-button" type="submit">
+                  <i data-lucide="save" aria-hidden="true"></i>
+                  保存 Bark 声音
+                </button>
+              </form>
+              <form class="monitor-bark-form" id="monitor-bark-form">
+                <label class="monitor-bark-endpoint-field" for="monitor-bark-endpoint">
+                  <span>Bark API 或 Key</span>
+                  <input id="monitor-bark-endpoint" name="endpoint" type="password" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://api.day.app/你的Key" required />
+                </label>
+                <label for="monitor-bark-label">
+                  <span>备注</span>
+                  <input id="monitor-bark-label" name="label" type="text" maxlength="40" autocomplete="off" placeholder="例如：主手机" />
+                </label>
+                <button class="monitor-bark-add-button" id="monitor-bark-add-button" type="submit">
+                  <i data-lucide="plus" aria-hidden="true"></i>
+                  添加 API
+                </button>
+              </form>
+              <div class="monitor-bark-list" id="monitor-bark-list" aria-live="polite">
+                <div class="monitor-bark-empty">
+                  <i data-lucide="smartphone" aria-hidden="true"></i>
+                  <span>还没有 Bark API</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div class="monitor-workspace">
+          <section class="monitor-cluster-panel" aria-labelledby="monitor-cluster-title">
+            <header class="monitor-panel-head">
+              <div>
+                <h3 id="monitor-cluster-title">60 秒同币聚合</h3>
+                <p id="monitor-cluster-summary">滚动统计最近 60 秒的不同地址</p>
+              </div>
+              <span class="monitor-window-chip" id="monitor-window-chip"><i data-lucide="clock-3" aria-hidden="true"></i><span id="monitor-window-chip-label">60 秒</span></span>
+            </header>
+            <div class="monitor-cluster-list" id="monitor-cluster-list" aria-live="polite">
+              <div class="monitor-empty-state">
+                <i data-lucide="activity" aria-hidden="true"></i>
+                <strong>暂时没有同币聚合买入</strong>
+                <span>有已确认地址买入后会立即出现。</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="monitor-feed-panel" aria-labelledby="monitor-feed-title">
+            <header class="monitor-panel-head">
+              <div>
+                <h3 id="monitor-feed-title">实时买入流水</h3>
+                <p id="monitor-feed-summary">按检测时间倒序</p>
+              </div>
+              <button class="inline-icon-button" id="monitor-refresh-button" type="button" title="刷新实时监控" aria-label="刷新实时监控">
+                <i data-lucide="refresh-cw" aria-hidden="true"></i>
+              </button>
+            </header>
+            <div class="monitor-event-feed" id="monitor-event-feed" aria-live="polite">
+              <div class="monitor-empty-state">
+                <i data-lucide="radio-tower" aria-hidden="true"></i>
+                <strong>等待已确认地址买入</strong>
+                <span>任意金额的买入都会显示在这里。</span>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="research-board" id="research-board">
+        <section class="results-panel" aria-labelledby="results-title">
+          <div class="results-head">
+            <div>
+              <h2 id="results-title">最近重扫候选</h2>
+              <p id="results-summary">按智能评分排序</p>
+            </div>
+            <div class="result-tools">
+              <div class="candidate-actions" id="candidate-actions">
+                <label class="select-page-control">
+                  <input id="select-page-candidates" type="checkbox" />
+                  <span>全选当前页</span>
+                </label>
+                <button class="batch-confirm-button" id="confirm-selected-button" type="button" disabled>
+                  <i data-lucide="badge-check" aria-hidden="true"></i>
+                  <span id="confirm-selected-label">确认选中入库</span>
+                </button>
+                <button class="batch-delete-button" id="delete-selected-button" type="button" disabled>
+                  <i data-lucide="trash-2" aria-hidden="true"></i>
+                  <span id="delete-selected-label">批量删除</span>
+                </button>
+              </div>
+              <label class="sort-control" for="sort-select">
+                <span>排序</span>
+                <select id="sort-select">
+                  <option value="name">名称 A-Z</option>
+                  <option value="smart_score" selected>智能评分</option>
+                  <option value="total_profit">总盈利</option>
+                  <option value="holding_value">持仓市值</option>
+                  <option value="holder_rank">Holder 排名</option>
+                  <option value="realized_profit">已实现盈利</option>
+                  <option value="unrealized_profit">未实现盈利</option>
+                  <option value="best_multiple">最高倍数</option>
+                  <option value="hits">命中次数</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <form class="manual-wallet-form" id="manual-wallet-form" hidden novalidate>
+            <label class="manual-wallet-address-field" for="manual-wallet-address">
+              <span class="sr-only">钱包地址</span>
+              <input id="manual-wallet-address" name="address" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="输入钱包地址 0x..." required />
+            </label>
+            <label class="manual-wallet-note-field" for="manual-wallet-note">
+              <span class="sr-only">地址备注</span>
+              <input id="manual-wallet-note" name="note" type="text" maxlength="4000" autocomplete="off" placeholder="备注（可选）" />
+            </label>
+            <button class="command-button manual-wallet-add-button" id="manual-wallet-add-button" type="submit">
+              <i data-lucide="plus" aria-hidden="true"></i>
+              添加地址
+            </button>
+          </form>
+
+          <div class="table-scroll" id="results-container" aria-live="polite">
+            <div class="loading-state" role="status">
+              <span class="loading-bar"></span>
+              <span class="loading-bar short"></span>
+              <span class="loading-bar"></span>
+              <p>正在整理地址收益与命中记录...</p>
+            </div>
+          </div>
+        </section>
+
+        <aside class="detail-panel" id="detail-panel" aria-live="polite">
+          <div class="detail-placeholder">
+            <i data-lucide="mouse-pointer-2" aria-hidden="true"></i>
+            <strong>选择一个地址</strong>
+            <span>查看逐币收益、入场时间线和退出流动性。</span>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+    <dialog class="wallet-editor" id="wallet-editor" aria-labelledby="wallet-editor-title">
+      <form class="wallet-editor-form" id="wallet-editor-form" method="dialog">
+        <div class="wallet-editor-head">
+          <div>
+            <span>地址库编辑</span>
+            <h2 id="wallet-editor-title">--</h2>
+          </div>
+          <button class="icon-button" id="wallet-editor-close" type="button" title="关闭" aria-label="关闭">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+        <input id="wallet-editor-address" name="address" type="hidden" />
+        <label class="editor-field">
+          <span>别名</span>
+          <input id="wallet-editor-alias" name="alias" type="text" maxlength="120" autocomplete="off" />
+        </label>
+        <label class="editor-field">
+          <span>标签</span>
+          <input id="wallet-editor-tags" name="tags" type="text" maxlength="512" autocomplete="off" placeholder="早期, 重复命中" />
+        </label>
+        <div class="editor-field-grid">
+          <label class="editor-field">
+            <span>状态</span>
+            <select id="wallet-editor-status" name="status">
+              <option value="active">活跃</option>
+              <option value="watch">观察</option>
+              <option value="excluded">已排除</option>
+            </select>
+          </label>
+          <label class="editor-field">
+            <span>钱包分组</span>
+            <select id="wallet-editor-monitor-tier" name="monitorTier">
+              <option value="core">核心钱包</option>
+              <option value="watch">普通观察钱包</option>
+              <option value="high_frequency">高频钱包</option>
+            </select>
+          </label>
+          <label class="editor-field editor-classification-field">
+            <span>分类覆盖</span>
+            <select id="wallet-editor-classification" name="classificationOverride">
+              <option value="">按系统计算</option>
+              <option value="all_round">全能高手</option>
+              <option value="realized">兑现记录</option>
+              <option value="unrealized">持仓高手</option>
+              <option value="single_hit">单次命中</option>
+            </select>
+          </label>
+        </div>
+        <label class="editor-field">
+          <span>备注</span>
+          <textarea id="wallet-editor-note" name="note" rows="5" maxlength="4000"></textarea>
+        </label>
+        <div class="wallet-editor-actions">
+          <button class="danger-button" id="wallet-editor-exclude" type="button">
+            <i data-lucide="trash-2" aria-hidden="true"></i>
+            删除并禁用
+          </button>
+          <button class="command-button" type="submit">
+            <i data-lucide="save" aria-hidden="true"></i>
+            保存修改
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="vendor/lucide.js"></script>
+    <script src="app.js" type="module"></script>
+  </body>
+</html>

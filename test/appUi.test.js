@@ -1,0 +1,672 @@
+import fs from 'node:fs';
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+const indexHtml = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+const appJs = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+const stylesCss = fs.readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+
+test('home is the manual Robinhood smart-money workspace', () => {
+  assert.match(indexHtml, /<title>Robinhood 聪明钱雷达<\/title>/);
+  assert.match(indexHtml, /<h1>Robinhood 聪明钱雷达<\/h1>/);
+  assert.match(indexHtml, /手工金狗、最近重扫候选与已确认地址库/);
+  assert.match(indexHtml, /<dt>手工金狗<\/dt>/);
+  assert.match(indexHtml, /id="results-container"/);
+  assert.match(indexHtml, /id="detail-panel"/);
+});
+
+test('wallet library views and the manual gold-dog queue are first-level tabs', () => {
+  for (const [tab, label] of [
+    ['candidates', '最近重扫候选'],
+    ['all_round', '已确认地址库'],
+    ['winners', '金狗队列']
+  ]) {
+    assert.match(indexHtml, new RegExp(`data-tab="${tab}"[^>]*>${label}<`));
+  }
+  for (const [tab, label] of [['realized', '兑现候选'], ['unrealized', '持仓候选'], ['single_hit', '单次候选']]) {
+    assert.doesNotMatch(indexHtml, new RegExp(`data-tab="${tab}"[^>]*>${label}<`));
+  }
+  assert.match(indexHtml, /data-tab="candidates"[^>]*aria-selected="true"/);
+});
+
+test('wallet analysis exposes an editable per-scan minimum entry floor', () => {
+  assert.match(indexHtml, /id="min-entry-summary">\$500 起</);
+  assert.match(indexHtml, /id="min-hits"[^>]*min="0"[^>]*value="1"/);
+  assert.match(indexHtml, /单币最低买入 \(\$\)[\s\S]*id="min-entry-input"[^>]*name="minEntryUsd"[^>]*min="0"[^>]*max="1000000000"[^>]*value="500"/);
+  assert.doesNotMatch(indexHtml, /max-entries|最多出手/);
+  for (const multiple of [5, 10, 50, 100]) {
+    assert.match(indexHtml, new RegExp(`data-multiple="${multiple}"`));
+  }
+  const smartButton = indexHtml.indexOf('data-strategy="smart"');
+  const firstMultiple = indexHtml.indexOf('data-multiple="5"');
+  assert.ok(smartButton >= 0 && smartButton < firstMultiple);
+  assert.match(indexHtml, /class="is-active"[^>]*data-strategy="smart"[^>]*aria-pressed="true"[^>]*>智能</);
+  assert.match(indexHtml, /id="profit-mode"/);
+  assert.match(indexHtml, /id="confidence"/);
+  assert.match(indexHtml, /id="exclude-noise"[^>]*checked/);
+  assert.doesNotMatch(indexHtml, /id="(?:analysis-window|min-liquidity|min-wallets|max-entries)"/);
+  assert.match(appJs, /minEntryUsd: currentMinimumEntryUsd\(\)/);
+  assert.match(appJs, /minEntryUsd: String\(filters\.minEntryUsd\)/);
+  assert.match(appJs, /单币买入 ≥/);
+});
+
+test('smart strategy is the default while every request keeps the 10x compatibility fallback', () => {
+  assert.match(appJs, /activeTab: 'candidates',\s+strategy: 'smart',\s+multiple: 10/);
+  assert.match(appJs, /strategy: state\.strategy,\s+multiple: state\.multiple/);
+  assert.match(appJs, /strategy: filters\.strategy,\s+multiple: String\(filters\.multiple\)/);
+  assert.match(appJs, /const body = JSON\.stringify\(\{ \.\.\.filters, classification:/);
+  assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/refresh`, \{ method: 'POST', body \}\)/);
+  assert.match(appJs, /if \(button\.dataset\.strategy === 'smart'\) \{\s+state\.strategy = 'smart';\s+state\.multiple = 10/);
+  assert.match(appJs, /else \{\s+state\.strategy = 'multiple';\s+state\.multiple = Number\(button\.dataset\.multiple\)/);
+  assert.match(appJs, /closest\('\[data-strategy\], \[data-multiple\]'\)/);
+  assert.match(appJs, /filters\.strategy === 'smart' \? '智能策略' : `\$\{filters\.multiple\}x 起`/);
+  assert.match(stylesCss, /grid-template-columns: repeat\(5, minmax\(44px, 1fr\)\)/);
+});
+
+test('manual CA dock is always visible and supports validated batches of up to 20', () => {
+  const formTag = indexHtml.match(/<form class="manual-token-form" id="manual-token-form"[^>]*>/)?.[0];
+  assert.ok(formTag);
+  assert.doesNotMatch(formTag, /\bhidden\b/);
+  assert.match(indexHtml, /<textarea[\s\S]*id="manual-token-address"/);
+  assert.match(appJs, /ADDRESS_PATTERN = \/\^0x\[0-9a-fA-F\]\{40\}\$\//);
+  assert.match(appJs, /manualInput\.value\.split\(\/\[\\s,;，；\]\+\//);
+  assert.match(appJs, /new Set\(parts\.map\(normalizeAddress\)\.filter\(Boolean\)\)/);
+  assert.match(appJs, /addresses\.length > 20/);
+  assert.match(appJs, /Promise\.allSettled\(addresses\.map/);
+  assert.match(appJs, /body: JSON\.stringify\(\{ address, minEntryUsd \}\)/);
+});
+
+test('the interface only presents user-submitted tokens and holder-profit progress', () => {
+  for (const forbidden of ['自动发现', '预筛达标', '链上达标', '历史样本', '样本判定']) {
+    assert.equal(indexHtml.includes(forbidden) || appJs.includes(forbidden), false, `unexpected discovery copy: ${forbidden}`);
+  }
+  assert.match(appJs, /自动分析结果先进入待审核候选，确认后才进入地址库/);
+  assert.match(appJs, /label: '(?:Holder 分析完成|扫描完成)'/);
+  assert.match(appJs, /label: '待扫描'/);
+  assert.match(appJs, /<h3>扫描记录<\/h3>/);
+  assert.match(appJs, /data\.winners\.filter\(\(winner\) => winner\.manual === true\)\.length/);
+});
+
+test('holder-first queue reports fetched, analyzed, eligible and configured-floor filtered counts', () => {
+  for (const field of ['fetched', 'analyzed', 'eligible', 'filtered']) {
+    assert.match(appJs, new RegExp(`${field}: from\\(`));
+  }
+  for (const copy of ['已抓取', '已核算', '可入库', '低于门槛已过滤', '抓取持仓候选', '核算地址收益']) {
+    assert.equal(appJs.includes(copy), true, `missing holder pipeline copy: ${copy}`);
+  }
+  assert.match(appJs, /winnerPipelineCounts\(winner\)/);
+  assert.match(appJs, /matchingWinnerJob\(winner\)/);
+  assert.match(appJs, /pipelineSummary\(pipeline\)/);
+});
+
+test('gold-dog queue hides wallet filters and restores them for wallet tabs', () => {
+  assert.match(appJs, /function syncToolbarVisibility\(\)/);
+  assert.match(appJs, /const showingWinnerQueue = state\.activeTab === 'winners'/);
+  assert.match(appJs, /elements\.filterForm\.hidden = showingMonitor \|\| showingWinnerQueue/);
+  assert.match(appJs, /elements\.libraryForm\.hidden = showingMonitor \|\| showingWinnerQueue/);
+  assert.match(appJs, /state\.activeTab = button\.dataset\.tab;\s+state\.selectedCandidates\.clear\(\);\s+syncToolbarVisibility\(\)/);
+  assert.match(appJs, /state\.detailAddress !== normalizeAddress\(selected\.address\)/);
+  assert.match(appJs, /renderWinnerDetail\(selected\)/);
+  assert.match(appJs, /void loadWalletDetail\(selected/);
+});
+
+test('each gold-dog CA can repeat its Holder analysis from the queue or detail panel', () => {
+  assert.match(appJs, /rescanningWinnerAddresses: new Set\(\)/);
+  assert.match(appJs, /function winnerRescanActive\(winner\)/);
+  assert.match(appJs, /function syncWinnerRescanButtons\(winner\)/);
+  assert.match(appJs, /function syncWinnerRescanButtonsByAddress\(address\)/);
+  assert.match(appJs, /document\.querySelectorAll\('\[data-rescan-winner\]'\)/);
+  assert.match(appJs, /button\.classList\.toggle\('is-spinning', active\)/);
+  assert.match(appJs, /if \(selected\) syncWinnerRescanButtons\(selected\)/);
+  assert.match(appJs, /data-rescan-winner="\$\{escapeHtml\(address\)\}"/);
+  assert.match(appJs, /aria-label="\$\{rescanning \? 'Holder 正在重新分析' : '重新分析这个 CA 的 Holder'\}"/);
+  assert.match(appJs, /\/winners\/\$\{encodeURIComponent\(normalized\)\}\/rescan/);
+  assert.match(appJs, /method: 'POST'/);
+  assert.match(appJs, /body: JSON\.stringify\(\{ minEntryUsd \}\)/);
+  assert.match(appJs, /result\.alreadyRunning \? '这个 CA 正在分析中' : 'Holder 重新分析已进入队列'/);
+  assert.match(appJs, /state\.rescanningWinnerAddresses\.add\(normalized\);\s+syncWinnerRescanButtonsByAddress\(normalized\)/);
+  assert.match(appJs, /state\.rescanningWinnerAddresses\.delete\(normalized\);\s+syncWinnerRescanButtonsByAddress\(normalized\)/);
+  const rescanSource = appJs.slice(appJs.indexOf('async function rescanWinner'), appJs.indexOf('async function addManualWinner'));
+  assert.doesNotMatch(rescanSource, /renderResults\(\)/);
+  assert.match(appJs, /event\.target\.closest\('\[data-rescan-winner\]'\)/);
+  assert.match(stylesCss, /\.inline-icon-button\.is-spinning svg/);
+  assert.match(stylesCss, /\.rescan-winner-button:disabled/);
+});
+
+test('address library supports search, status, wallet group, tag filters and reset', () => {
+  for (const id of ['library-filter-form', 'wallet-search', 'wallet-status', 'wallet-monitor-tier', 'wallet-tag', 'library-filter-clear']) {
+    assert.match(indexHtml, new RegExp(`id="${id}"`));
+  }
+  for (const status of ['active', 'watch', 'excluded', 'all']) {
+    assert.match(indexHtml, new RegExp(`<option value="${status}"`));
+  }
+  assert.match(indexHtml, /<option value="" selected>活跃 \+ 观察<\/option>/);
+  assert.match(appJs, /state\.librarySearchTimer = setTimeout/);
+  assert.match(appJs, /elements\.walletStatus\.addEventListener\('change'/);
+  assert.match(appJs, /elements\.walletMonitorTier\.addEventListener\('change'/);
+  assert.match(appJs, /elements\.walletTag\.addEventListener\('change'/);
+  assert.match(appJs, /elements\.walletSearch\.value = ''/);
+  assert.match(appJs, /elements\.walletStatus\.value = ''/);
+  assert.match(appJs, /elements\.walletMonitorTier\.value = 'all'/);
+  assert.match(appJs, /if \(filters\.status\) params\.set\('status', filters\.status\)/);
+  assert.match(appJs, /if \(filters\.monitorTier && filters\.monitorTier !== 'all'\) params\.set\('monitorTier', filters\.monitorTier\)/);
+  assert.match(appJs, /if \(filters\.status && filters\.status !== 'all'/);
+  assert.match(appJs, /state\.activeTab === 'all_round' && filters\.monitorTier !== 'all'/);
+});
+
+test('confirmed address library accepts a manual wallet and optional note', () => {
+  assert.match(indexHtml, /<form class="manual-wallet-form" id="manual-wallet-form" hidden novalidate>/);
+  assert.match(indexHtml, /id="manual-wallet-address"[^>]*placeholder="输入钱包地址 0x\.\.\."[^>]*required/);
+  assert.match(indexHtml, /id="manual-wallet-note"[^>]*maxlength="4000"[^>]*placeholder="备注（可选）"/);
+  assert.match(indexHtml, /id="manual-wallet-add-button"[^>]*type="submit"[\s\S]*data-lucide="plus"[\s\S]*添加地址/);
+  assert.match(appJs, /elements\.manualWalletForm\.hidden = !showingConfirmedLibrary/);
+  assert.match(appJs, /const address = normalizeAddress\(elements\.manualWalletAddress\.value\)/);
+  assert.match(appJs, /manualWalletAddress\.setCustomValidity\('请输入有效的钱包地址/);
+  assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/wallets\/\$\{encodeURIComponent\(address\)\}`/);
+  assert.match(appJs, /method: 'PATCH',[\s\S]*status: 'active',[\s\S]*note: elements\.manualWalletNote\.value\.trim\(\)/);
+  assert.match(appJs, /updatesExisting \? '地址已存在，备注已更新' : '地址已加入地址库和实时监控'/);
+  assert.match(appJs, /await loadData\(\{ quiet: true \}\)/);
+  assert.match(stylesCss, /\.manual-wallet-form \{[\s\S]*grid-template-columns: minmax\(280px, 1\.25fr\) minmax\(180px, 0\.75fr\) auto/);
+  assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.manual-wallet-form \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
+});
+
+test('confirmed address library exports the exact DeBot wallet-import format', () => {
+  assert.match(indexHtml, /id="debot-export-button"[^>]*hidden[\s\S]*导出到 DeBot/);
+  assert.match(appJs, /DEBOT_WALLET_MANAGER_URL = 'https:\/\/debot\.ai\/track\?chain=robinhood&tab=manager'/);
+  assert.match(appJs, /review: 'confirmed',[\s\S]*status: 'all'/);
+  assert.match(appJs, /if \(!walletIsConfirmed\(wallet\)\) continue/);
+  assert.match(appJs, /alias \? `\$\{address\} \$\{alias\}` : address/);
+  assert.match(appJs, /join\('\\n'\)/);
+  assert.match(appJs, /copyText\(text\)/);
+  assert.match(appJs, /if \(typeof document\.execCommand !== 'function'\) return false/);
+  assert.match(appJs, /catch \{\s+return false;\s+\} finally \{\s+input\?\.remove\(\)/);
+  assert.match(appJs, /robinhood-debot-wallets\.txt/);
+  assert.match(appJs, /elements\.debotExportButton\.hidden = state\.activeTab !== 'all_round'/);
+});
+
+test('smart-eligible summaries require explicit review before entering the confirmed library', () => {
+  assert.match(indexHtml, /id="candidate-count"/);
+  assert.match(indexHtml, /id="candidate-actions"/);
+  assert.match(indexHtml, /id="select-page-candidates"[^>]*type="checkbox"/);
+  assert.match(indexHtml, /id="confirm-selected-button"[^>]*disabled/);
+  assert.match(appJs, /function walletIsConfirmed\(wallet\) \{\s+return wallet\?\.curated === true && String\(wallet\.status \|\| 'active'\)\.toLowerCase\(\) !== 'excluded'/);
+  assert.match(appJs, /function walletIsSmartEligible\(wallet\)/);
+  assert.match(appJs, /if \(!walletIsSmartEligible\(wallet\)\) return false/);
+  assert.match(appJs, /function filterWallets\(wallets, filters\) \{\s+return wallets\.filter\(\(wallet\) => \{\s+if \(!walletIsConfirmed\(wallet\) && !walletIsSmartEligible\(wallet\)\) return false/);
+  assert.match(appJs, /if \(tab === 'all_round'\) return wallet\?\.curated === true/);
+  assert.match(appJs, /if \(tab === 'candidates'\) return walletIsCandidate\(wallet\)/);
+  assert.match(appJs, /if \(!wallet \|\| walletIsConfirmed\(wallet\) \|\| String\(wallet\.status \|\| 'active'\)\.toLowerCase\(\) === 'excluded'\) return false/);
+  assert.match(appJs, /data-candidate-select="\$\{escapeHtml\(address\)\}"/);
+  assert.match(indexHtml, /全选当前页/);
+  assert.match(appJs, /二次确认：将选中的 \$\{selected\.length\} 个候选加入已确认地址库/);
+  assert.match(appJs, /Promise\.allSettled\(selected\.map\(requestCandidateConfirmation\)\)/);
+});
+
+test('candidate and confirmed wallet lists support checkbox batch deletion', () => {
+  assert.match(indexHtml, /id="delete-selected-button"[^>]*disabled/);
+  assert.match(indexHtml, /id="delete-selected-label">批量删除/);
+  assert.match(appJs, /return isCandidateReviewTab\(tab\) \|\| tab === 'all_round'/);
+  assert.match(appJs, /if \(tab === 'all_round'\) \{\s+return walletIsConfirmed\(wallet\) && String\(wallet\.status \|\| 'active'\)\.toLowerCase\(\) !== 'excluded'/);
+  assert.match(appJs, /selectionMode \? ' wallet-selection-table' : ''/);
+  assert.match(appJs, /elements\.confirmSelectedButton\.hidden = !isCandidateReviewTab\(\)/);
+  assert.match(appJs, /elements\.deleteSelectedButton\.disabled = selectedCount === 0/);
+  assert.match(appJs, /确认批量删除选中的 \$\{selected\.length\} 个候选/);
+  assert.match(appJs, /确认从已确认地址库删除并禁用选中的 \$\{selected\.length\} 个地址/);
+  assert.match(appJs, /Promise\.allSettled\(selected\.map\(\(wallet\) => \{/);
+  assert.match(appJs, /elements\.deleteSelectedButton\.addEventListener\('click', \(\) => void deleteSelectedWallets\(\)\)/);
+  assert.match(stylesCss, /\.batch-delete-button \{/);
+  assert.match(stylesCss, /\.wallet-selection-table \.candidate-select-cell/);
+});
+
+test('candidate rows support DeBot inspection, confirmation, exclusion and deterministic aliases', () => {
+  assert.match(appJs, /const DEBOT_ADDRESS_ROOT = 'https:\/\/debot\.ai\/address\/robinhood'/);
+  assert.match(appJs, /href="\$\{escapeHtml\(`\$\{DEBOT_ADDRESS_ROOT\}\/\$\{address\}`\)\}" target="_blank" rel="noopener noreferrer"/);
+  assert.match(appJs, /data-confirm-candidate="\$\{escapeHtml\(address\)\}"/);
+  assert.match(appJs, /data-exclude-candidate="\$\{escapeHtml\(address\)\}"/);
+  assert.match(appJs, /method: 'PATCH',[\s\S]*status: 'active',[\s\S]*alias: walletSuggestedAlias\(wallet\)/);
+  assert.match(appJs, /firstValue\(wallet, \['suggestedAlias', 'suggested_alias'\]/);
+  assert.match(appJs, /return `\$\{bestSymbol\} 盈利榜第 \$\{profitRank\} 名`/);
+  assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/wallets\/\$\{encodeURIComponent\(normalized\)\}`, \{ method: 'DELETE' \}\)/);
+  assert.match(appJs, /之后不会再出现在默认候选中/);
+  assert.match(appJs, /reviewMode \? `[\s\S]*data-confirm-candidate[\s\S]*` : `[\s\S]*data-edit-wallet/);
+});
+
+test('a separate review-aware wallet request preserves confirmed annotations alongside smart candidates', () => {
+  assert.match(appJs, /function buildCurationQuery\(filters\)/);
+  assert.match(appJs, /params\.set\('review', filters\.status === 'excluded' \? 'excluded' : filters\.status === 'all' \? 'all' : 'confirmed'\)/);
+  assert.match(appJs, /function mergeWalletCollections\(\.\.\.collections\)/);
+  assert.match(appJs, /loadCurationWallets\(filters\)/);
+});
+
+test('pending review wallets load independently and only the latest completed scan batch is shown', () => {
+  assert.match(appJs, /function buildPendingReviewQuery\(filters\)/);
+  const pendingQuerySource = appJs.slice(
+    appJs.indexOf('function buildPendingReviewQuery'),
+    appJs.indexOf('function mergeWalletCollections')
+  );
+  assert.match(pendingQuerySource, /tab: 'all',\s*review: 'pending'/);
+  assert.doesNotMatch(pendingQuerySource, /strategy|multiple|minHits|maxEntries/);
+  const pendingLoaderSource = appJs.slice(
+    appJs.indexOf('async function loadPendingWallets'),
+    appJs.indexOf('function debotImportAlias')
+  );
+  assert.match(pendingLoaderSource, /buildPendingReviewQuery\(filters\)/);
+  assert.match(pendingLoaderSource, /if \(!\[404, 405\]\.includes\(error\.status\)\) throw error/);
+  assert.match(appJs, /const REVIEW_SCAN_BATCH_GAP_MS = 5 \* 60 \* 1000/);
+  assert.match(appJs, /function latestReviewBatchTokenAddresses\(jobs\)/);
+  assert.match(appJs, /batchStartedAtMs - scan\.completedAtMs > REVIEW_SCAN_BATCH_GAP_MS/);
+  assert.match(appJs, /function latestReviewBatch\(wallets, jobs, winners = \[\], minimumEntryUsd = 500\)/);
+  assert.match(appJs, /const snapshotAt = snapshots\.get\(tokenAddress\)/);
+  assert.match(appJs, /String\(performance\?\.holderSnapshotAt \|\| ''\) !== snapshotAt/);
+  assert.match(appJs, /entryCostUsd !== null && entryCostUsd >= entryFloor/);
+  assert.match(appJs, /const batchHits = batchPerformances\.filter\(\(performance\) => performance\?\.hit === true\)\.length/);
+  assert.match(appJs, /hits: batchHits,[\s\S]*entries: batchPerformances\.length/);
+  assert.match(appJs, /function walletLibraryRecords\(collection\)/);
+  const apiLoaderSource = appJs.slice(
+    appJs.indexOf('async function loadApiData'),
+    appJs.indexOf('function activeJobs')
+  );
+  assert.match(apiLoaderSource, /pendingWalletsPromise = loadPendingWallets\(filters\)/);
+  assert.equal((apiLoaderSource.match(/latestReviewBatch\(pendingWallets, jobs, winners, filters\.minEntryUsd\)/g) || []).length, 2);
+  assert.equal((apiLoaderSource.match(/walletLibraryRecords\(curationWallets\),\s*reviewBatch\.wallets/g) || []).length, 2);
+  assert.equal((apiLoaderSource.match(/reviewBatchTokenAddresses: reviewBatch\.tokenAddresses/g) || []).length, 2);
+  assert.match(appJs, /最近重扫待审核 Holder/);
+  assert.match(indexHtml, /最近重扫候选/);
+});
+
+test('wallet editor persists metadata and supports soft exclusion and restoration', () => {
+  assert.match(indexHtml, /<dialog class="wallet-editor" id="wallet-editor"/);
+  for (const id of [
+    'wallet-editor-alias',
+    'wallet-editor-tags',
+    'wallet-editor-status',
+    'wallet-editor-monitor-tier',
+    'wallet-editor-classification',
+    'wallet-editor-note',
+    'wallet-editor-exclude'
+  ]) {
+    assert.match(indexHtml, new RegExp(`id="${id}"`));
+  }
+  assert.match(indexHtml, /<option value="active">活跃<\/option>/);
+  assert.match(indexHtml, /<option value="watch">观察<\/option>/);
+  assert.match(indexHtml, /<option value="excluded">已排除<\/option>/);
+  assert.match(appJs, /method: 'PATCH'/);
+  assert.match(appJs, /classificationOverride: elements\.walletEditorClassification\.value \|\| null/);
+  assert.match(appJs, /monitorTier: elements\.walletEditorMonitorTier\.value/);
+  assert.match(appJs, /method: 'DELETE'/);
+  assert.match(indexHtml, /id="wallet-editor-exclude"[\s\S]*删除并禁用/);
+  assert.match(appJs, /data-disable-wallet="\$\{escapeHtml\(address\)\}"/);
+  assert.match(appJs, /立即停止实时监控，可在“已排除”筛选中恢复/);
+  assert.match(appJs, /params\.set\('review', filters\.status === 'excluded' \? 'excluded'/);
+  assert.match(appJs, /if \(tab === 'all_round'\) return wallet\?\.curated === true/);
+  assert.match(appJs, /elements\.walletEditor\.showModal\(\)/);
+  assert.match(appJs, /state\.detailCache\.set\(address, payload\)/);
+  assert.match(appJs, /renderWalletDetail\(updatedWallet, payload\)/);
+});
+
+test('confirmed wallets expose editable wallet groups without badging pending candidates', () => {
+  assert.match(indexHtml, /钱包分组[\s\S]*?id="wallet-monitor-tier"[^>]*name="monitorTier"[\s\S]*?<option value="all" selected>全部分组<\/option>[\s\S]*?<option value="core">核心钱包<\/option>[\s\S]*?<option value="watch">普通观察钱包<\/option>[\s\S]*?<option value="high_frequency">高频钱包<\/option>/);
+  assert.doesNotMatch(indexHtml, /监控分层|全部分层/);
+  assert.match(indexHtml, /id="wallet-editor-monitor-tier"[^>]*name="monitorTier"[\s\S]*?<option value="core">核心钱包<\/option>[\s\S]*?<option value="watch">普通观察钱包<\/option>[\s\S]*?<option value="high_frequency">高频钱包<\/option>/);
+  for (const [tier, label] of [['core', '核心钱包'], ['watch', '普通观察钱包'], ['high_frequency', '高频钱包']]) {
+    assert.equal(appJs.includes(`${tier}: '${label}'`), true, `missing monitor tier ${tier}`);
+    assert.match(stylesCss, new RegExp(`\\.monitor-tier-badge\\.${tier}`));
+  }
+  assert.match(appJs, /firstValue\(wallet, \['monitorTier', 'monitor_tier'\]/);
+  assert.match(appJs, /if \(wallet\?\.curated !== true \|\| reviewState === 'pending'\) return ''/);
+  assert.equal((appJs.match(/\$\{monitorTierBadge\(wallet\)\}/g) || []).length, 2);
+  assert.match(indexHtml, /id="wallet-monitor-tier-field"[^>]*hidden/);
+  assert.match(appJs, /elements\.walletMonitorTierField\.hidden = !showingConfirmedLibrary/);
+  assert.match(appJs, /elements\.libraryForm\.classList\.toggle\('shows-monitor-tier', showingConfirmedLibrary\)/);
+  assert.match(appJs, /elements\.walletEditorMonitorTier\.value = walletMonitorTier\(wallet\) \|\| 'watch'/);
+});
+
+test('annotation-only and holder-only wallets render without fake action history', () => {
+  assert.match(appJs, /function walletHasPerformance\(wallet\)/);
+  assert.match(appJs, /classification-badge unscored">待分析/);
+  assert.match(appJs, /仅地址库/);
+  assert.match(appJs, /暂无达到 \$\{formatMoney\(wallet\.minimumEntryUsd \?\? currentMinimumEntryUsd\(\)\)\} 买入门槛的逐币候选/);
+  assert.match(stylesCss, /\.classification-badge\.unscored/);
+  const buildQuerySource = appJs.slice(appJs.indexOf('function buildQuery'), appJs.indexOf('async function loadApiData'));
+  assert.doesNotMatch(buildQuerySource, /classification:/);
+});
+
+test('dashboard consumes wallet library, winner, scan, patch and delete APIs', () => {
+  for (const endpoint of ['/dashboard?', '/wallets?', '/winners?', '/jobs', '/jobs/scan']) {
+    assert.equal(appJs.includes(`${'${API_ROOT}'}${endpoint}`), true, `missing endpoint ${endpoint}`);
+  }
+  assert.match(appJs, /\$\{API_ROOT\}\/wallets\/\$\{encodeURIComponent\(address\)\}/);
+  assert.match(appJs, /\$\{API_ROOT\}\/refresh/);
+  assert.match(appJs, /\$\{API_ROOT\}\/wallet\/\$\{encodeURIComponent\(address\)\}/);
+  assert.match(appJs, /getCollection\(walletsPayload, \['wallets', 'items', 'addresses'\]\)/);
+});
+
+test('token-controlled markup is escaped and remote URLs only allow HTTP protocols', () => {
+  assert.match(appJs, /function escapeHtml\(value\)/);
+  assert.match(appJs, /function safeHttpUrl\(value\)/);
+  assert.match(appJs, /url\.protocol === 'http:' \|\| url\.protocol === 'https:'/);
+  assert.match(appJs, /escapeHtml\(symbol\)/);
+  assert.match(appJs, /escapeHtml\(name\)/);
+  assert.match(appJs, /escapeHtml\(url\)/);
+  assert.match(appJs, /rel="noopener noreferrer"/);
+  assert.doesNotMatch(appJs, /innerHTML\s*=\s*[^`'"\n]*\.(?:symbol|name|logo|address)/);
+});
+
+test('wallet rows and detail expose holder rank, realized and unrealized analytics', () => {
+  for (const copy of ['Holder 排名', '当前持仓', '已实现利润', '未实现利润', '总利润', '退出与流动性', '逐币持仓与收益', '累计买入']) {
+    assert.equal(appJs.includes(copy), true, `missing ${copy}`);
+  }
+  assert.match(appJs, /walletRealized/);
+  assert.match(appJs, /walletUnrealized/);
+  assert.match(appJs, /walletPeak/);
+  assert.match(appJs, /function walletHoldingValue\(wallet\)/);
+  assert.match(appJs, /function walletHolderRank\(wallet\)/);
+  assert.match(appJs, /function walletRealizedProfit\(wallet\)/);
+  assert.match(appJs, /function walletUnrealizedProfit\(wallet\)/);
+  assert.match(appJs, /function walletTotalProfit\(wallet\)/);
+  assert.match(appJs, /positionUnrealizedProfit\(position\)/);
+  assert.match(appJs, /positionHoldingValue\(position\)/);
+  assert.doesNotMatch(appJs, /<dt>未实现<\/dt>[\s\S]{0,160}currentValueUsd/);
+  assert.match(appJs, /position\.actions/);
+  assert.match(appJs, /liquidityWarning/);
+});
+
+test('smart aggregate analytics and reason badges are visible in rows and wallet detail', () => {
+  for (const helper of [
+    'walletSmartScore',
+    'walletEligibleEntries',
+    'walletWinningEntries',
+    'walletAdjustedWinRate',
+    'walletTotalTradeCount',
+    'walletTradesPerEntry',
+    'walletNormalizedProfitScore',
+    'walletProfitToPeakMarketCapRatio',
+    'walletSmartReasons'
+  ]) {
+    assert.match(appJs, new RegExp(`function ${helper}\\(`));
+  }
+  for (const field of [
+    'eligibleEntries',
+    'eligible_entries',
+    'winningEntries',
+    'winning_entries',
+    'adjustedWinRate',
+    'adjusted_win_rate',
+    'totalTradeCount',
+    'total_trade_count',
+    'tradesPerEntry',
+    'trades_per_entry',
+    'normalizedProfitScore',
+    'normalized_profit_score',
+    'profitToPeakMarketCapRatio',
+    'profit_to_peak_market_cap_ratio'
+  ]) {
+    assert.equal(appJs.includes(field), true, `missing smart aggregate field ${field}`);
+  }
+  assert.match(appJs, /trades !== null && entries !== null && entries > 0 \? trades \/ entries : null/);
+  assert.match(appJs, /reason\.code, reason\.reason, reason\.label, reason\.type/);
+  for (const label of ['10x 高倍', '重仓 5x', '大额兑现 5x', '多币重复 5x', '低频高手', '关联集群']) {
+    assert.equal(appJs.includes(`label: '${label}'`), true, `missing smart reason ${label}`);
+  }
+  for (const copy of ['相对评分', '胜场 / 有效', '加权账面胜率', '交易频率', '总交易 / 每次入场', '利润百分位', '利润 / 峰值市值']) {
+    assert.equal(appJs.includes(copy), true, `missing smart UI copy ${copy}`);
+  }
+  assert.match(appJs, /renderSmartReasonBadges\(wallet, 3\)/);
+  assert.match(appJs, /<section class="smart-analysis-band"/);
+  assert.equal(appJs.includes('智能理由待补全'), false);
+  assert.match(stylesCss, /\.smart-reason-badge/);
+});
+
+test('per-token analysis exposes dynamic peak-market-cap and significant-profit fields', () => {
+  for (const helper of [
+    'positionPeakMarketCapUsd',
+    'positionSignificantProfitThresholdUsd',
+    'positionProfitToPeakMarketCapRatio',
+    'positionPeakMarketCapProvisional',
+    'positionPeakMarketCapSource'
+  ]) {
+    assert.match(appJs, new RegExp(`function ${helper}\\(`));
+  }
+  for (const field of [
+    'peakMarketCapUsd',
+    'peak_market_cap_usd',
+    'significantProfitThresholdUsd',
+    'significantProfitUsd',
+    'significant_profit_threshold_usd',
+    'peakMarketCapProvisional',
+    'peak_market_cap_provisional',
+    'peakMarketCapSource',
+    'peak_market_cap_source'
+  ]) {
+    assert.equal(appJs.includes(field), true, `missing per-token field ${field}`);
+  }
+  assert.match(appJs, /<dt>历史最高市值估算<\/dt>/);
+  assert.match(appJs, /<dt>显著利润门槛<\/dt>/);
+  assert.match(appJs, /provisional === false\s+\? '已核验'/);
+  assert.match(appJs, /暂估状态待补全/);
+  assert.match(appJs, /来源待补全/);
+  assert.match(appJs, /function formatRatio\(value\)[\s\S]*number \* 100/);
+  assert.match(stylesCss, /\.peak-market-cap-metric dt \{[\s\S]*white-space: normal/);
+});
+
+test('missing smart data is explicit and no fixed significant-profit amount is presented', () => {
+  assert.match(appJs, /function formatRequiredNumber\(value, options = \{\}\)[\s\S]*return '待补全'/);
+  assert.match(appJs, /function formatRatio\(value\)[\s\S]*return '待补全'/);
+  const visibleCopy = `${indexHtml}\n${appJs}`;
+  assert.doesNotMatch(visibleCopy, /\$10k|\$10,000|10,000\s*USD/i);
+  assert.doesNotMatch(visibleCopy, /显著利润门槛[\s\S]{0,120}(?:\$\s*)?10[_ ,]?000/i);
+});
+
+test('profit leaderboard defaults to smart score and retains profit and holder-first sorts', () => {
+  const start = indexHtml.indexOf('id="sort-select"');
+  const sortMarkup = indexHtml.slice(start, indexHtml.indexOf('</select>', start));
+  assert.match(sortMarkup, /value="smart_score" selected>智能评分/);
+  for (const [value, label] of [
+    ['name', '名称 A-Z'],
+    ['total_profit', '总盈利'],
+    ['holding_value', '持仓市值'],
+    ['holder_rank', 'Holder 排名'],
+    ['realized_profit', '已实现盈利'],
+    ['unrealized_profit', '未实现盈利'],
+    ['best_multiple', '最高倍数'],
+    ['hits', '命中次数']
+  ]) {
+    assert.match(sortMarkup, new RegExp(`value="${value}">${label}`));
+  }
+  assert.match(appJs, /sort === 'smart_score'[^\n]*walletSmartScore/);
+  assert.match(appJs, /else result = compareNullable\(left, right, walletTotalProfit\)/);
+  assert.match(appJs, /sort === 'holder_rank'[\s\S]*walletHolderRank, true/);
+  assert.match(appJs, /sort === 'name'[\s\S]*localeCompare\(rightName, 'zh-CN'/);
+  assert.match(appJs, /if \(state\.activeTab === 'all_round'\) elements\.sort\.value = 'name'/);
+  assert.match(appJs, /\['winners', 'candidates', 'all_round'\]\.includes\(classification\) \? 'all' : classification/);
+});
+
+test('removed history and top-half screening labels stay absent', () => {
+  assert.doesNotMatch(appJs, /walletDenominatorPartial|分母不完整|正式前 50%|钱包全历史账面模型/);
+  assert.match(stylesCss, /\.wallet-badges/);
+});
+
+test('loading, scanning, stale, partial, error and empty states are explicit', () => {
+  for (const stateName of ['loading', 'scanning', 'stale', 'partial', 'error', 'empty', 'ready']) {
+    assert.equal(appJs.includes(`${stateName}: [`) || appJs.includes(`'${stateName}'`), true, `missing ${stateName}`);
+  }
+  assert.match(indexHtml, /aria-live="polite"/);
+  assert.match(stylesCss, /\.system-status\[data-state="stale"\]/);
+  assert.match(stylesCss, /\.system-status\[data-state="error"\]/);
+  assert.match(stylesCss, /\.loading-state/);
+  assert.match(stylesCss, /\.empty-state/);
+  assert.match(stylesCss, /\.error-state/);
+});
+
+test('Lucide powers icon controls and scan controls are accessible', () => {
+  assert.match(indexHtml, /<script src="vendor\/lucide\.js"><\/script>/);
+  assert.match(indexHtml, /data-lucide="refresh-cw"/);
+  assert.match(indexHtml, /data-lucide="radar"/);
+  assert.match(indexHtml, /aria-label="刷新数据"/);
+  assert.match(indexHtml, /title="重扫手工金狗" aria-label="重扫手工金狗"/);
+  assert.match(appJs, /window\.lucide\?\.createIcons/);
+});
+
+test('relative static assets and a scoped API root support VPS prefix deployment', () => {
+  assert.match(indexHtml, /href="styles\.css"/);
+  assert.match(indexHtml, /src="app\.js"/);
+  assert.match(appJs, /window\.location\.pathname\.startsWith\('\/robinhood-radar\/'\)/);
+  assert.match(appJs, /const API_ROOT = `\$\{APP_BASE\}\/api\/robinhood`/);
+});
+
+test('responsive layout keeps controls, wallet metadata and dialog inside the viewport', () => {
+  assert.match(stylesCss, /@media \(max-width: 760px\)/);
+  assert.match(stylesCss, /\.research-table tbody tr \{[\s\S]*display: grid/);
+  assert.match(stylesCss, /\.research-table thead \{[\s\S]*display: none/);
+  assert.match(stylesCss, /\.research-table \.wallet-cell \{[\s\S]*min-height: 78px/);
+  assert.match(stylesCss, /\.wallet-table tbody tr \{[\s\S]*grid-template-columns: repeat\(2/);
+  assert.match(stylesCss, /\.wallet-table \.data-status-cell \{[\s\S]*grid-column: 1 \/ -1/);
+  assert.match(stylesCss, /\.wallet-table \.smart-score-cell,[\s\S]*\.wallet-table \.smart-frequency-cell \{[\s\S]*min-width: 0/);
+  assert.match(stylesCss, /\.smart-analysis-grid \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(stylesCss, /\.detail-identity \.detail-address-line/);
+  assert.match(stylesCss, /\.wallet-editor \{[\s\S]*calc\(100vw - 24px\)/);
+  assert.match(stylesCss, /\.detail-panel \{[\s\S]*min-height: calc\(100svh - 20px\)/);
+  assert.match(appJs, /window\.matchMedia\('\(max-width: 760px\)'\)/);
+});
+
+test('the candidate queue defaults to one hit from the latest scan batch', () => {
+  assert.match(appJs, /return walletCandidateEligible\(wallet\) \|\| walletHasPerformance\(wallet\)/);
+  assert.doesNotMatch(appJs, /smartDecision !== null\) return smartDecision/);
+  assert.match(appJs, /minHits: Math\.max\(0, Math\.floor\(finiteNumber\(form\.get\('minHits'\)\) \?\? 1\)\)/);
+  assert.equal((appJs.match(/elements\.minHits\.value = '1'/g) || []).length, 3);
+  assert.match(appJs, /status === 'complete' && walletHolderRank\(wallet\) !== null/);
+});
+
+test('removed candidate subdivisions cannot enter selection mode', () => {
+  assert.match(appJs, /function isCandidateReviewTab\(tab = state\.activeTab\) \{\s+return tab === 'candidates';\s+\}/);
+  assert.doesNotMatch(indexHtml, /data-tab="(?:realized|unrealized|single_hit)"/);
+});
+
+test('real-time monitoring is a first-level page that replaces the research workspace cleanly', () => {
+  assert.match(indexHtml, /data-tab="monitor"[^>]*aria-selected="false"[\s\S]*?实时监控/);
+  assert.match(indexHtml, /id="monitor-page"[^>]*hidden/);
+  for (const id of [
+    'monitor-settings-form',
+    'monitor-health-status',
+    'monitor-wallet-count',
+    'monitor-latest-block',
+    'monitor-block-lag',
+    'monitor-cluster-list',
+    'monitor-event-feed'
+  ]) {
+    assert.match(indexHtml, new RegExp(`id="${id}"`));
+  }
+  assert.match(appJs, /elements\.submissionDock\.hidden = showingMonitor/);
+  assert.match(appJs, /elements\.researchBoard\.hidden = showingMonitor/);
+  assert.match(appJs, /elements\.monitorPage\.hidden = !showingMonitor/);
+  assert.match(appJs, /if \(state\.activeTab === 'monitor'\)[\s\S]*startMonitorPage/);
+});
+
+test('monitor settings persist a bounded threshold and customizable alert window', () => {
+  assert.match(indexHtml, /id="monitor-threshold"[^>]*min="1"[^>]*max="1000"/);
+  assert.match(indexHtml, /id="monitor-window-seconds"[^>]*name="windowSeconds"[^>]*min="5"[^>]*max="3600"[^>]*value="60"/);
+  assert.match(indexHtml, /id="monitor-enabled"[^>]*type="checkbox"/);
+  assert.match(appJs, /Math\.min\(1000, Math\.max\(1, Math\.floor\(number\)\)\)/);
+  assert.match(appJs, /Math\.min\(3600, Math\.max\(5, Math\.floor\(number\)\)\)/);
+  assert.match(appJs, /MONITOR_THRESHOLD_STORAGE_KEY = 'robinhood-monitor-threshold'/);
+  assert.match(appJs, /window\.localStorage\.setItem\(MONITOR_THRESHOLD_STORAGE_KEY/);
+  assert.match(appJs, /state\.monitorWindowSeconds = clampMonitorWindowSeconds\(serverWindowSeconds, state\.monitorWindowSeconds\)/);
+  assert.match(appJs, /elements\.monitorWindowSeconds\.value = String\(state\.monitorWindowSeconds\)/);
+  assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/monitor\/settings`, \{[\s\S]*method: 'PATCH'[\s\S]*JSON\.stringify\(\{ threshold, windowSeconds, enabled \}\)/);
+  assert.match(appJs, /服务端保存失败，已保存在本机/);
+});
+
+test('monitoring prefers SSE event delivery and falls back to two-second incremental polling', () => {
+  assert.match(appJs, /new EventSource\(`\$\{API_ROOT\}\/monitor\/stream`\)/);
+  for (const eventType of ['snapshot', 'event', 'buy', 'health']) {
+    assert.match(appJs, new RegExp(`source\\.addEventListener\\('${eventType}'`));
+  }
+  assert.match(appJs, /MONITOR_POLL_INTERVAL_MS = 2_000/);
+  assert.match(appJs, /\/monitor\/events\?after=\$\{after\}&limit=200/);
+  assert.match(appJs, /\/monitor\?since=\$\{after\}&limit=200/);
+  assert.match(appJs, /state\.monitorTransport === 'sse'/);
+  assert.match(appJs, /state\.monitorEvents\.sort\(\(left, right\) => monitorEventTimestamp\(right\) - monitorEventTimestamp\(left\)\)/);
+});
+
+test('custom-window clusters count distinct wallets and permanently deduplicate alerted CAs', () => {
+  assert.match(indexHtml, /id="monitor-cluster-title">60 秒同币聚合/);
+  assert.match(indexHtml, /滚动统计最近 60 秒的不同地址/);
+  assert.match(indexHtml, /id="monitor-window-chip-label">60 秒/);
+  assert.match(appJs, /function formatMonitorWindowDuration\(value = state\.monitorWindowSeconds\)/);
+  assert.match(appJs, /elements\.monitorWindowDescription\.textContent = `已确认地址 · 金额不限 · \$\{windowLabel\}滚动窗口`/);
+  assert.match(appJs, /elements\.monitorThresholdLabel\.textContent = `\$\{windowLabel\}同币提醒人数`/);
+  assert.match(appJs, /elements\.monitorClusterTitle\.textContent = `\$\{windowLabel\}同币聚合`/);
+  assert.match(appJs, /elements\.monitorWindowChipLabel\.textContent = windowLabel/);
+  assert.match(appJs, /elements\.monitorClusterSummary\.textContent = `滚动 \$\{windowLabel\}/);
+  assert.match(appJs, /state\.monitorWindowSeconds\) \* 1000/);
+  assert.match(appJs, /if \(!cluster\.wallets\.has\(event\.walletAddress\)\) cluster\.wallets\.set/);
+  assert.match(appJs, /walletCount: cluster\.wallets\.size/);
+  assert.match(appJs, /if \(cluster\.walletCount < state\.monitorThreshold\) continue/);
+  assert.match(appJs, /if \(!state\.monitorAlertedTokens\.has\(cluster\.key\)\)/);
+  assert.match(appJs, /Array\.isArray\(record\.alertedTokenAddresses\)/);
+  assert.match(appJs, /state\.monitorAlertedTokens\.add\(normalized\)/);
+  assert.match(appJs, /synchronizeMonitorAlerts\(\{ playNew: !initial && added\.length > 0 \}\);[\s\S]{0,260}state\.monitorAlertedTokens\.add\(normalized\)/);
+  assert.doesNotMatch(appJs, /monitorAlertedTokens\.delete/);
+  assert.match(appJs, /playNew && state\.monitorSoundEnabled/);
+});
+
+test('sound activation is gesture-driven and every buy exposes DeBot and Blockscout links', () => {
+  assert.match(indexHtml, /id="monitor-sound-button"[\s\S]*开启声音 \/ 试听/);
+  assert.match(indexHtml, /id="monitor-sound-status"[^>]*data-enabled="false"/);
+  assert.match(appJs, /elements\.monitorSoundButton\.addEventListener\('click'/);
+  assert.match(appJs, /window\.AudioContext \|\| window\.webkitAudioContext/);
+  assert.match(appJs, /声音提醒已开启/);
+  assert.match(appJs, /声音提醒已关闭/);
+  assert.match(appJs, /const walletUrl = safeHttpUrl\(event\.debotAddressUrl\) \|\| `\$\{DEBOT_ADDRESS_ROOT\}\/\$\{event\.walletAddress\}`/);
+  assert.match(appJs, /const tokenUrl = safeHttpUrl\(event\.debotTokenUrl\) \|\| `\$\{DEBOT_TOKEN_ROOT\}\$\{event\.tokenAddress\}`/);
+  assert.match(appJs, /const transactionUrl = safeHttpUrl\(event\.explorerTxUrl\) \|\| \(event\.txHash \? `\$\{EXPLORER_ROOT\}\/tx\/\$\{event\.txHash\}`/);
+  assert.match(appJs, /金额不限/);
+});
+
+test('monitor alert settings provide persistent sound choices and bounded volume', () => {
+  assert.match(indexHtml, /id="monitor-sound-select"[\s\S]*?<option value="alarm">警报<\/option>[\s\S]*?<option value="bell">铃声<\/option>[\s\S]*?<option value="electronic">电子<\/option>[\s\S]*?<option value="glass">玻璃<\/option>/);
+  assert.match(indexHtml, /id="monitor-volume"[^>]*type="range"[^>]*min="0"[^>]*max="100"/);
+  assert.match(appJs, /MONITOR_SOUNDS = new Set\(\['alarm', 'bell', 'electronic', 'glass'\]\)/);
+  assert.match(appJs, /Math\.min\(100, Math\.max\(0, Math\.round\(number\)\)\)/);
+  assert.match(appJs, /JSON\.stringify\(\{ sound, volume \}\)/);
+  assert.match(appJs, /patterns\[state\.monitorSound\]/);
+  assert.match(appJs, /state\.monitorVolume \/ 100/);
+  assert.match(appJs, /if \(state\.monitorVolume <= 0\) return/);
+});
+
+test('Bark alert sound and critical volume are independent from browser sound', () => {
+  assert.match(indexHtml, /id="monitor-bark-sound-select"[\s\S]*?<option value="alarm">警报<\/option>[\s\S]*?<option value="chime">风铃<\/option>/);
+  assert.match(indexHtml, /id="monitor-bark-volume"[^>]*type="range"[^>]*min="0"[^>]*max="10"/);
+  assert.match(appJs, /JSON\.stringify\(\{ barkSound, barkVolume \}\)/);
+  assert.match(appJs, /state\.monitorBarkSound = String\(settings\.barkSound/);
+  assert.match(appJs, /Math\.min\(10, Math\.max\(0, Math\.round\(number\)\)\)/);
+});
+
+test('Bark targets can be added, tested, paused, resumed, and deleted without exposing full API keys', () => {
+  for (const id of ['monitor-bark-form', 'monitor-bark-endpoint', 'monitor-bark-label', 'monitor-bark-list']) {
+    assert.match(indexHtml, new RegExp(`id="${id}"`));
+  }
+  assert.match(indexHtml, /id="monitor-bark-endpoint"[^>]*type="password"/);
+  assert.match(appJs, /endpointMasked: String\(source\.endpointMasked \|\| ''\)/);
+  assert.doesNotMatch(appJs, /endpoint: String\(source\.endpoint/);
+  assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/monitor\/bark`, \{[\s\S]*method: 'POST'[\s\S]*JSON\.stringify\(\{ endpoint, label, enabled: true \}\)/);
+  assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/monitor\/bark\/\$\{id\}\/test`, \{ method: 'POST' \}\)/);
+  assert.match(appJs, /JSON\.stringify\(\{ enabled: !target\.enabled \}\)/);
+  assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/monitor\/bark\/\$\{id\}`, \{ method: 'DELETE' \}\)/);
+  assert.match(appJs, /source\.addEventListener\('bark', \(\) => void refreshBarkTargets\(\)\)/);
+  for (const action of ['test', 'toggle', 'delete']) {
+    assert.match(appJs, new RegExp(`data-bark-action="${action}"`));
+  }
+});
+
+test('real-time monitoring remains contained on narrow mobile screens', () => {
+  assert.match(stylesCss, /\.monitor-page \{[\s\S]*min-width: 0/);
+  assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.monitor-control-band \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(stylesCss, /\.monitor-event-item \{[\s\S]*grid-template-columns: minmax\(0, 1fr\) auto/);
+  assert.match(stylesCss, /\.monitor-event-main \{[\s\S]*grid-column: 1 \/ -1/);
+  assert.match(stylesCss, /\.monitor-event-title a \{[\s\S]*text-overflow: ellipsis/);
+  assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.monitor-alert-layout \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(stylesCss, /\.monitor-settings-form \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(stylesCss, /\.monitor-window-field input,[\s\S]*\.monitor-settings-form \.monitor-enabled-control,[\s\S]*\.monitor-settings-form \.monitor-save-button \{[\s\S]*width: 100%/);
+  assert.match(stylesCss, /\.monitor-bark-item \{[\s\S]*min-width: 0/);
+});

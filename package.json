@@ -1,0 +1,21 @@
+{
+  "name": "debot-signal-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:robinhood": "esbuild src/robinhoodServer.js --bundle --platform=node --format=esm --minify --legal-comments=external --outfile=dist/robinhood-server.mjs",
+    "classify:wallets": "node scripts/classify-robinhood-wallets.mjs",
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "lightweight-charts": "^5.2.0",
+    "lucide": "^1.24.0",
+    "playwright": "^1.59.1",
+    "viem": "^2.55.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.6"
+  }
+}
