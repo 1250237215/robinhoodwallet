@@ -204,6 +204,10 @@ test('derives holding value and realized/unrealized multiples from DeBot wallet 
   assert.equal(profit.realizedMultiple, 2);
   assert.equal(profit.unrealizedMultiple, 1.8);
   assert.equal(profit.totalMultiple, 1.96);
+  assert.equal(profit.costBasisStatus, 'complete');
+  assert.equal(profit.costBasisComplete, true);
+  assert.equal(profit.admissionMultiple, 2);
+  assert.equal(profit.admissionMultipleSource, 'complete_cost_basis');
   assert.equal(profit.buyTimes, 3);
   assert.equal(profit.sellTimes, 2);
 });
@@ -226,6 +230,37 @@ test('trusts current position over historical actual buy amount for fully exited
   assert.equal(profit.holdingTokenAmount, 0);
   assert.equal(profit.holdingValueUsd, 0);
   assert.equal(profit.totalMultiple > 1, true);
+});
+
+test('does not turn externally sourced token sales into a fake 116x wallet return', () => {
+  const profit = normalizeWalletTokenProfit({
+    wallet: '0xe53e53644d7bce019ed3cb4bbe3018877e5f9c7d',
+    token: '0x020bfc650a365f8bb26819deaabf3e21291018b4',
+    buy_amount: 122_505.97366,
+    sell_amount: -3_961_206.45457,
+    position: 0,
+    buy_volume: 2_446.652340149915,
+    sell_volume: -286_112.92936865165,
+    profit: 1_931.036807078361,
+    profit_rate: 0.7891220783282198,
+    realized_profit: 1_931.036807078361,
+    realized_profit_rate: 0.7891220783282198,
+    unrealized_profit: 0,
+    actual_buy_cost: 0,
+    avg_buy_price: 0.019971698253183085,
+    buy_times: 2,
+    sell_times: 23
+  });
+
+  assert.equal(profit.costBasisStatus, 'incomplete_external_inflow');
+  assert.equal(profit.costBasisComplete, false);
+  assert.equal(profit.costBasisCoverage < 0.04, true);
+  assert.equal(profit.unexplainedTokenAmount > 3_800_000, true);
+  assert.equal(Math.abs(profit.realizedMultiple - 1.0068) < 0.0001, true);
+  assert.equal(profit.totalMultiple, 1.7891220783282198);
+  assert.equal(profit.admissionMultiple, 1.7891);
+  assert.equal(profit.admissionMultipleSource, 'debot_profit_rate');
+  assert.equal(profit.admissionMultipleReliable, true);
 });
 
 test('keeps realized multiple unknown when the wallet has never sold', () => {

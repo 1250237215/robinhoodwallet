@@ -347,6 +347,58 @@ test('does not admit a rounded display amount that was below the raw entry floor
   assert.deepEqual(summaries, []);
 });
 
+test('recalculates cached external-inflow candidates instead of trusting gross sale multiples', () => {
+  const [summary] = buildWalletSummaries({
+    tokens: [{
+      address: tokenA,
+      symbol: 'TRANSFERRED',
+      manual: true,
+      peakMarketCapUsd: 229_300_000,
+      holderAnalysis: {
+        strategy: 'holder_first',
+        minimumEntryUsd: 1_000,
+        candidates: [{
+          address: walletA,
+          holderRank: 101,
+          holdingTokenAmount: 0,
+          holdingValueUsd: 0,
+          holdingSharePercent: 0.175646,
+          buyAmount: 122_505.97366,
+          sellAmount: 3_961_206.45457,
+          buyVolumeUsd: 2_446.652340149915,
+          sellVolumeUsd: 286_112.92936865165,
+          buyTimes: 2,
+          sellTimes: 23,
+          profitRate: 0.7891220783282198,
+          realizedProfitUsd: 1_931.036807078361,
+          unrealizedProfitUsd: 0,
+          totalProfitUsd: 1_931.036807078361,
+          realizedMultiple: 1.0068,
+          totalMultiple: 116.9406,
+          entryProgress: 0.0871,
+          early: true,
+          profitState: 'complete',
+          confidence: 'high'
+        }]
+      }
+    }],
+    minimumEntryUsd: 500,
+    smartBaseMultiple: 5,
+    strictMultiple: 10,
+    significantProfitRate: 0.002
+  });
+
+  const [performance] = summary.performances;
+  assert.equal(performance.costBasisStatus, 'incomplete_external_inflow');
+  assert.equal(performance.costBasisComplete, false);
+  assert.equal(performance.totalMultiple, 1.7891);
+  assert.equal(performance.bestMultiple, 1.7891);
+  assert.equal(performance.smartEligible, false);
+  assert.equal(summary.maxTotalMultiple, 1.7891);
+  assert.equal(summary.winnerHits, 0);
+  assert.equal(summary.smartEligible, false);
+});
+
 test('uses each Holder scan saved entry floor instead of reapplying the global default', () => {
   const candidate = (address, buyVolumeUsd) => ({
     address,
@@ -479,6 +531,48 @@ test('admits 5x to 10x wallets by peak-market-cap-relative profit instead of fix
   assert.deepEqual(byAddress.get(walletC).smartReasons, ['realized_5x']);
   assert.equal(byAddress.get(walletD).smartEligible, true);
   assert.deepEqual(byAddress.get(walletD).smartReasons, ['high_multiple']);
+});
+
+test('does not admit a one-off 10x wallet without meaningful profit or holding value', () => {
+  const [summary] = buildWalletSummaries({
+    tokens: [{
+      address: tokenA,
+      symbol: 'TINY',
+      manual: true,
+      peakMarketCapUsd: 1_000_000,
+      holderAnalysis: {
+        strategy: 'holder_first',
+        complete: true,
+        candidates: [{
+          address: walletA,
+          holderRank: 100,
+          holdingTokenAmount: 0,
+          holdingValueUsd: 0,
+          holdingSharePercent: 0,
+          buyAmount: 100,
+          sellAmount: 100,
+          buyVolumeUsd: 600,
+          totalProfitUsd: 100,
+          totalMultiple: 12,
+          entryProgress: 0.05,
+          early: true,
+          profitState: 'complete',
+          confidence: 'high'
+        }]
+      }
+    }],
+    minimumEntryUsd: 500,
+    smartBaseMultiple: 5,
+    strictMultiple: 10,
+    significantProfitRate: 0.002
+  });
+
+  const [performance] = summary.performances;
+  assert.equal(performance.hit, true);
+  assert.equal(performance.smartEligible, false);
+  assert.equal(performance.smartAdmissionChecks.valueEvidence, false);
+  assert.equal(summary.smartEligible, false);
+  assert.deepEqual(summary.smartReasons, []);
 });
 
 test('does not replace a missing peak market cap with a fixed USD profit threshold', () => {

@@ -1,4 +1,5 @@
 import { ROBINHOOD_CHAIN, createRobinhoodConfig } from './config.js';
+import { deriveWalletAdmissionMultiple } from './analysis.js';
 
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 
@@ -58,7 +59,8 @@ function mergeCandidate(holder, profit, tokenDetail, minimumEntryUsd, minimumHit
   const realizedMultiple = number(profit.realizedMultiple);
   const unrealizedMultiple = number(profit.unrealizedMultiple);
   const totalMultiple = number(profit.totalMultiple);
-  const bestMultiple = Math.max(0, realizedMultiple ?? 0, unrealizedMultiple ?? 0, totalMultiple ?? 0);
+  const admission = deriveWalletAdmissionMultiple({ ...profit, holdingTokenAmount });
+  const bestMultiple = Math.max(0, number(admission.admissionMultiple) ?? 0);
   const averageBuyPriceUsd = number(profit.averageBuyPriceUsd);
   const entryProgress = averageBuyPriceUsd > 0 && currentPriceUsd > 0
     ? Math.min(1, averageBuyPriceUsd / currentPriceUsd)
@@ -84,6 +86,7 @@ function mergeCandidate(holder, profit, tokenDetail, minimumEntryUsd, minimumHit
     unrealizedMultiple: round(unrealizedMultiple),
     totalMultiple: round(totalMultiple),
     bestMultiple: round(bestMultiple),
+    ...admission,
     entryProgress: round(entryProgress),
     early,
     hit: Boolean(eligible && early && bestMultiple >= minimumHitMultiple),

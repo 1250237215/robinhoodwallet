@@ -6,6 +6,113 @@ function round(value, digits = 4) {
   return Math.round(value * factor) / factor;
 }
 
+function finiteNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const next = Number(value);
+  return Number.isFinite(next) ? next : null;
+}
+
+export function assessWalletTokenCostBasis({
+  buyAmount,
+  sellAmount,
+  holdingTokenAmount
+} = {}) {
+  const hasFlowData = finiteNumber(buyAmount) !== null && finiteNumber(sellAmount) !== null;
+  const bought = Math.max(0, finiteNumber(buyAmount) ?? 0);
+  const sold = Math.max(0, finiteNumber(sellAmount) ?? 0);
+  const held = Math.max(0, finiteNumber(holdingTokenAmount) ?? 0);
+  const accountedTokens = sold + held;
+  const tolerance = Math.max(1e-8, bought * 0.01);
+  const unexplainedTokenAmount = Math.max(0, accountedTokens - bought);
+
+  if (!hasFlowData || (bought === 0 && accountedTokens === 0)) {
+    return {
+      costBasisStatus: 'unknown',
+      costBasisComplete: null,
+      costBasisCoverage: null,
+      unexplainedTokenAmount: 0,
+      costBasisReason: ''
+    };
+  }
+  if (accountedTokens > bought + tolerance) {
+    return {
+      costBasisStatus: 'incomplete_external_inflow',
+      costBasisComplete: false,
+      costBasisCoverage: accountedTokens > 0 ? round(Math.min(1, bought / accountedTokens), 6) : null,
+      unexplainedTokenAmount: round(unexplainedTokenAmount, 8),
+      costBasisReason: 'sold_or_held_amount_exceeds_observed_buys'
+    };
+  }
+  return {
+    costBasisStatus: 'complete',
+    costBasisComplete: true,
+    costBasisCoverage: 1,
+    unexplainedTokenAmount: 0,
+    costBasisReason: ''
+  };
+}
+
+export function deriveWalletAdmissionMultiple(performance = {}) {
+  const inferredCostBasis = assessWalletTokenCostBasis(performance);
+  const costBasisComplete = typeof performance.costBasisComplete === 'boolean'
+    ? performance.costBasisComplete
+    : inferredCostBasis.costBasisComplete;
+  const costBasisStatus = String(performance.costBasisStatus || (
+    costBasisComplete === false
+      ? 'incomplete_external_inflow'
+      : costBasisComplete === true
+        ? 'complete'
+        : inferredCostBasis.costBasisStatus
+  ));
+  const costBasis = {
+    costBasisStatus,
+    costBasisComplete,
+    costBasisCoverage: finiteNumber(performance.costBasisCoverage) ?? inferredCostBasis.costBasisCoverage,
+    unexplainedTokenAmount:
+      finiteNumber(performance.unexplainedTokenAmount) ?? inferredCostBasis.unexplainedTokenAmount,
+    costBasisReason: String(performance.costBasisReason || inferredCostBasis.costBasisReason || '')
+  };
+  const profitRate = finiteNumber(performance.profitRate);
+  const totalProfitUsd = finiteNumber(performance.totalProfitUsd);
+  const buyVolumeUsd = finiteNumber(performance.buyVolumeUsd ?? performance.entryCostUsd);
+  const explicitProfitMultiple = profitRate !== null
+    ? Math.max(0, 1 + profitRate)
+    : totalProfitUsd !== null && buyVolumeUsd > 0
+      ? Math.max(0, 1 + totalProfitUsd / buyVolumeUsd)
+      : null;
+
+  if (costBasisComplete === false) {
+    return {
+      ...costBasis,
+      admissionMultiple: round(explicitProfitMultiple),
+      admissionMultipleSource: profitRate !== null
+        ? 'debot_profit_rate'
+        : explicitProfitMultiple !== null
+          ? 'explicit_profit_vs_observed_buys'
+          : 'unavailable',
+      admissionMultipleReliable: explicitProfitMultiple !== null
+    };
+  }
+
+  const reported = [
+    performance.realizedMultiple,
+    performance.unrealizedMultiple,
+    performance.totalMultiple,
+    performance.admissionMultiple
+  ].map(finiteNumber).filter((value) => value !== null && value >= 0);
+  const admissionMultiple = reported.length ? Math.max(...reported) : explicitProfitMultiple;
+  return {
+    ...costBasis,
+    admissionMultiple: round(admissionMultiple),
+    admissionMultipleSource: reported.length
+      ? costBasisComplete === true ? 'complete_cost_basis' : 'reported_multiples'
+      : explicitProfitMultiple !== null
+        ? profitRate !== null ? 'debot_profit_rate' : 'explicit_profit_vs_observed_buys'
+        : 'unavailable',
+    admissionMultipleReliable: admissionMultiple !== null
+  };
+}
+
 function ordered(actions) {
   return [...actions].sort(
     (a, b) =>

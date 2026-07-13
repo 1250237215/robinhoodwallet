@@ -1,3 +1,5 @@
+import { assessWalletTokenCostBasis, deriveWalletAdmissionMultiple } from './analysis.js';
+
 const DEBOT_BASE_URL = 'https://debot.ai/api';
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 
@@ -197,6 +199,7 @@ export function normalizeWalletTokenProfit(raw = {}, requestedWallet = '') {
   const explicitUnrealizedProfitUsd = asNumber(raw.unrealized_profit);
   const explicitRealizedRate = asNumber(raw.realized_profit_rate);
   const explicitUnrealizedRate = asNumber(raw.unrealized_profit_rate);
+  const profitRate = asNumber(raw.profit_rate);
   const realizedCostUsd = explicitRealizedProfitUsd !== null && sellVolumeUsd - explicitRealizedProfitUsd > 0
     ? sellVolumeUsd - explicitRealizedProfitUsd
     : rawRemainingCostUsd !== null
@@ -206,10 +209,41 @@ export function normalizeWalletTokenProfit(raw = {}, requestedWallet = '') {
     ? returnMultiple(sellVolumeUsd, realizedCostUsd)
     : null;
   const unrealizedMultiple = returnMultiple(holdingValueUsd, remainingCostUsd);
-  const totalMultiple = sellVolumeUsd > 0 || holdingValueUsd > 0
+  const flowTotalMultiple = sellVolumeUsd > 0 || holdingValueUsd > 0
     ? returnMultiple(sellVolumeUsd + holdingValueUsd, buyVolumeUsd)
     : null;
-  const profitRate = asNumber(raw.profit_rate);
+  const realizedProfitUsd = explicitRealizedProfitUsd ?? (
+    realizedCostUsd === null ? null : sellVolumeUsd - realizedCostUsd
+  );
+  const unrealizedProfitUsd = explicitUnrealizedProfitUsd ?? (
+    currentPriceUsd === null ? null : holdingValueUsd - remainingCostUsd
+  );
+  const totalProfitUsd = asNumber(raw.profit) ?? (
+    buyVolumeUsd > 0 ? sellVolumeUsd + holdingValueUsd - buyVolumeUsd : null
+  );
+  const costBasis = assessWalletTokenCostBasis({ buyAmount, sellAmount, holdingTokenAmount });
+  const explicitProfitMultiple = profitRate !== null
+    ? Math.max(0, 1 + profitRate)
+    : totalProfitUsd !== null && buyVolumeUsd > 0
+      ? Math.max(0, 1 + totalProfitUsd / buyVolumeUsd)
+      : null;
+  const totalMultiple = costBasis.costBasisComplete === false
+    ? explicitProfitMultiple
+    : flowTotalMultiple ?? explicitProfitMultiple;
+  const admission = deriveWalletAdmissionMultiple({
+    buyAmount,
+    sellAmount,
+    holdingTokenAmount,
+    buyVolumeUsd,
+    realizedProfitUsd,
+    unrealizedProfitUsd,
+    totalProfitUsd,
+    profitRate,
+    realizedMultiple,
+    unrealizedMultiple,
+    totalMultiple,
+    ...costBasis
+  });
   return {
     address: String(raw.wallet || requestedWallet || '').toLowerCase(),
     tokenAddress: String(raw.token || '').toLowerCase(),
@@ -226,21 +260,17 @@ export function normalizeWalletTokenProfit(raw = {}, requestedWallet = '') {
     averageBuyPriceUsd,
     averageCostPriceUsd: asNumber(raw.avg_cost_price),
     remainingCostUsd,
-    realizedProfitUsd: explicitRealizedProfitUsd ?? (
-      realizedCostUsd === null ? null : sellVolumeUsd - realizedCostUsd
-    ),
-    unrealizedProfitUsd: explicitUnrealizedProfitUsd ?? (
-      currentPriceUsd === null ? null : holdingValueUsd - remainingCostUsd
-    ),
-    totalProfitUsd: asNumber(raw.profit) ?? (
-      buyVolumeUsd > 0 ? sellVolumeUsd + holdingValueUsd - buyVolumeUsd : null
-    ),
+    realizedProfitUsd,
+    unrealizedProfitUsd,
+    totalProfitUsd,
     profitRate,
     realizedProfitRate: explicitRealizedRate,
     unrealizedProfitRate: explicitUnrealizedRate,
     realizedMultiple,
     unrealizedMultiple,
-    totalMultiple: totalMultiple ?? (profitRate === null ? null : 1 + profitRate),
+    totalMultiple,
+    ...costBasis,
+    ...admission,
     feesUsd: asNumber(raw.fees_usd),
     transactionFeesUsd: asNumber(raw.tx_fees_usd),
     firstTradeAt: asNumber(raw.first_trade_time),

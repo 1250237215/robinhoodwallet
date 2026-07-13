@@ -1,4 +1,4 @@
-import { analyzeWalletToken, scoreWallet } from './analysis.js';
+import { analyzeWalletToken, deriveWalletAdmissionMultiple, scoreWallet } from './analysis.js';
 
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 
@@ -402,13 +402,17 @@ export function evaluateSmartPerformance(performance, {
   const baseMultiple = Math.max(1, number(smartBaseMultiple) ?? 5);
   const highMultiple = Math.max(baseMultiple, number(strictMultiple) ?? 10);
   const requiredProfitRate = Math.max(Number.EPSILON, number(significantProfitRate) ?? 0.002);
-  const bestMultiple = Math.max(
-    0,
-    number(performance?.realizedMultiple) ?? 0,
-    number(performance?.unrealizedMultiple) ?? 0,
-    number(performance?.totalMultiple) ?? 0,
-    number(performance?.peakPotentialMultiple) ?? 0
-  );
+  const hasAdmissionMultiple = Object.hasOwn(performance || {}, 'admissionMultiple');
+  const bestMultiple = hasAdmissionMultiple
+    ? Math.max(0, number(performance?.admissionMultiple) ?? 0)
+    : Math.max(
+        0,
+        number(performance?.realizedMultiple) ?? 0,
+        number(performance?.unrealizedMultiple) ?? 0,
+        number(performance?.totalMultiple) ?? 0,
+        number(performance?.peakPotentialMultiple) ?? 0
+      );
+  const admissionMultipleReliable = performance?.admissionMultipleReliable !== false;
   const peakMarketCapUsd = number(performance?.peakMarketCapUsd);
   const peakMarketCapProvisional = performance?.peakMarketCapProvisional === true;
   const peakMarketCapReliable = peakMarketCapUsd > 0 && !peakMarketCapProvisional;
@@ -429,24 +433,33 @@ export function evaluateSmartPerformance(performance, {
     holdingShareRate >= requiredProfitRate ||
     (holdingToPeakMarketCapRate !== null && holdingToPeakMarketCapRate >= requiredProfitRate)
   );
+  const significantHoldingValue = Boolean(
+    peakMarketCapReliable && (
+      holdingShareRate >= requiredProfitRate ||
+      (holdingToPeakMarketCapRate !== null && holdingToPeakMarketCapRate >= requiredProfitRate)
+    )
+  );
   const relativeProfitMeetsThreshold = relativeProfitRate !== null && relativeProfitRate >= requiredProfitRate;
   const relativeRealizedProfitMeetsThreshold =
     relativeRealizedProfitRate !== null && relativeRealizedProfitRate >= requiredProfitRate;
   const significantProfit = peakMarketCapReliable && relativeProfitMeetsThreshold;
   const significantRealizedProfit = peakMarketCapReliable && relativeRealizedProfitMeetsThreshold;
-  const baseHit = Boolean(isWinner && performance?.early === true && bestMultiple >= baseMultiple);
-  const strictHit = Boolean(baseHit && bestMultiple >= highMultiple);
+  const multipleHit = Boolean(isWinner && performance?.early === true && bestMultiple >= baseMultiple);
+  const baseHit = Boolean(multipleHit && admissionMultipleReliable);
+  const valueEvidence = significantProfit || significantRealizedProfit || significantHoldingValue;
+  const strictHit = Boolean(baseHit && bestMultiple >= highMultiple && valueEvidence);
   const dynamicFiveXHit = Boolean(
     baseHit &&
     bestMultiple < highMultiple &&
     significantProfit &&
-    (strongHoldingEvidence || significantRealizedProfit)
+    (significantHoldingValue || significantRealizedProfit)
   );
   const smartReasons = [];
   if (strictHit) smartReasons.push('high_multiple');
-  if (dynamicFiveXHit && strongHoldingEvidence) smartReasons.push('heavy_5x');
+  if (dynamicFiveXHit && significantHoldingValue) smartReasons.push('heavy_5x');
   if (dynamicFiveXHit && significantRealizedProfit) smartReasons.push('realized_5x');
   const smartPendingReasons = [];
+  if (multipleHit && !admissionMultipleReliable) smartPendingReasons.push('unreliable_cost_basis');
   if (baseHit && !strictHit && !peakMarketCapReliable) {
     smartPendingReasons.push(peakMarketCapProvisional ? 'peak_market_cap_provisional' : 'missing_peak_market_cap');
   }
@@ -463,6 +476,7 @@ export function evaluateSmartPerformance(performance, {
     realizedProfitToPeakMarketCapRatio: round(relativeRealizedProfitRate, 8),
     holdingToPeakMarketCapRatio: round(holdingToPeakMarketCapRate, 8),
     strongHoldingEvidence,
+    significantHoldingValue,
     significantProfit,
     significantRealizedProfit,
     relativeProfitMeetsThreshold,
@@ -472,11 +486,16 @@ export function evaluateSmartPerformance(performance, {
       early: performance?.early === true,
       baseMultiple: bestMultiple >= baseMultiple,
       strictMultiple: bestMultiple >= highMultiple,
+      admissionMultipleReliable,
+      admissionMultipleSource: performance?.admissionMultipleSource || 'derived_performance',
+      costBasisStatus: performance?.costBasisStatus || 'unknown',
       peakMarketCapAvailable: peakMarketCapUsd > 0,
       peakMarketCapReliable,
       peakMarketCapProvisional,
       significantProfit,
       strongHoldingEvidence,
+      significantHoldingValue,
+      valueEvidence,
       significantRealizedProfit
     }
   };
@@ -533,8 +552,11 @@ export function buildWalletSummaries({
         if (!(entryCostUsd >= tokenMinimumEntryUsd)) continue;
         const realizedMultiple = number(candidate.realizedMultiple);
         const unrealizedMultiple = number(candidate.unrealizedMultiple);
-        const totalMultiple = number(candidate.totalMultiple);
-        const bestMultiple = Math.max(0, realizedMultiple ?? 0, unrealizedMultiple ?? 0, totalMultiple ?? 0);
+        const admission = deriveWalletAdmissionMultiple(candidate);
+        const totalMultiple = admission.costBasisComplete === false
+          ? number(admission.admissionMultiple)
+          : number(candidate.totalMultiple);
+        const bestMultiple = Math.max(0, number(admission.admissionMultiple) ?? 0);
         const candidateEntryProgress = holderEntryProgress(candidate, token);
         const early = candidate.early === true || (candidateEntryProgress !== null && candidateEntryProgress <= 0.2);
         const firstTimestamp = number(candidate.firstTradeAt);
@@ -585,6 +607,7 @@ export function buildWalletSummaries({
           netMultiple: totalMultiple,
           peakPotentialMultiple: bestMultiple,
           bestMultiple,
+          ...admission,
           firstFunding: candidate.firstFunding || null,
           positionLabel: number(candidate.holdingTokenAmount) > 0 ? 'ranked_holder' : 'realized',
           profitState: candidate.profitState,
