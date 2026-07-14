@@ -3532,7 +3532,7 @@ function walletSuggestedAlias(wallet) {
   const explicitRank = finiteNumber(wallet?.profitRank, wallet?.profit_rank, wallet?.rankByProfit);
   const bestSymbol = walletBestTokenSymbol(wallet);
   const profitRank = formatInteger(explicitRank ?? (visibleRank > 0 ? visibleRank : null), '待定');
-  return `${bestSymbol} 盈利榜第 ${profitRank} 名`;
+  return `${bestSymbol} ${profitRank}`;
 }
 
 async function requestCandidateConfirmation(wallet) {

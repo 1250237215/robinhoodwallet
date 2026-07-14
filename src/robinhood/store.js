@@ -12,6 +12,8 @@ import { WALLET_MONITOR_TIERS } from './tiering.js';
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 const MONITOR_EVENT_TYPE_SET = new Set(WALLET_MONITOR_EVENT_TYPES);
 const DEFAULT_MONITOR_RULES_JSON = JSON.stringify(defaultWalletMonitorRules());
+const COMPACT_PROFIT_RANK_ALIAS_MIGRATION = 'robinhood:compact_profit_rank_aliases_v1';
+const LEGACY_PROFIT_RANK_ALIAS_PATTERN = /^(.+?) 盈利榜第 ([1-9][0-9]*|待定) 名$/;
 
 function json(value) {
   return JSON.stringify(value ?? null);
@@ -23,6 +25,44 @@ function parseJson(value, fallback = null) {
     return JSON.parse(value);
   } catch {
     return fallback;
+  }
+}
+
+function compactLegacyProfitRankAlias(value) {
+  const alias = String(value ?? '');
+  const match = alias.match(LEGACY_PROFIT_RANK_ALIAS_PATTERN);
+  return match ? `${match[1]} ${match[2]}` : alias;
+}
+
+function migrateLegacyProfitRankAliases(db) {
+  const migrated = db.prepare('SELECT 1 FROM metadata WHERE key = ?').get(COMPACT_PROFIT_RANK_ALIAS_MIGRATION);
+  if (migrated) return;
+
+  const updateAnnotation = db.prepare('UPDATE wallet_annotations SET alias = ? WHERE address = ?');
+  const updateSummary = db.prepare('UPDATE wallet_summaries SET payload = ? WHERE address = ?');
+  const updateMonitorEvent = db.prepare('UPDATE monitor_events SET wallet_alias = ? WHERE id = ?');
+  db.exec('BEGIN');
+  try {
+    for (const row of db.prepare("SELECT address, alias FROM wallet_annotations WHERE alias LIKE '% 盈利榜第 % 名'").all()) {
+      const alias = compactLegacyProfitRankAlias(row.alias);
+      if (alias !== row.alias) updateAnnotation.run(alias, row.address);
+    }
+    for (const row of db.prepare("SELECT address, payload FROM wallet_summaries WHERE payload LIKE '%盈利榜第%'").all()) {
+      const summary = parseJson(row.payload, null);
+      if (!summary || typeof summary !== 'object') continue;
+      const suggestedAlias = compactLegacyProfitRankAlias(summary.suggestedAlias);
+      if (suggestedAlias === summary.suggestedAlias) continue;
+      updateSummary.run(json({ ...summary, suggestedAlias }), row.address);
+    }
+    for (const row of db.prepare("SELECT id, wallet_alias FROM monitor_events WHERE wallet_alias LIKE '% 盈利榜第 % 名'").all()) {
+      const alias = compactLegacyProfitRankAlias(row.wallet_alias);
+      if (alias !== row.wallet_alias) updateMonitorEvent.run(alias, row.id);
+    }
+    db.prepare('INSERT INTO metadata(key, value) VALUES (?, ?)').run(COMPACT_PROFIT_RANK_ALIAS_MIGRATION, '1');
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
   }
 }
 
@@ -191,6 +231,7 @@ export function createRobinhoodStore(filename) {
     CREATE INDEX IF NOT EXISTS monitor_events_event_timestamp_idx
       ON monitor_events(event_type, block_timestamp DESC);
   `);
+  migrateLegacyProfitRankAliases(db);
   const upsertTokenStatement = db.prepare(`
     INSERT INTO tokens(address, symbol, name, logo, payload, updated_at)
     VALUES (?, ?, ?, ?, ?, ?)

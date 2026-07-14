@@ -226,7 +226,7 @@ test('candidate rows support DeBot inspection, confirmation, exclusion and deter
   assert.match(appJs, /data-exclude-candidate="\$\{escapeHtml\(address\)\}"/);
   assert.match(appJs, /method: 'PATCH',[\s\S]*status: 'active',[\s\S]*alias: walletSuggestedAlias\(wallet\)/);
   assert.match(appJs, /firstValue\(wallet, \['suggestedAlias', 'suggested_alias'\]/);
-  assert.match(appJs, /return `\$\{bestSymbol\} 盈利榜第 \$\{profitRank\} 名`/);
+  assert.match(appJs, /return `\$\{bestSymbol\} \$\{profitRank\}`/);
   assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/wallets\/\$\{encodeURIComponent\(normalized\)\}`, \{ method: 'DELETE' \}\)/);
   assert.match(appJs, /之后不会再出现在默认候选中/);
   assert.match(appJs, /reviewMode \? `[\s\S]*data-confirm-candidate[\s\S]*` : `[\s\S]*data-edit-wallet/);

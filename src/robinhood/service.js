@@ -176,7 +176,7 @@ function attachCandidateReviewMetadata(summaries) {
     summary.profitRank = profitRank;
     summary.bestProfitTokenAddress = normalizeAddress(best.tokenAddress);
     summary.bestProfitTokenSymbol = symbol;
-    summary.suggestedAlias = `${symbol} 盈利榜第 ${profitRank} 名`;
+    summary.suggestedAlias = `${symbol} ${profitRank}`;
   }
   return summaries;
 }

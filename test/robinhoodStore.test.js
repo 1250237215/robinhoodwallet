@@ -94,6 +94,57 @@ test('persists wallet curation independently and deletes annotations idempotentl
   store.close();
 });
 
+test('compacts legacy generated profit-rank aliases across stored wallet data', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-wallet-alias-migration-'));
+  const filename = path.join(directory, 'radar.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const rankedWallet = '0x0000000000000000000000000000000000000002';
+  const customWallet = '0x0000000000000000000000000000000000000003';
+  const token = '0x0000000000000000000000000000000000000004';
+
+  let store = createRobinhoodStore(filename);
+  store.upsertWalletAnnotation({
+    address: rankedWallet,
+    alias: 'HOODIE 盈利榜第 2 名',
+    createdAt: 100,
+    updatedAt: 100
+  });
+  store.upsertWalletAnnotation({
+    address: customWallet,
+    alias: '我手工填写的名字',
+    createdAt: 100,
+    updatedAt: 100
+  });
+  store.replaceWalletSummaries([
+    { address: rankedWallet, score: 10, suggestedAlias: 'HOODIE 盈利榜第 2 名' }
+  ]);
+  store.insertMonitorEvent({
+    walletAddress: rankedWallet,
+    walletAlias: 'HOODIE 盈利榜第 2 名',
+    tokenAddress: token,
+    tokenSymbol: 'HOODIE',
+    tokenName: 'Hoodie',
+    tokenAmount: '1',
+    rawTokenAmount: '1',
+    tokenDecimals: 18,
+    txHash: '0xabc',
+    logIndex: 1,
+    blockNumber: 10,
+    blockTimestamp: 100,
+    detectedAt: 101
+  });
+  store.db.prepare('DELETE FROM metadata WHERE key = ?').run('robinhood:compact_profit_rank_aliases_v1');
+  store.close();
+
+  store = createRobinhoodStore(filename);
+  assert.equal(store.getWalletAnnotation(rankedWallet).alias, 'HOODIE 2');
+  assert.equal(store.getWalletAnnotation(customWallet).alias, '我手工填写的名字');
+  assert.equal(store.listWalletSummaries()[0].suggestedAlias, 'HOODIE 2');
+  assert.equal(store.listMonitorEvents()[0].walletAlias, 'HOODIE 2');
+  assert.equal(store.getMeta('robinhood:compact_profit_rank_aliases_v1'), '1');
+  store.close();
+});
+
 test('migrates legacy wallet annotations with a persistent watch tier', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-wallet-tier-migration-'));
   const filename = path.join(directory, 'radar.sqlite');

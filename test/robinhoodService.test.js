@@ -679,9 +679,9 @@ test('keeps smart candidates pending until confirmation and suggests token profi
 
   const summaries = new Map(store.listWalletSummaries().map((wallet) => [wallet.address, wallet]));
   assert.equal(summaries.get(walletB).profitRank, 1);
-  assert.equal(summaries.get(walletB).suggestedAlias, 'VEX 盈利榜第 1 名');
+  assert.equal(summaries.get(walletB).suggestedAlias, 'VEX 1');
   assert.equal(summaries.get(walletA).profitRank, 2);
-  assert.equal(summaries.get(walletA).suggestedAlias, 'VEX 盈利榜第 2 名');
+  assert.equal(summaries.get(walletA).suggestedAlias, 'VEX 2');
 
   const pending = service.listWallets({ tab: 'all', review: 'pending' });
   assert.deepEqual(new Set(pending.map((wallet) => wallet.address)), new Set([walletA, walletB]));
