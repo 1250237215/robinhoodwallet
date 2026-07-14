@@ -472,6 +472,35 @@ test('per-token analysis exposes dynamic peak-market-cap and significant-profit 
   assert.match(stylesCss, /\.peak-market-cap-metric dt \{[\s\S]*white-space: normal/);
 });
 
+test('confirmed library exposes historical manual-winner hits and their peak-return basis', () => {
+  for (const helper of [
+    'walletManualWinnerHits',
+    'walletManualWinnerParticipation',
+    'walletManualWinnerHitRate',
+    'walletManualWinnerHitThreshold',
+    'walletHistoricalPeakMultiple',
+    'positionHistoricalPeakMultiple',
+    'positionHistoricalPeakReturnPercent'
+  ]) {
+    assert.match(appJs, new RegExp(`function ${helper}\\(`));
+  }
+  for (const field of [
+    'manualWinnerHitCount',
+    'manualWinnerParticipationCount',
+    'manualWinnerHitThreshold',
+    'maxHistoricalPeakMultiple',
+    'historicalPeakMultiple',
+    'historicalPeakReturnPercent'
+  ]) {
+    assert.equal(appJs.includes(field), true, `missing historical winner field ${field}`);
+  }
+  assert.match(appJs, /confirmedLibraryMode \? '<th>金狗历史命中<\/th>' : ''/);
+  assert.match(appJs, /data-label="金狗历史命中"/);
+  assert.match(appJs, /参与 \$\{formatInteger\(manualWinnerParticipation\)\} 个 · 峰值 ≥/);
+  assert.match(appJs, /<dt>历史峰值收益<\/dt>/);
+  assert.match(appJs, /renderMetric\('历史最高收益'/);
+});
+
 test('missing smart data is explicit and no fixed significant-profit amount is presented', () => {
   assert.match(appJs, /function formatRequiredNumber\(value, options = \{\}\)[\s\S]*return '待补全'/);
   assert.match(appJs, /function formatRatio\(value\)[\s\S]*return '待补全'/);
@@ -492,7 +521,7 @@ test('profit leaderboard defaults to smart score and retains profit and holder-f
     ['realized_profit', '已实现盈利'],
     ['unrealized_profit', '未实现盈利'],
     ['best_multiple', '最高倍数'],
-    ['hits', '命中次数']
+    ['hits', '金狗历史命中数']
   ]) {
     assert.match(sortMarkup, new RegExp(`value="${value}">${label}`));
   }
@@ -500,7 +529,8 @@ test('profit leaderboard defaults to smart score and retains profit and holder-f
   assert.match(appJs, /else result = compareNullable\(left, right, walletTotalProfit\)/);
   assert.match(appJs, /sort === 'holder_rank'[\s\S]*walletHolderRank, true/);
   assert.match(appJs, /sort === 'name'[\s\S]*localeCompare\(rightName, 'zh-CN'/);
-  assert.match(appJs, /if \(state\.activeTab === 'all_round'\) elements\.sort\.value = 'name'/);
+  assert.match(appJs, /sort === 'hits'[\s\S]*walletManualWinnerHits/);
+  assert.match(appJs, /if \(state\.activeTab === 'all_round'\) elements\.sort\.value = 'hits'/);
   assert.match(appJs, /\['winners', 'candidates', 'all_round'\]\.includes\(classification\) \? 'all' : classification/);
 });
 

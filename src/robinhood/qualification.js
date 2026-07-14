@@ -232,6 +232,41 @@ function currentMarketCap(token) {
   return number(token?.marketCapUsd ?? token?.currentMarketCapUsd);
 }
 
+function tokenPeakPriceUsd(token) {
+  const explicit = number(token?.peakPriceUsd);
+  if (explicit > 0) return explicit;
+  const currentPriceUsd = number(token?.priceUsd);
+  const peakMarketCapUsd = peakMarketCap(token);
+  const currentMarketCapUsd = currentMarketCap(token);
+  if (currentPriceUsd > 0 && peakMarketCapUsd > 0 && currentMarketCapUsd > 0) {
+    return currentPriceUsd * (peakMarketCapUsd / currentMarketCapUsd);
+  }
+  return null;
+}
+
+function historicalPeakReturn({ boughtAmount, entryCost, averageBuyPrice, peakPrice }) {
+  const peak = number(peakPrice);
+  let amount = number(boughtAmount);
+  let cost = number(entryCost);
+  const average = number(averageBuyPrice);
+  if (!(peak > 0)) return null;
+  if (!(amount > 0) && cost > 0 && average > 0) amount = cost / average;
+  if (!(cost > 0) && amount > 0 && average > 0) cost = amount * average;
+  if (!(amount > 0 && cost > 0)) return null;
+  const grossValue = amount * peak;
+  const multiple = grossValue / cost;
+  if (!Number.isFinite(multiple) || multiple < 0) return null;
+  return {
+    boughtAmount: amount,
+    entryCost: cost,
+    peakPrice: peak,
+    grossValue,
+    profit: grossValue - cost,
+    multiple,
+    returnRate: multiple - 1
+  };
+}
+
 function holderEntryProgress(candidate, token) {
   const averageBuyPriceUsd = number(candidate?.averageBuyPriceUsd);
   const currentPriceUsd = number(candidate?.currentPriceUsd ?? token?.priceUsd);
@@ -560,11 +595,19 @@ export function buildWalletSummaries({
         const candidateEntryProgress = holderEntryProgress(candidate, token);
         const early = candidate.early === true || (candidateEntryProgress !== null && candidateEntryProgress <= 0.2);
         const firstTimestamp = number(candidate.firstTradeAt);
+        const peakPriceUsd = tokenPeakPriceUsd(token);
+        const historicalPeak = historicalPeakReturn({
+          boughtAmount: candidate.buyAmount,
+          entryCost: entryCostUsd,
+          averageBuyPrice: candidate.averageBuyPriceUsd,
+          peakPrice: peakPriceUsd
+        });
         const performance = {
           tokenAddress,
           symbol: String(token.symbol || 'UNKNOWN'),
           name: String(token.name || token.symbol || 'Unknown'),
           logo: String(token.logo || ''),
+          manualToken: token.manual === true,
           hit: false,
           early,
           entryProgress: round(candidateEntryProgress),
@@ -572,6 +615,7 @@ export function buildWalletSummaries({
           firstBuyAt: firstTimestamp,
           lastTradeAt: number(candidate.lastTradeAt),
           entryPriceUsd: number(candidate.averageBuyPriceUsd),
+          buyAmount: number(candidate.buyAmount),
           currentPriceUsd: number(candidate.currentPriceUsd ?? token.priceUsd),
           entryDelaySeconds:
             firstTimestamp !== null && number(token.creationTimestamp) !== null
@@ -594,6 +638,7 @@ export function buildWalletSummaries({
           holdingSharePercent: number(candidate.holdingSharePercent),
           holderRank: number(candidate.holderRank),
           peakMarketCapUsd: peakMarketCap(token),
+          peakPriceUsd,
           peakMarketCapAt: token.peakMarketCapAt || null,
           peakMarketCapSource: token.peakMarketCapSource || null,
           peakMarketCapProvisional: token.peakMarketCapProvisional === true,
@@ -607,6 +652,17 @@ export function buildWalletSummaries({
           netMultiple: totalMultiple,
           peakPotentialMultiple: bestMultiple,
           bestMultiple,
+          historicalPeakGrossValueUsd: round(historicalPeak?.grossValue, 2),
+          historicalPeakProfitUsd: round(historicalPeak?.profit, 2),
+          historicalPeakMultiple: round(historicalPeak?.multiple),
+          historicalPeakReturnRate: round(historicalPeak?.returnRate, 6),
+          historicalPeakReturnPercent: round(
+            historicalPeak ? historicalPeak.returnRate * 100 : null,
+            2
+          ),
+          historicalPeakSource: historicalPeak ? 'buy_quantity_cost_and_token_peak_price' : 'unavailable',
+          manualWinnerHit: Boolean(token.manual === true && historicalPeak?.multiple >= baseMultiple),
+          manualWinnerHitThreshold: baseMultiple,
           ...admission,
           firstFunding: candidate.firstFunding || null,
           positionLabel: number(candidate.holdingTokenAmount) > 0 ? 'ranked_holder' : 'realized',
@@ -651,6 +707,9 @@ export function buildWalletSummaries({
       const entryCostNative = walletActions
         .filter((action) => action.side === 'buy')
         .reduce((sum, action) => sum + Math.max(0, number(action.quoteAmount) ?? 0), 0);
+      const boughtTokenAmount = walletActions
+        .filter((action) => action.side === 'buy')
+        .reduce((sum, action) => sum + Math.max(0, number(action.tokenAmount) ?? 0), 0);
       const entryCostUsd = conversion === null ? null : entryCostNative * conversion;
       if (tokenMinimumEntryUsd > 0 && !(entryCostUsd >= tokenMinimumEntryUsd)) continue;
       const currentPriceNative =
@@ -671,11 +730,18 @@ export function buildWalletSummaries({
           })
         : null;
       const firstTimestamp = number(firstBuy.blockTimestamp);
+      const historicalPeak = historicalPeakReturn({
+        boughtAmount: boughtTokenAmount,
+        entryCost: entryCostNative,
+        averageBuyPrice: entryCostNative > 0 && boughtTokenAmount > 0 ? entryCostNative / boughtTokenAmount : null,
+        peakPrice: stats.peakPriceNative
+      });
       const performance = {
         tokenAddress,
         symbol: String(token.symbol || 'UNKNOWN'),
         name: String(token.name || token.symbol || 'Unknown'),
         logo: String(token.logo || ''),
+        manualToken: token.manual === true,
         hit: false,
         early,
         entryProgress: round(progress),
@@ -691,6 +757,7 @@ export function buildWalletSummaries({
         quoteUsd: conversion,
         entryCostNative: round(entryCostNative, 10),
         entryCostUsd: entryCostUsd === null ? null : round(entryCostUsd, 2),
+        buyAmount: round(boughtTokenAmount, 8),
         minimumEntryUsd: tokenMinimumEntryUsd,
         buyTimes: walletActions.filter((action) => action.side === 'buy').length,
         sellTimes: walletActions.filter((action) => action.side === 'sell').length,
@@ -717,11 +784,23 @@ export function buildWalletSummaries({
             ? null
             : round(result.currentValueNative * conversion, 2),
         peakMarketCapUsd: peakMarketCap(token),
+        peakPriceNative: number(stats.peakPriceNative),
         peakMarketCapAt: token.peakMarketCapAt || null,
         peakMarketCapSource: token.peakMarketCapSource || null,
         peakMarketCapProvisional: token.peakMarketCapProvisional === true,
         peakMarketCapError: token.peakMarketCapError || null,
         currentMarketCapUsd: currentMarketCap(token),
+        historicalPeakGrossValueNative: round(historicalPeak?.grossValue, 10),
+        historicalPeakProfitNative: round(historicalPeak?.profit, 10),
+        historicalPeakMultiple: round(historicalPeak?.multiple),
+        historicalPeakReturnRate: round(historicalPeak?.returnRate, 6),
+        historicalPeakReturnPercent: round(
+          historicalPeak ? historicalPeak.returnRate * 100 : null,
+          2
+        ),
+        historicalPeakSource: historicalPeak ? 'onchain_buy_quantity_cost_and_peak_price' : 'unavailable',
+        manualWinnerHit: Boolean(token.manual === true && historicalPeak?.multiple >= baseMultiple),
+        manualWinnerHitThreshold: baseMultiple,
         estimatedExitProceedsUsd:
           conversion === null || exit?.amountOut === null || exit?.amountOut === undefined
             ? null
@@ -758,6 +837,19 @@ export function buildWalletSummaries({
   const summaries = [];
   for (const [address, performances] of wallets) {
     const hits = performances.filter((performance) => performance.hit);
+    const manualTokenAddresses = new Set();
+    const manualWinnerHitTokenAddresses = new Set();
+    for (const performance of performances) {
+      const performanceTokenAddress = normalizeAddress(performance.tokenAddress);
+      if (performance.manualToken !== true || !ADDRESS_PATTERN.test(performanceTokenAddress)) continue;
+      manualTokenAddresses.add(performanceTokenAddress);
+      if (performance.manualWinnerHit === true) manualWinnerHitTokenAddresses.add(performanceTokenAddress);
+    }
+    const manualWinnerParticipationCount = manualTokenAddresses.size;
+    const manualWinnerHitCount = manualWinnerHitTokenAddresses.size;
+    const manualWinnerHitRate = manualWinnerParticipationCount
+      ? manualWinnerHitCount / manualWinnerParticipationCount
+      : null;
     const repeatEligible = hits.length >= requiredRepeatHits;
     const smartReasons = [...new Set(performances.flatMap((performance) => performance.smartReasons || []))];
     if (repeatEligible) smartReasons.push('repeat_5x');
@@ -775,6 +867,7 @@ export function buildWalletSummaries({
     const maxRealizedMultiple = maximum(performances.map((performance) => performance.realizedMultiple));
     const maxUnrealizedMultiple = maximum(performances.map((performance) => performance.unrealizedMultiple));
     const maxPeakMultiple = maximum(performances.map((performance) => performance.peakPotentialMultiple));
+    const maxHistoricalPeakMultiple = maximum(performances.map((performance) => performance.historicalPeakMultiple));
     const maxTotalMultiple = maximum(performances.map((performance) => performance.totalMultiple));
     const holderRanks = performances.map((performance) => number(performance.holderRank)).filter((rank) => rank !== null);
     const bestHolderRank = holderRanks.length ? Math.min(...holderRanks) : null;
@@ -873,7 +966,12 @@ export function buildWalletSummaries({
       ...scored,
       winnerHits: hits.length,
       eligibleEntries: performances.length,
-      manualTokenParticipationCount: performances.length,
+      manualTokenParticipationCount: manualWinnerParticipationCount,
+      manualWinnerParticipationCount,
+      manualWinnerHitCount,
+      manualWinnerHitRate: round(manualWinnerHitRate, 4),
+      manualWinnerHitThreshold: baseMultiple,
+      manualWinnerHitTokenAddresses: [...manualWinnerHitTokenAddresses].sort(),
       minimumEntryUsd: summaryMinimumEntryUsd,
       smartEligible,
       smartReasons,
@@ -915,6 +1013,10 @@ export function buildWalletSummaries({
       maxTotalMultiple,
       maxPeakMultiple,
       medianPeakMultiple: median(performances.map((performance) => performance.peakPotentialMultiple)),
+      maxHistoricalPeakMultiple,
+      medianHistoricalPeakMultiple: median(
+        performances.map((performance) => performance.historicalPeakMultiple)
+      ),
       realizedProfitUsd: round(
         performances.reduce((sum, performance) => sum + (number(performance.realizedProfitUsd) ?? 0), 0),
         2

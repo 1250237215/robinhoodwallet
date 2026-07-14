@@ -66,7 +66,7 @@ const SORT_LABELS = Object.freeze({
   realized_profit: '已实现盈利',
   unrealized_profit: '未实现盈利',
   best_multiple: '最高倍数',
-  hits: '命中次数'
+  hits: '金狗历史命中数'
 });
 
 const elements = {
@@ -2029,6 +2029,42 @@ function walletHits(wallet) {
   return finiteNumber(wallet.hits, wallet.winnerHits, wallet.qualifiedWinnerHits, wallet.hitCount) ?? 0;
 }
 
+function walletManualWinnerHits(wallet) {
+  return finiteNumber(
+    wallet.manualWinnerHitCount,
+    wallet.manual_winner_hit_count,
+    wallet.historicalWinnerHitCount,
+    wallet.historical_winner_hit_count
+  ) ?? walletHits(wallet);
+}
+
+function walletManualWinnerParticipation(wallet) {
+  return finiteNumber(
+    wallet.manualWinnerParticipationCount,
+    wallet.manual_winner_participation_count,
+    wallet.manualTokenParticipationCount,
+    wallet.manual_token_participation_count,
+    wallet.eligibleEntries,
+    wallet.eligible_entries
+  ) ?? walletEntries(wallet);
+}
+
+function walletManualWinnerHitRate(wallet) {
+  const explicit = finiteNumber(wallet.manualWinnerHitRate, wallet.manual_winner_hit_rate);
+  if (explicit !== null) return explicit;
+  const participation = walletManualWinnerParticipation(wallet);
+  return participation > 0 ? walletManualWinnerHits(wallet) / participation : null;
+}
+
+function walletManualWinnerHitThreshold(wallet) {
+  return finiteNumber(
+    wallet.manualWinnerHitThreshold,
+    wallet.manual_winner_hit_threshold,
+    wallet.smartBaseMultiple,
+    wallet.smart_base_multiple
+  ) ?? 5;
+}
+
 function walletEntries(wallet) {
   return finiteNumber(
     wallet.entries,
@@ -2201,6 +2237,15 @@ function walletUnrealized(wallet) {
 
 function walletPeak(wallet) {
   return finiteNumber(wallet.maxPeakMultiple, wallet.peakPotentialMultiple, wallet.athPotentialMultiple);
+}
+
+function walletHistoricalPeakMultiple(wallet) {
+  return finiteNumber(
+    wallet.maxHistoricalPeakMultiple,
+    wallet.max_historical_peak_multiple,
+    wallet.historicalPeakMultiple,
+    wallet.historical_peak_multiple
+  );
 }
 
 function walletBestMultiple(wallet) {
@@ -2464,7 +2509,11 @@ function sortWallets(wallets) {
     else if (sort === 'realized_profit') result = compareNullable(left, right, walletRealizedProfit);
     else if (sort === 'unrealized_profit') result = compareNullable(left, right, walletUnrealizedProfit);
     else if (sort === 'best_multiple') result = compareNullable(left, right, walletBestMultiple);
-    else if (sort === 'hits') result = walletHits(right) - walletHits(left);
+    else if (sort === 'hits') {
+      result = walletManualWinnerHits(right) - walletManualWinnerHits(left)
+        || (walletManualWinnerHitRate(right) ?? -1) - (walletManualWinnerHitRate(left) ?? -1)
+        || compareNullable(left, right, walletTotalProfit);
+    }
     else result = compareNullable(left, right, walletTotalProfit);
     return result
       || walletHits(right) - walletHits(left)
@@ -2522,6 +2571,7 @@ function holderRankBadge(wallet) {
 function renderWalletTable(wallets) {
   const reviewMode = isCandidateReviewTab();
   const selectionMode = isWalletSelectionTab();
+  const confirmedLibraryMode = state.activeTab === 'all_round';
   if (!wallets.length) {
     return renderEmpty(
       reviewMode ? '没有待审核候选' : '已确认地址库为空',
@@ -2534,12 +2584,13 @@ function renderWalletTable(wallets) {
         <tr>
           <th class="rank-column">${selectionMode ? '<span class="sr-only">选择</span>' : '#'}</th>
           <th>地址</th>
+          ${confirmedLibraryMode ? '<th>金狗历史命中</th>' : ''}
           <th>当前持仓</th>
           <th>已实现利润</th>
           <th>未实现利润</th>
           <th>总利润</th>
           <th>相对评分</th>
-          <th>胜场 / 有效</th>
+          ${confirmedLibraryMode ? '' : '<th>胜场 / 有效</th>'}
           <th>交易频率</th>
           <th>数据状态</th>
         </tr>
@@ -2562,6 +2613,9 @@ function renderWalletTable(wallets) {
           const eligibleEntries = walletEligibleEntries(wallet);
           const winningEntries = walletWinningEntries(wallet);
           const adjustedWinRate = walletAdjustedWinRate(wallet);
+          const manualWinnerHits = walletManualWinnerHits(wallet);
+          const manualWinnerParticipation = walletManualWinnerParticipation(wallet);
+          const manualWinnerHitThreshold = walletManualWinnerHitThreshold(wallet);
           const totalTradeCount = walletTotalTradeCount(wallet);
           const tradesPerEntry = walletTradesPerEntry(wallet);
           const normalizedProfitScore = walletNormalizedProfitScore(wallet);
@@ -2602,12 +2656,15 @@ function renderWalletTable(wallets) {
                   ${String(wallet.status || 'active').toLowerCase() === 'excluded' ? '' : `<button class="inline-icon-button disable-wallet-button" type="button" data-disable-wallet="${escapeHtml(address)}" title="删除并禁用地址" aria-label="删除并禁用 ${escapeHtml(alias || shortAddress(address))}"><i data-lucide="trash-2" aria-hidden="true"></i></button>`}
                 `}
               </td>
+              ${confirmedLibraryMode
+                ? `<td class="smart-win-cell" data-label="金狗历史命中"><strong>${formatInteger(manualWinnerHits)} 个</strong><span>参与 ${formatInteger(manualWinnerParticipation)} 个 · 峰值 ≥ ${formatMultiple(manualWinnerHitThreshold)}</span></td>`
+                : ''}
               <td class="holding-cell" data-label="当前持仓"><strong>${formatMoney(holdingValue)}</strong><span>${escapeHtml(holderRankLabel(holderRank))} · ${escapeHtml(formatHoldingShare(holdingShare))}</span></td>
               <td class="profit-cell realized-profit-cell" data-label="已实现利润"><strong class="profit-value ${profitTone(realizedProfit)}">${formatSignedMoney(realizedProfit)}</strong><span>${formatMultiple(walletRealized(wallet))}</span></td>
               <td class="profit-cell unrealized-profit-cell" data-label="未实现利润"><strong class="profit-value ${profitTone(unrealizedProfit)}">${formatSignedMoney(unrealizedProfit)}</strong><span>${formatMultiple(walletUnrealized(wallet))}</span></td>
               <td class="profit-cell total-profit-cell" data-label="总利润"><strong class="profit-value ${profitTone(totalProfit)}">${formatSignedMoney(totalProfit)}</strong><span>${formatMultiple(bestMultiple)} 最高${topHolderCount === null ? '' : ` · ${formatInteger(topHolderCount)} 个 Top Holder`}</span></td>
               <td class="smart-score-cell" data-label="相对评分"><strong>${formatRequiredNumber(smartScore, { maximumFractionDigits: 1 })}</strong><span>${normalizedProfitScore !== null ? `利润百分位 ${formatPercent(normalizedProfitScore)}` : profitToPeakMarketCapRatio !== null ? `利润 / 峰值市值 ${formatRatio(profitToPeakMarketCapRatio)}` : '利润百分位待补全'}</span></td>
-              <td class="smart-win-cell" data-label="胜场 / 有效"><strong>${winningEntries === null && eligibleEntries === null ? '待补全' : `${formatRequiredNumber(winningEntries, { maximumFractionDigits: 0 })} / ${formatRequiredNumber(eligibleEntries, { maximumFractionDigits: 0 })}`}</strong><span>加权账面胜率 ${adjustedWinRate === null ? '待补全' : formatPercent(adjustedWinRate)}</span></td>
+              ${confirmedLibraryMode ? '' : `<td class="smart-win-cell" data-label="胜场 / 有效"><strong>${winningEntries === null && eligibleEntries === null ? '待补全' : `${formatRequiredNumber(winningEntries, { maximumFractionDigits: 0 })} / ${formatRequiredNumber(eligibleEntries, { maximumFractionDigits: 0 })}`}</strong><span>加权账面胜率 ${adjustedWinRate === null ? '待补全' : formatPercent(adjustedWinRate)}</span></td>`}
               <td class="smart-frequency-cell" data-label="交易频率"><strong>${totalTradeCount === null ? '待补全' : `${formatRequiredNumber(totalTradeCount, { maximumFractionDigits: 0 })} 笔`}</strong><span>每次入场 ${formatRequiredNumber(tradesPerEntry)}</span></td>
               <td class="data-status-cell" data-label="数据状态"><span class="status-badge ${escapeHtml(dataStatus.tone)}">${escapeHtml(dataStatus.label)}</span><span>${escapeHtml(snapshotAt ? formatDateTime(snapshotAt) : `${confidence.label}置信`)}</span></td>
             </tr>
@@ -2928,6 +2985,30 @@ function positionPeakMarketCapSource(position) {
   return value === null || value === undefined || value === '' ? '' : String(value);
 }
 
+function positionHistoricalPeakMultiple(position) {
+  return finiteNumber(positionMetric(position, [
+    'historicalPeakMultiple',
+    'historical_peak_multiple'
+  ]));
+}
+
+function positionHistoricalPeakReturnPercent(position) {
+  const explicit = finiteNumber(positionMetric(position, [
+    'historicalPeakReturnPercent',
+    'historical_peak_return_percent'
+  ]));
+  if (explicit !== null) return explicit;
+  const multiple = positionHistoricalPeakMultiple(position);
+  return multiple === null ? null : (multiple - 1) * 100;
+}
+
+function formatSignedPercentValue(value) {
+  const number = finiteNumber(value);
+  if (number === null) return '--';
+  const sign = number > 0 ? '+' : '';
+  return `${sign}${number.toLocaleString('zh-CN', { maximumFractionDigits: 1 })}%`;
+}
+
 function peakMarketCapSourceLabel(source) {
   const raw = String(source || '').trim();
   if (!raw) return '来源待补全';
@@ -2956,9 +3037,8 @@ function renderPosition(position) {
   const address = normalizeAddress(firstValue(token, ['address', 'tokenAddress'], position.tokenAddress)) || '';
   const realized = positionMetric(position, ['realizedMultiple', 'maxRealizedMultiple']);
   const unrealized = positionMetric(position, ['unrealizedMultiple', 'maxUnrealizedMultiple']);
-  const peak = positionMetric(position, [
-    'bestMultiple', 'totalMultiple', 'peakPotentialMultiple', 'athPotentialMultiple', 'maxPeakMultiple'
-  ]);
+  const historicalPeakMultiple = positionHistoricalPeakMultiple(position);
+  const historicalPeakReturnPercent = positionHistoricalPeakReturnPercent(position);
   const realizedProfit = positionRealizedProfit(position);
   const unrealizedProfit = positionUnrealizedProfit(position);
   const holdingValue = positionHoldingValue(position);
@@ -2989,7 +3069,7 @@ function renderPosition(position) {
         <div><dt>当前持仓</dt><dd>${formatMoney(holdingValue)}</dd><small>${formatCompact(holdingAmount)} ${escapeHtml(symbol)} · ${escapeHtml(holderRankLabel(holderRank))} · ${escapeHtml(formatHoldingShare(holdingShare))}</small></div>
         <div><dt>已实现利润</dt><dd class="${profitTone(realizedProfit)}">${formatSignedMoney(realizedProfit)}</dd><small>${formatMultiple(realized)}</small></div>
         <div><dt>未实现利润</dt><dd class="${profitTone(unrealizedProfit)}">${formatSignedMoney(unrealizedProfit)}</dd><small>${formatMultiple(unrealized)}</small></div>
-        <div><dt>最高倍数</dt><dd>${formatMultiple(peak)}</dd><small>首笔 ${escapeHtml(formatPrice(positionMetric(position, ['firstBuyPriceUsd', 'entryPriceUsd', 'firstBuyPriceNative'])))}</small></div>
+        <div><dt>历史峰值收益</dt><dd>${formatMultiple(historicalPeakMultiple)}</dd><small>${formatSignedPercentValue(historicalPeakReturnPercent)} · 均价 ${escapeHtml(formatPrice(positionMetric(position, ['averageBuyPriceUsd', 'entryPriceUsd', 'firstBuyPriceUsd', 'firstBuyPriceNative'])))}</small></div>
         <div><dt>累计买入</dt><dd>${formatMoney(positionMetric(position, ['entryCostUsd', 'buyVolumeUsd', 'buy_volume']))}</dd><small>${escapeHtml(formatDateTime(positionMetric(position, ['firstBuyAt', 'entryAt', 'firstTradeTime'])))}</small></div>
         <div class="peak-market-cap-metric"><dt>历史最高市值估算</dt><dd>${peakMarketCapUsd === null ? '待补全' : formatMoney(peakMarketCapUsd)}</dd><small>${escapeHtml(peakMarketCapMeta(position))}</small></div>
         <div><dt>显著利润门槛</dt><dd>${significantProfitThresholdUsd === null ? '待补全' : formatMoney(significantProfitThresholdUsd)}</dd><small>逐币门槛</small></div>
@@ -3064,6 +3144,10 @@ function renderWalletDetail(summary, payload = null) {
   const tradesPerEntry = walletTradesPerEntry(wallet);
   const normalizedProfitScore = walletNormalizedProfitScore(wallet);
   const profitToPeakMarketCapRatio = walletProfitToPeakMarketCapRatio(wallet);
+  const manualWinnerHits = walletManualWinnerHits(wallet);
+  const manualWinnerParticipation = walletManualWinnerParticipation(wallet);
+  const manualWinnerHitThreshold = walletManualWinnerHitThreshold(wallet);
+  const historicalPeakMultiple = walletHistoricalPeakMultiple(wallet);
   const dataStatus = walletDataStatus(wallet);
   const snapshotAt = walletHolderSnapshotAt(wallet);
   const orderedPositions = [...positions].sort((left, right) => {
@@ -3107,7 +3191,7 @@ function renderWalletDetail(summary, payload = null) {
       ${renderMetric('已实现利润', formatSignedMoney(realizedProfit), `${formatMultiple(walletRealized(wallet))} 最高`, profitTone(realizedProfit))}
       ${renderMetric('未实现利润', formatSignedMoney(unrealizedProfit), `${formatMultiple(walletUnrealized(wallet))} 最高`, profitTone(unrealizedProfit))}
       ${renderMetric('总利润', formatSignedMoney(totalProfit), dataStatus.label, profitTone(totalProfit))}
-      ${renderMetric('最高倍数', formatMultiple(walletBestMultiple(wallet)), `${formatInteger(walletHits(wallet))} 命中 / ${formatInteger(walletEntries(wallet))} 出手`)}
+      ${renderMetric('历史最高收益', formatMultiple(historicalPeakMultiple), `${formatInteger(manualWinnerHits)} 个金狗命中 / 参与 ${formatInteger(manualWinnerParticipation)} 个 · 峰值 ≥ ${formatMultiple(manualWinnerHitThreshold)}`)}
       ${renderMetric('累计买入', formatMoney(wallet.totalEntryCostUsd), `单币 ≥ ${formatMoney(wallet.minimumEntryUsd ?? 500)}`)}
     </div>
 
@@ -3750,7 +3834,7 @@ elements.tabs.addEventListener('click', (event) => {
   state.activeTab = button.dataset.tab;
   state.selectedCandidates.clear();
   syncToolbarVisibility();
-  if (state.activeTab === 'all_round') elements.sort.value = 'name';
+  if (state.activeTab === 'all_round') elements.sort.value = 'hits';
   if (leavingMonitor) stopMonitorTransport();
   elements.tabs.querySelectorAll('[data-tab]').forEach((tabButton) => {
     const active = tabButton === button;

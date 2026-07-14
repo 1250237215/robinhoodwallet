@@ -399,6 +399,85 @@ test('recalculates cached external-inflow candidates instead of trusting gross s
   assert.equal(summary.smartEligible, false);
 });
 
+test('counts distinct manual winners from buy quantity, cost, and historical peak price', () => {
+  const candidate = ({ address = walletA, buyAmount = 100, buyVolumeUsd = 200, averageBuyPriceUsd = 2 } = {}) => ({
+    address,
+    holderRank: 25,
+    buyAmount,
+    sellAmount: 0,
+    holdingTokenAmount: buyAmount,
+    holdingValueUsd: 50,
+    buyVolumeUsd,
+    averageBuyPriceUsd,
+    currentPriceUsd: 0.5,
+    totalProfitUsd: -150,
+    realizedProfitUsd: 0,
+    unrealizedProfitUsd: -150,
+    totalMultiple: 0.25,
+    profitState: 'complete',
+    confidence: 'high'
+  });
+  const [summary] = buildWalletSummaries({
+    tokens: [
+      {
+        address: tokenA,
+        symbol: 'FELL',
+        manual: true,
+        peakPriceUsd: 10,
+        peakMarketCapUsd: 10_000_000,
+        holderAnalysis: {
+          strategy: 'holder_first',
+          minimumEntryUsd: 100,
+          candidates: [candidate(), candidate()]
+        }
+      },
+      {
+        address: tokenB,
+        symbol: 'THREE_X',
+        manual: true,
+        peakPriceUsd: 12,
+        peakMarketCapUsd: 12_000_000,
+        holderAnalysis: {
+          strategy: 'holder_first',
+          minimumEntryUsd: 100,
+          candidates: [candidate({ buyAmount: 50, buyVolumeUsd: 200, averageBuyPriceUsd: 4 })]
+        }
+      },
+      {
+        address: tokenC,
+        symbol: 'NOT_MANUAL',
+        qualified: true,
+        peakPriceUsd: 100,
+        peakMarketCapUsd: 100_000_000,
+        holderAnalysis: {
+          strategy: 'holder_first',
+          minimumEntryUsd: 100,
+          candidates: [candidate()]
+        }
+      }
+    ],
+    minimumEntryUsd: 100,
+    smartBaseMultiple: 5,
+    strictMultiple: 10
+  });
+
+  const fell = summary.performances.find((performance) => performance.tokenAddress === tokenA);
+  assert.equal(fell.historicalPeakGrossValueUsd, 1_000);
+  assert.equal(fell.historicalPeakProfitUsd, 800);
+  assert.equal(fell.historicalPeakMultiple, 5);
+  assert.equal(fell.historicalPeakReturnRate, 4);
+  assert.equal(fell.historicalPeakReturnPercent, 400);
+  assert.equal(fell.manualWinnerHit, true);
+  assert.equal(summary.winnerHits, 0);
+  assert.equal(summary.manualWinnerParticipationCount, 2);
+  assert.equal(summary.manualTokenParticipationCount, 2);
+  assert.equal(summary.manualWinnerHitCount, 1);
+  assert.equal(summary.manualWinnerHitRate, 0.5);
+  assert.equal(summary.manualWinnerHitThreshold, 5);
+  assert.deepEqual(summary.manualWinnerHitTokenAddresses, [tokenA]);
+  assert.equal(summary.maxHistoricalPeakMultiple, 50);
+});
+
 test('uses each Holder scan saved entry floor instead of reapplying the global default', () => {
   const candidate = (address, buyVolumeUsd) => ({
     address,
