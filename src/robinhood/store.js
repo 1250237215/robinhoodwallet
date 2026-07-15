@@ -14,6 +14,8 @@ const MONITOR_EVENT_TYPE_SET = new Set(WALLET_MONITOR_EVENT_TYPES);
 const DEFAULT_MONITOR_RULES_JSON = JSON.stringify(defaultWalletMonitorRules());
 const COMPACT_PROFIT_RANK_ALIAS_MIGRATION = 'robinhood:compact_profit_rank_aliases_v1';
 const LEGACY_PROFIT_RANK_ALIAS_PATTERN = /^(.+?) 盈利榜第 ([1-9][0-9]*|待定) 名$/;
+const BUY_FREQUENCY_TIMEZONE = 'Asia/Shanghai';
+const BUY_FREQUENCY_UTC_OFFSET_SECONDS = 8 * 60 * 60;
 
 function json(value) {
   return JSON.stringify(value ?? null);
@@ -230,6 +232,8 @@ export function createRobinhoodStore(filename) {
     WHERE sound_alert NOT IN (0, 1) OR bark_alert NOT IN (0, 1);
     CREATE INDEX IF NOT EXISTS monitor_events_event_timestamp_idx
       ON monitor_events(event_type, block_timestamp DESC);
+    CREATE INDEX IF NOT EXISTS monitor_events_wallet_buy_frequency_idx
+      ON monitor_events(event_type, wallet_address, block_timestamp, token_address);
   `);
   migrateLegacyProfitRankAliases(db);
   const upsertTokenStatement = db.prepare(`
@@ -361,6 +365,120 @@ export function createRobinhoodStore(filename) {
         .prepare('SELECT token_address, alerted_at FROM monitor_token_alerts ORDER BY alerted_at, token_address')
         .all()
         .map((row) => ({ tokenAddress: row.token_address, alertedAt: Number(row.alerted_at) }));
+    },
+    listWalletBuyFrequencyStats({
+      asOf = Math.floor(Date.now() / 1000),
+      utcOffsetSeconds = BUY_FREQUENCY_UTC_OFFSET_SECONDS,
+      address = null
+    } = {}) {
+      const calculatedAt = Math.max(0, Math.floor(Number(asOf) || 0));
+      const offset = Math.floor(Number(utcOffsetSeconds));
+      if (!Number.isFinite(offset) || offset < -14 * 60 * 60 || offset > 14 * 60 * 60) {
+        throw new RangeError('utcOffsetSeconds must be between -50400 and 50400');
+      }
+      const normalizedAddress = address === null || address === undefined || address === ''
+        ? null
+        : String(address).toLowerCase();
+      if (normalizedAddress !== null && !ADDRESS_PATTERN.test(normalizedAddress)) {
+        throw new TypeError('Invalid wallet address');
+      }
+      const rows = db.prepare(`
+        WITH
+        params(as_of, utc_offset, address_filter) AS (VALUES (?, ?, ?)),
+        global_monitor_start AS (
+          SELECT MIN(block_timestamp) AS started_at
+          FROM monitor_events
+          WHERE event_type = 'buy' AND token_address != ''
+        ),
+        observations AS (
+          SELECT
+            annotation.address,
+            MIN(
+              params.as_of,
+              MAX(annotation.created_at, COALESCE(global_monitor_start.started_at, params.as_of))
+            ) AS observed_from
+          FROM wallet_annotations AS annotation
+          CROSS JOIN params
+          CROSS JOIN global_monitor_start
+          WHERE params.address_filter IS NULL OR annotation.address = params.address_filter
+        ),
+        monitored_buys AS (
+          SELECT
+            observation.address,
+            event.token_address,
+            event.block_timestamp,
+            CAST((event.block_timestamp + params.utc_offset) / 86400 AS INTEGER) AS local_day
+          FROM observations AS observation
+          CROSS JOIN params
+          JOIN monitor_events AS event
+            ON event.wallet_address = observation.address
+           AND event.event_type = 'buy'
+           AND event.token_address != ''
+           AND event.block_timestamp >= observation.observed_from
+           AND event.detected_at <= params.as_of
+        ),
+        daily AS (
+          SELECT address, local_day, COUNT(DISTINCT token_address) AS distinct_tokens
+          FROM monitored_buys
+          GROUP BY address, local_day
+        ),
+        daily_totals AS (
+          SELECT
+            address,
+            SUM(distinct_tokens) AS distinct_token_days,
+            COUNT(*) AS active_buy_days,
+            MAX(distinct_tokens) AS max_daily_distinct_tokens
+          FROM daily
+          GROUP BY address
+        ),
+        token_totals AS (
+          SELECT
+            address,
+            COUNT(DISTINCT token_address) AS distinct_tokens,
+            MIN(block_timestamp) AS first_buy_at,
+            MAX(block_timestamp) AS last_buy_at
+          FROM monitored_buys
+          GROUP BY address
+        )
+        SELECT
+          observation.address,
+          observation.observed_from,
+          MAX(params.as_of, COALESCE(token_totals.last_buy_at, params.as_of)) AS observed_through,
+          CAST((MAX(params.as_of, COALESCE(token_totals.last_buy_at, params.as_of)) + params.utc_offset) / 86400 AS INTEGER)
+            - CAST((observation.observed_from + params.utc_offset) / 86400 AS INTEGER) + 1 AS observed_days,
+          COALESCE(daily_totals.distinct_token_days, 0) AS distinct_token_days,
+          COALESCE(token_totals.distinct_tokens, 0) AS distinct_tokens,
+          COALESCE(daily_totals.active_buy_days, 0) AS active_buy_days,
+          COALESCE(daily_totals.max_daily_distinct_tokens, 0) AS max_daily_distinct_tokens,
+          token_totals.first_buy_at,
+          token_totals.last_buy_at
+        FROM observations AS observation
+        CROSS JOIN params
+        LEFT JOIN daily_totals ON daily_totals.address = observation.address
+        LEFT JOIN token_totals ON token_totals.address = observation.address
+        ORDER BY observation.address
+      `).all(calculatedAt, offset, normalizedAddress);
+      return rows.map((row) => {
+        const observedDays = Math.max(1, Number(row.observed_days) || 1);
+        const distinctTokenDayCount = Math.max(0, Number(row.distinct_token_days) || 0);
+        return {
+          address: row.address,
+          averageDailyDistinctTokens: distinctTokenDayCount / observedDays,
+          distinctTokenDayCount,
+          distinctTokens: Math.max(0, Number(row.distinct_tokens) || 0),
+          activeBuyDays: Math.max(0, Number(row.active_buy_days) || 0),
+          maxDailyDistinctTokens: Math.max(0, Number(row.max_daily_distinct_tokens) || 0),
+          observedDays,
+          observedFrom: Number(row.observed_from),
+          observedThrough: Number(row.observed_through),
+          firstBuyAt: row.first_buy_at === null ? null : Number(row.first_buy_at),
+          lastBuyAt: row.last_buy_at === null ? null : Number(row.last_buy_at),
+          calculatedAt,
+          timezone: BUY_FREQUENCY_TIMEZONE,
+          source: 'monitor_events',
+          partialHistory: true
+        };
+      });
     },
     upsertToken(token) {
       const address = String(token.address).toLowerCase();

@@ -8,6 +8,7 @@ const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 const HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 const ACTIVE_JOB_STATES = new Set(['queued', 'pending', 'running', 'scanning', 'refreshing', 'fetching', 'analyzing']);
 const REVIEW_SCAN_BATCH_GAP_MS = 5 * 60 * 1000;
+const BUY_FREQUENCY_REFRESH_MS = 30_000;
 const MONITOR_POLL_INTERVAL_MS = 2_000;
 const MONITOR_THRESHOLD_STORAGE_KEY = 'robinhood-monitor-threshold';
 const MONITOR_SOUNDS = new Set(['alarm', 'bell', 'electronic', 'glass']);
@@ -59,6 +60,7 @@ const CLASSIFICATION_LABELS = Object.freeze({
 
 const SORT_LABELS = Object.freeze({
   name: '名称 A-Z',
+  buy_frequency: '日均不同币',
   smart_score: '智能评分',
   total_profit: '总盈利',
   holding_value: '持仓市值',
@@ -2117,6 +2119,36 @@ function walletTradesPerEntry(wallet) {
   return trades !== null && entries !== null && entries > 0 ? trades / entries : null;
 }
 
+function walletBuyFrequencyRecord(wallet) {
+  const record = firstValue(wallet, ['buyFrequency', 'buy_frequency'], null);
+  return record && typeof record === 'object' && !Array.isArray(record) ? record : {};
+}
+
+function walletAverageDailyDistinctTokens(wallet) {
+  const record = walletBuyFrequencyRecord(wallet);
+  return finiteNumber(
+    record.averageDailyDistinctTokens,
+    record.average_daily_distinct_tokens,
+    wallet?.averageDailyDistinctTokens,
+    wallet?.average_daily_distinct_tokens
+  );
+}
+
+function walletDistinctTokenDayCount(wallet) {
+  const record = walletBuyFrequencyRecord(wallet);
+  return finiteNumber(record.distinctTokenDayCount, record.distinct_token_day_count);
+}
+
+function walletBuyFrequencyObservedDays(wallet) {
+  const record = walletBuyFrequencyRecord(wallet);
+  return finiteNumber(record.observedDays, record.observed_days, record.monitoredCalendarDays);
+}
+
+function walletMaxDailyDistinctTokens(wallet) {
+  const record = walletBuyFrequencyRecord(wallet);
+  return finiteNumber(record.maxDailyDistinctTokens, record.max_daily_distinct_tokens);
+}
+
 function walletNormalizedProfitScore(wallet) {
   return walletSmartMetric(wallet, ['normalizedProfitScore', 'normalized_profit_score']);
 }
@@ -2504,6 +2536,13 @@ function sortWallets(wallets) {
       return result || String(left.address || '').localeCompare(String(right.address || ''));
     }
     if (sort === 'smart_score') result = compareNullable(left, right, walletSmartScore);
+    else if (sort === 'buy_frequency') {
+      result = compareNullable(left, right, walletAverageDailyDistinctTokens)
+        || compareNullable(left, right, walletBuyFrequencyObservedDays)
+        || compareNullable(left, right, walletDistinctTokenDayCount)
+        || walletManualWinnerHits(right) - walletManualWinnerHits(left)
+        || compareNullable(left, right, walletTotalProfit);
+    }
     else if (sort === 'holding_value') result = compareNullable(left, right, walletHoldingValue);
     else if (sort === 'holder_rank') result = compareNullable(left, right, walletHolderRank, true);
     else if (sort === 'realized_profit') result = compareNullable(left, right, walletRealizedProfit);
@@ -2591,7 +2630,7 @@ function renderWalletTable(wallets) {
           <th>总利润</th>
           <th>相对评分</th>
           ${confirmedLibraryMode ? '' : '<th>胜场 / 有效</th>'}
-          <th>交易频率</th>
+          <th>${confirmedLibraryMode ? '日均不同币' : '交易频率'}</th>
           <th>数据状态</th>
         </tr>
       </thead>
@@ -2618,6 +2657,9 @@ function renderWalletTable(wallets) {
           const manualWinnerHitThreshold = walletManualWinnerHitThreshold(wallet);
           const totalTradeCount = walletTotalTradeCount(wallet);
           const tradesPerEntry = walletTradesPerEntry(wallet);
+          const averageDailyDistinctTokens = walletAverageDailyDistinctTokens(wallet);
+          const distinctTokenDayCount = walletDistinctTokenDayCount(wallet);
+          const buyFrequencyObservedDays = walletBuyFrequencyObservedDays(wallet);
           const normalizedProfitScore = walletNormalizedProfitScore(wallet);
           const profitToPeakMarketCapRatio = walletProfitToPeakMarketCapRatio(wallet);
           const dataStatus = walletDataStatus(wallet);
@@ -2665,7 +2707,9 @@ function renderWalletTable(wallets) {
               <td class="profit-cell total-profit-cell" data-label="总利润"><strong class="profit-value ${profitTone(totalProfit)}">${formatSignedMoney(totalProfit)}</strong><span>${formatMultiple(bestMultiple)} 最高${topHolderCount === null ? '' : ` · ${formatInteger(topHolderCount)} 个 Top Holder`}</span></td>
               <td class="smart-score-cell" data-label="相对评分"><strong>${formatRequiredNumber(smartScore, { maximumFractionDigits: 1 })}</strong><span>${normalizedProfitScore !== null ? `利润百分位 ${formatPercent(normalizedProfitScore)}` : profitToPeakMarketCapRatio !== null ? `利润 / 峰值市值 ${formatRatio(profitToPeakMarketCapRatio)}` : '利润百分位待补全'}</span></td>
               ${confirmedLibraryMode ? '' : `<td class="smart-win-cell" data-label="胜场 / 有效"><strong>${winningEntries === null && eligibleEntries === null ? '待补全' : `${formatRequiredNumber(winningEntries, { maximumFractionDigits: 0 })} / ${formatRequiredNumber(eligibleEntries, { maximumFractionDigits: 0 })}`}</strong><span>加权账面胜率 ${adjustedWinRate === null ? '待补全' : formatPercent(adjustedWinRate)}</span></td>`}
-              <td class="smart-frequency-cell" data-label="交易频率"><strong>${totalTradeCount === null ? '待补全' : `${formatRequiredNumber(totalTradeCount, { maximumFractionDigits: 0 })} 笔`}</strong><span>每次入场 ${formatRequiredNumber(tradesPerEntry)}</span></td>
+              ${confirmedLibraryMode
+                ? `<td class="smart-frequency-cell" data-label="日均不同币"><strong>${averageDailyDistinctTokens === null ? '待积累' : `${formatRequiredNumber(averageDailyDistinctTokens)} 个/天`}</strong><span>${buyFrequencyObservedDays === null ? '监控数据待积累' : `监控 ${formatInteger(buyFrequencyObservedDays)} 天 · 日内去重累计 ${formatInteger(distinctTokenDayCount)} 个`}</span></td>`
+                : `<td class="smart-frequency-cell" data-label="交易频率"><strong>${totalTradeCount === null ? '待补全' : `${formatRequiredNumber(totalTradeCount, { maximumFractionDigits: 0 })} 笔`}</strong><span>每次入场 ${formatRequiredNumber(tradesPerEntry)}</span></td>`}
               <td class="data-status-cell" data-label="数据状态"><span class="status-badge ${escapeHtml(dataStatus.tone)}">${escapeHtml(dataStatus.label)}</span><span>${escapeHtml(snapshotAt ? formatDateTime(snapshotAt) : `${confidence.label}置信`)}</span></td>
             </tr>
           `;
@@ -3142,6 +3186,10 @@ function renderWalletDetail(summary, payload = null) {
   const adjustedWinRate = walletAdjustedWinRate(wallet);
   const totalTradeCount = walletTotalTradeCount(wallet);
   const tradesPerEntry = walletTradesPerEntry(wallet);
+  const averageDailyDistinctTokens = walletAverageDailyDistinctTokens(wallet);
+  const distinctTokenDayCount = walletDistinctTokenDayCount(wallet);
+  const buyFrequencyObservedDays = walletBuyFrequencyObservedDays(wallet);
+  const maxDailyDistinctTokens = walletMaxDailyDistinctTokens(wallet);
   const normalizedProfitScore = walletNormalizedProfitScore(wallet);
   const profitToPeakMarketCapRatio = walletProfitToPeakMarketCapRatio(wallet);
   const manualWinnerHits = walletManualWinnerHits(wallet);
@@ -3193,6 +3241,7 @@ function renderWalletDetail(summary, payload = null) {
       ${renderMetric('总利润', formatSignedMoney(totalProfit), dataStatus.label, profitTone(totalProfit))}
       ${renderMetric('历史最高收益', formatMultiple(historicalPeakMultiple), `${formatInteger(manualWinnerHits)} 个金狗命中 / 参与 ${formatInteger(manualWinnerParticipation)} 个 · 峰值 ≥ ${formatMultiple(manualWinnerHitThreshold)}`)}
       ${renderMetric('累计买入', formatMoney(wallet.totalEntryCostUsd), `单币 ≥ ${formatMoney(wallet.minimumEntryUsd ?? 500)}`)}
+      ${confirmed ? renderMetric('监控期日均不同币', averageDailyDistinctTokens === null ? '待积累' : `${formatRequiredNumber(averageDailyDistinctTokens)} 个/天`, buyFrequencyObservedDays === null ? '监控数据待积累' : `监控 ${formatInteger(buyFrequencyObservedDays)} 天 · 日内去重累计 ${formatInteger(distinctTokenDayCount)} 个 · 单日最高 ${formatInteger(maxDailyDistinctTokens)} 个`) : ''}
     </div>
 
     <section class="smart-analysis-band" aria-labelledby="smart-analysis-title">
@@ -3368,6 +3417,8 @@ function schedulePoll(data) {
   state.pollTimer = null;
   if (statusFromData(data) === 'scanning') {
     state.pollTimer = setTimeout(() => void loadData({ quiet: true }), 3500);
+  } else if (state.activeTab === 'all_round' && elements.sort.value === 'buy_frequency') {
+    state.pollTimer = setTimeout(() => void loadData({ quiet: true }), BUY_FREQUENCY_REFRESH_MS);
   }
 }
 
@@ -3834,7 +3885,9 @@ elements.tabs.addEventListener('click', (event) => {
   state.activeTab = button.dataset.tab;
   state.selectedCandidates.clear();
   syncToolbarVisibility();
-  if (state.activeTab === 'all_round') elements.sort.value = 'hits';
+  if (state.activeTab === 'all_round') elements.sort.value = 'buy_frequency';
+  else if (elements.sort.value === 'buy_frequency') elements.sort.value = 'smart_score';
+  schedulePoll(null);
   if (leavingMonitor) stopMonitorTransport();
   elements.tabs.querySelectorAll('[data-tab]').forEach((tabButton) => {
     const active = tabButton === button;
@@ -3905,7 +3958,10 @@ elements.manualWalletLines.addEventListener('input', () => {
   elements.manualWalletFeedback.hidden = true;
 });
 
-elements.sort.addEventListener('change', () => renderResults());
+elements.sort.addEventListener('change', () => {
+  renderResults();
+  schedulePoll(state.data);
+});
 elements.selectPageCandidates.addEventListener('change', () => {
   for (const wallet of state.visibleWallets) {
     if (!walletIsSelectable(wallet)) continue;

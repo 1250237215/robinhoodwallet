@@ -101,7 +101,27 @@ function walletAnnotationDefaults(address) {
   };
 }
 
-function mergeWalletAnnotation(summary, annotation, address) {
+function publicBuyFrequency(stats) {
+  if (!stats || typeof stats !== 'object') return null;
+  return {
+    averageDailyDistinctTokens: Math.max(0, finiteNumber(stats.averageDailyDistinctTokens) ?? 0),
+    distinctTokenDayCount: Math.max(0, Math.floor(finiteNumber(stats.distinctTokenDayCount) ?? 0)),
+    distinctTokens: Math.max(0, Math.floor(finiteNumber(stats.distinctTokens) ?? 0)),
+    activeBuyDays: Math.max(0, Math.floor(finiteNumber(stats.activeBuyDays) ?? 0)),
+    maxDailyDistinctTokens: Math.max(0, Math.floor(finiteNumber(stats.maxDailyDistinctTokens) ?? 0)),
+    observedDays: Math.max(1, Math.floor(finiteNumber(stats.observedDays) ?? 1)),
+    observedFrom: isoFromUnknown(stats.observedFrom),
+    observedThrough: isoFromUnknown(stats.observedThrough),
+    firstBuyAt: isoFromUnknown(stats.firstBuyAt),
+    lastBuyAt: isoFromUnknown(stats.lastBuyAt),
+    calculatedAt: isoFromUnknown(stats.calculatedAt),
+    timezone: String(stats.timezone || 'Asia/Shanghai'),
+    source: String(stats.source || 'monitor_events'),
+    partialHistory: stats.partialHistory !== false
+  };
+}
+
+function mergeWalletAnnotation(summary, annotation, address, buyFrequency = null) {
   const normalized = normalizeAddress(address || summary?.address || annotation?.address);
   const monitorTier = normalizeWalletMonitorTier(annotation?.monitorTier);
   const curation = {
@@ -129,7 +149,8 @@ function mergeWalletAnnotation(summary, annotation, address) {
     confirmed: reviewState === 'confirmed',
     reviewState,
     debotUrl: `https://debot.ai/address/robinhood/${normalized}`,
-    curation
+    curation,
+    ...(buyFrequency ? { buyFrequency: publicBuyFrequency(buyFrequency) } : {})
   };
 }
 
@@ -726,6 +747,9 @@ export class RobinhoodService {
       .listWalletSummaries()
       .find((candidate) => normalizeAddress(candidate.address) === normalized);
     const annotation = this.store.getWalletAnnotation?.(normalized) || null;
+    const buyFrequency = annotation
+      ? (this.store.listWalletBuyFrequencyStats?.({ asOf: unixSeconds(this.now), address: normalized }) || [])[0] || null
+      : null;
     const tokenRows = [];
     const tokens = new Map(
       this.store.listTokens().map((token) => [normalizeAddress(token.address), token])
@@ -754,7 +778,7 @@ export class RobinhoodService {
     if (!summary && !tokenRows.length && !annotation) return null;
     return {
       ok: true,
-      wallet: mergeWalletAnnotation(summary, annotation, normalized),
+      wallet: mergeWalletAnnotation(summary, annotation, normalized, buyFrequency),
       tokens: tokenRows,
       updatedAt:
         isoFromUnknown(annotation?.updatedAt) ||
@@ -775,11 +799,20 @@ export class RobinhoodService {
     const annotations = new Map(
       (this.store.listWalletAnnotations?.() || []).map((annotation) => [normalizeAddress(annotation.address), annotation])
     );
+    const buyFrequencies = new Map(
+      (this.store.listWalletBuyFrequencyStats?.({ asOf: unixSeconds(this.now) }) || [])
+        .map((stats) => [normalizeAddress(stats.address), stats])
+    );
     const addresses = new Set([...summaries.keys(), ...annotations.keys()]);
     const wallets = [];
     for (const address of addresses) {
       const summary = summaries.get(address) || null;
-      const wallet = mergeWalletAnnotation(summary, annotations.get(address) || null, address);
+      const wallet = mergeWalletAnnotation(
+        summary,
+        annotations.get(address) || null,
+        address,
+        buyFrequencies.get(address) || null
+      );
       const keepConfirmedLibraryRecord = wallet.curated && appliedFilters.tab === 'all';
       if (summary && !keepConfirmedLibraryRecord && !walletMatchesTab(wallet, appliedFilters)) continue;
       if (!walletMatchesReview(wallet, filters)) continue;

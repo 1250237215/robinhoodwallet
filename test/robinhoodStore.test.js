@@ -293,6 +293,134 @@ test('migrates legacy monitor events to buy/token and persists generic event fie
   store.close();
 });
 
+test('aggregates monitored daily distinct-token buys with Beijing-day and observation coverage', () => {
+  const store = createRobinhoodStore(':memory:');
+  const walletA = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const walletB = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const walletC = '0xcccccccccccccccccccccccccccccccccccccccc';
+  const walletD = '0xdddddddddddddddddddddddddddddddddddddddd';
+  const tokenA = '0x1111111111111111111111111111111111111111';
+  const tokenB = '0x2222222222222222222222222222222222222222';
+  const tokenC = '0x3333333333333333333333333333333333333333';
+  const seconds = (value) => Math.floor(Date.parse(value) / 1000);
+  const asOf = seconds('2026-07-13T04:00:00.000Z');
+  let sequence = 0;
+  const insert = ({ walletAddress, tokenAddress, at, eventType = 'buy' }) => {
+    sequence += 1;
+    store.insertMonitorEvent({
+      eventType,
+      walletAddress,
+      walletAlias: walletAddress.slice(2, 6),
+      tokenAddress,
+      tokenSymbol: 'TOKEN',
+      tokenName: 'Token',
+      tokenAmount: '1',
+      rawTokenAmount: '1',
+      tokenDecimals: 18,
+      txHash: `0x${sequence.toString(16).padStart(64, '0')}`,
+      logIndex: sequence,
+      blockNumber: sequence,
+      blockTimestamp: seconds(at),
+      detectedAt: seconds(at)
+    });
+  };
+
+  store.upsertWalletAnnotation({
+    address: walletA,
+    createdAt: seconds('2026-07-10T00:00:00.000Z'),
+    updatedAt: asOf
+  });
+  store.upsertWalletAnnotation({
+    address: walletB,
+    createdAt: seconds('2026-07-12T16:30:00.000Z'),
+    updatedAt: asOf
+  });
+  store.upsertWalletAnnotation({
+    address: walletC,
+    createdAt: seconds('2026-07-10T00:00:00.000Z'),
+    updatedAt: asOf
+  });
+  store.upsertWalletAnnotation({
+    address: walletD,
+    createdAt: seconds('2026-07-14T00:00:00.000Z'),
+    updatedAt: asOf
+  });
+
+  insert({ walletAddress: walletA, tokenAddress: tokenA, at: '2026-07-10T16:05:00.000Z' });
+  insert({ walletAddress: walletA, tokenAddress: tokenA, at: '2026-07-10T17:00:00.000Z' });
+  insert({ walletAddress: walletA, tokenAddress: tokenB, at: '2026-07-10T18:00:00.000Z' });
+  insert({ walletAddress: walletA, tokenAddress: tokenC, at: '2026-07-11T15:59:00.000Z' });
+  insert({ walletAddress: walletA, tokenAddress: tokenC, at: '2026-07-11T16:01:00.000Z' });
+  insert({ walletAddress: walletA, tokenAddress: tokenA, at: '2026-07-12T16:01:00.000Z' });
+  insert({
+    walletAddress: walletA,
+    tokenAddress: tokenC,
+    at: '2026-07-10T19:00:00.000Z',
+    eventType: 'sell'
+  });
+  insert({
+    walletAddress: walletA,
+    tokenAddress: tokenC,
+    at: '2026-07-10T20:00:00.000Z',
+    eventType: 'transfer'
+  });
+  insert({ walletAddress: walletB, tokenAddress: tokenA, at: '2026-07-12T15:50:00.000Z' });
+  insert({ walletAddress: walletB, tokenAddress: tokenB, at: '2026-07-12T17:00:00.000Z' });
+
+  const stats = new Map(
+    store.listWalletBuyFrequencyStats({ asOf }).map((record) => [record.address, record])
+  );
+  assert.deepEqual(
+    {
+      averageDailyDistinctTokens: stats.get(walletA).averageDailyDistinctTokens,
+      distinctTokenDayCount: stats.get(walletA).distinctTokenDayCount,
+      distinctTokens: stats.get(walletA).distinctTokens,
+      activeBuyDays: stats.get(walletA).activeBuyDays,
+      maxDailyDistinctTokens: stats.get(walletA).maxDailyDistinctTokens,
+      observedDays: stats.get(walletA).observedDays
+    },
+    {
+      averageDailyDistinctTokens: 5 / 3,
+      distinctTokenDayCount: 5,
+      distinctTokens: 3,
+      activeBuyDays: 3,
+      maxDailyDistinctTokens: 3,
+      observedDays: 3
+    }
+  );
+  assert.equal(stats.get(walletA).observedFrom, seconds('2026-07-10T16:05:00.000Z'));
+  assert.equal(stats.get(walletA).timezone, 'Asia/Shanghai');
+  assert.equal(stats.get(walletA).source, 'monitor_events');
+  assert.equal(stats.get(walletA).partialHistory, true);
+  assert.deepEqual(
+    {
+      averageDailyDistinctTokens: stats.get(walletB).averageDailyDistinctTokens,
+      distinctTokenDayCount: stats.get(walletB).distinctTokenDayCount,
+      observedDays: stats.get(walletB).observedDays,
+      observedFrom: stats.get(walletB).observedFrom
+    },
+    {
+      averageDailyDistinctTokens: 1,
+      distinctTokenDayCount: 1,
+      observedDays: 1,
+      observedFrom: seconds('2026-07-12T16:30:00.000Z')
+    }
+  );
+  assert.equal(stats.get(walletC).averageDailyDistinctTokens, 0);
+  assert.equal(stats.get(walletC).observedDays, 3);
+  assert.equal(stats.get(walletD).averageDailyDistinctTokens, 0);
+  assert.equal(stats.get(walletD).observedDays, 1);
+  assert.deepEqual(
+    store.listWalletBuyFrequencyStats({ asOf, address: walletB }).map((record) => record.address),
+    [walletB]
+  );
+  assert.throws(
+    () => store.listWalletBuyFrequencyStats({ asOf, address: 'not-an-address' }),
+    /Invalid wallet address/
+  );
+  store.close();
+});
+
 test('persists Bark targets and their delivery status across restarts', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-bark-store-'));
   const filename = path.join(directory, 'radar.sqlite');

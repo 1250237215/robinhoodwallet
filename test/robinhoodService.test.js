@@ -761,6 +761,59 @@ test('merges persistent curation and filters the smart wallet library server-sid
   assert.equal(service.getWallet(walletA).wallet.classification, 'all_round');
 });
 
+test('exposes monitored daily distinct-token frequency consistently in wallet lists and detail', (t) => {
+  const asOf = Date.parse('2026-07-13T04:00:00.000Z');
+  const { service, store } = createService({ now: () => asOf });
+  t.after(() => store.close());
+  const seconds = (value) => Math.floor(Date.parse(value) / 1000);
+  store.upsertWalletAnnotation({
+    address: walletA,
+    alias: 'Frequent',
+    createdAt: seconds('2026-07-10T00:00:00.000Z'),
+    updatedAt: seconds('2026-07-10T00:00:00.000Z')
+  });
+  store.upsertWalletAnnotation({
+    address: walletB,
+    alias: 'Quiet',
+    createdAt: seconds('2026-07-10T00:00:00.000Z'),
+    updatedAt: seconds('2026-07-10T00:00:00.000Z')
+  });
+  const insert = ({ tokenAddress, at, index }) => store.insertMonitorEvent({
+    walletAddress: walletA,
+    walletAlias: 'Frequent',
+    tokenAddress,
+    tokenSymbol: 'TOKEN',
+    tokenName: 'Token',
+    tokenAmount: '1',
+    rawTokenAmount: '1',
+    tokenDecimals: 18,
+    txHash: `0x${index.toString(16).padStart(64, '0')}`,
+    logIndex: index,
+    blockNumber: index,
+    blockTimestamp: seconds(at),
+    detectedAt: seconds(at)
+  });
+  insert({ tokenAddress: tokenA, at: '2026-07-10T16:05:00.000Z', index: 1 });
+  insert({ tokenAddress: tokenB, at: '2026-07-12T16:05:00.000Z', index: 2 });
+
+  const wallets = new Map(
+    service.listWallets({ tab: 'all', review: 'confirmed' }).map((wallet) => [wallet.address, wallet])
+  );
+  assert.equal(wallets.get(walletA).buyFrequency.averageDailyDistinctTokens, 2 / 3);
+  assert.equal(wallets.get(walletA).buyFrequency.distinctTokenDayCount, 2);
+  assert.equal(wallets.get(walletA).buyFrequency.distinctTokens, 2);
+  assert.equal(wallets.get(walletA).buyFrequency.activeBuyDays, 2);
+  assert.equal(wallets.get(walletA).buyFrequency.observedDays, 3);
+  assert.equal(wallets.get(walletA).buyFrequency.observedFrom, '2026-07-10T16:05:00.000Z');
+  assert.equal(wallets.get(walletA).buyFrequency.calculatedAt, '2026-07-13T04:00:00.000Z');
+  assert.equal(wallets.get(walletA).buyFrequency.timezone, 'Asia/Shanghai');
+  assert.equal(wallets.get(walletA).buyFrequency.source, 'monitor_events');
+  assert.equal(wallets.get(walletA).buyFrequency.partialHistory, true);
+  assert.equal(wallets.get(walletB).buyFrequency.averageDailyDistinctTokens, 0);
+  assert.equal(wallets.get(walletB).buyFrequency.observedDays, 3);
+  assert.deepEqual(service.getWallet(walletA).wallet.buyFrequency, wallets.get(walletA).buyFrequency);
+});
+
 test('persists, filters, and preserves wallet monitor tiers', (t) => {
   const { service, store } = createService();
   t.after(() => store.close());

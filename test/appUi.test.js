@@ -501,6 +501,35 @@ test('confirmed library exposes historical manual-winner hits and their peak-ret
   assert.match(appJs, /renderMetric\('历史最高收益'/);
 });
 
+test('confirmed library exposes and refreshes monitored daily distinct-token frequency', () => {
+  for (const helper of [
+    'walletBuyFrequencyRecord',
+    'walletAverageDailyDistinctTokens',
+    'walletDistinctTokenDayCount',
+    'walletBuyFrequencyObservedDays',
+    'walletMaxDailyDistinctTokens'
+  ]) {
+    assert.match(appJs, new RegExp(`function ${helper}\\(`));
+  }
+  for (const field of [
+    'buyFrequency',
+    'averageDailyDistinctTokens',
+    'distinctTokenDayCount',
+    'observedDays',
+    'maxDailyDistinctTokens'
+  ]) {
+    assert.equal(appJs.includes(field), true, `missing buy-frequency field ${field}`);
+  }
+  assert.match(appJs, /<th>\$\{confirmedLibraryMode \? '日均不同币' : '交易频率'\}<\/th>/);
+  assert.match(appJs, /data-label="日均不同币"/);
+  assert.match(appJs, /\$\{formatRequiredNumber\(averageDailyDistinctTokens\)\} 个\/天/);
+  assert.match(appJs, /监控 \$\{formatInteger\(buyFrequencyObservedDays\)\} 天 · 日内去重累计/);
+  assert.match(appJs, /renderMetric\('监控期日均不同币'/);
+  assert.match(appJs, /BUY_FREQUENCY_REFRESH_MS = 30_000/);
+  assert.match(appJs, /state\.activeTab === 'all_round' && elements\.sort\.value === 'buy_frequency'/);
+  assert.match(appJs, /setTimeout\(\(\) => void loadData\(\{ quiet: true \}\), BUY_FREQUENCY_REFRESH_MS\)/);
+});
+
 test('missing smart data is explicit and no fixed significant-profit amount is presented', () => {
   assert.match(appJs, /function formatRequiredNumber\(value, options = \{\}\)[\s\S]*return '待补全'/);
   assert.match(appJs, /function formatRatio\(value\)[\s\S]*return '待补全'/);
@@ -509,12 +538,13 @@ test('missing smart data is explicit and no fixed significant-profit amount is p
   assert.doesNotMatch(visibleCopy, /显著利润门槛[\s\S]{0,120}(?:\$\s*)?10[_ ,]?000/i);
 });
 
-test('profit leaderboard defaults to smart score and retains profit and holder-first sorts', () => {
+test('candidate leaderboard defaults to smart score and confirmed wallets default to buy frequency', () => {
   const start = indexHtml.indexOf('id="sort-select"');
   const sortMarkup = indexHtml.slice(start, indexHtml.indexOf('</select>', start));
   assert.match(sortMarkup, /value="smart_score" selected>智能评分/);
   for (const [value, label] of [
     ['name', '名称 A-Z'],
+    ['buy_frequency', '日均不同币'],
     ['total_profit', '总盈利'],
     ['holding_value', '持仓市值'],
     ['holder_rank', 'Holder 排名'],
@@ -526,11 +556,15 @@ test('profit leaderboard defaults to smart score and retains profit and holder-f
     assert.match(sortMarkup, new RegExp(`value="${value}">${label}`));
   }
   assert.match(appJs, /sort === 'smart_score'[^\n]*walletSmartScore/);
+  assert.match(appJs, /sort === 'buy_frequency'[\s\S]*walletAverageDailyDistinctTokens/);
+  assert.match(appJs, /sort === 'buy_frequency'[\s\S]*walletBuyFrequencyObservedDays/);
+  assert.match(appJs, /sort === 'buy_frequency'[\s\S]*walletDistinctTokenDayCount/);
   assert.match(appJs, /else result = compareNullable\(left, right, walletTotalProfit\)/);
   assert.match(appJs, /sort === 'holder_rank'[\s\S]*walletHolderRank, true/);
   assert.match(appJs, /sort === 'name'[\s\S]*localeCompare\(rightName, 'zh-CN'/);
   assert.match(appJs, /sort === 'hits'[\s\S]*walletManualWinnerHits/);
-  assert.match(appJs, /if \(state\.activeTab === 'all_round'\) elements\.sort\.value = 'hits'/);
+  assert.match(appJs, /if \(state\.activeTab === 'all_round'\) elements\.sort\.value = 'buy_frequency'/);
+  assert.match(appJs, /else if \(elements\.sort\.value === 'buy_frequency'\) elements\.sort\.value = 'smart_score'/);
   assert.match(appJs, /\['winners', 'candidates', 'all_round'\]\.includes\(classification\) \? 'all' : classification/);
 });
 
