@@ -27,6 +27,10 @@ const MONITOR_BARK_SOUND_KEY = 'robinhood:monitor:bark-sound';
 const MONITOR_BARK_VOLUME_KEY = 'robinhood:monitor:bark-volume';
 const MONITOR_SOUNDS = new Set(['alarm', 'bell', 'electronic', 'glass']);
 const TOKEN_METADATA_RETRY_SECONDS = 15 * 60;
+const MARKET_DATA_CACHE_SECONDS = 12;
+const MARKET_DATA_RETRY_BASE_MS = 30_000;
+const MARKET_DATA_RETRY_MAX_MS = 5 * 60_000;
+const MARKET_DATA_MAX_FAILURES = 6;
 const DEBOT_TOKEN_ROOT = 'https://debot.ai/token/robinhood/308574_';
 const DECIMALS_SELECTOR = '0x313ce567';
 const SYMBOL_SELECTOR = '0x95d89b41';
@@ -299,6 +303,11 @@ export class RobinhoodWalletMonitor {
     setTimer = setTimeout,
     clearTimer = clearTimeout,
     barkNotifier = null,
+    debotClient = null,
+    marketDataCacheSeconds = MARKET_DATA_CACHE_SECONDS,
+    marketDataConcurrency = 2,
+    marketDataRetryBaseMs = MARKET_DATA_RETRY_BASE_MS,
+    marketDataRetryMaxMs = MARKET_DATA_RETRY_MAX_MS,
     quoteTokenAddresses = [ROBINHOOD_CHAIN.weth, ROBINHOOD_CHAIN.usdg],
     noxaLaunchFactory = NOXA_LAUNCH_FACTORY
   } = {}) {
@@ -336,6 +345,30 @@ export class RobinhoodWalletMonitor {
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
     this.barkNotifier = barkNotifier;
+    if (debotClient !== null && typeof debotClient?.fetchTokenMetrics !== 'function') {
+      throw new TypeError('A DeBot token metrics client is required');
+    }
+    this.debotClient = debotClient;
+    this.marketDataCacheSeconds = boundedInteger(marketDataCacheSeconds, MARKET_DATA_CACHE_SECONDS, 10, 15);
+    this.marketDataConcurrency = boundedInteger(marketDataConcurrency, 2, 1, 4);
+    this.marketDataRetryBaseMs = boundedInteger(
+      marketDataRetryBaseMs,
+      MARKET_DATA_RETRY_BASE_MS,
+      10,
+      MARKET_DATA_RETRY_MAX_MS
+    );
+    this.marketDataRetryMaxMs = Math.max(
+      this.marketDataRetryBaseMs,
+      boundedInteger(marketDataRetryMaxMs, MARKET_DATA_RETRY_MAX_MS, 10, 60 * 60_000)
+    );
+    this.marketDataAbortController = new AbortController();
+    this.marketDataQueue = [];
+    this.marketDataQueued = new Map();
+    this.marketDataLookups = new Map();
+    this.marketDataRetryTimers = new Map();
+    this.marketDataFailures = new Map();
+    this.marketDataPendingEventIds = new Map();
+    this.marketDataActive = 0;
     this.quoteTokenAddresses = new Set(quoteTokenAddresses.map(normalizeAddress).filter((value) => ADDRESS_PATTERN.test(value)));
     this.noxaLaunchFactory = normalizeAddress(noxaLaunchFactory);
     if (!ADDRESS_PATTERN.test(this.noxaLaunchFactory)) {
@@ -435,6 +468,7 @@ export class RobinhoodWalletMonitor {
   start() {
     if (this.closed || this.started) return this.getSnapshot();
     this.started = true;
+    this.#queueRecentMarketData();
     this.#scheduleFast(0);
     this.#scheduleFastGap(this.fastGapPollIntervalMs);
     this.#scheduleDeep(0);
@@ -457,6 +491,13 @@ export class RobinhoodWalletMonitor {
     this.fastGapAbortController?.abort(new Error('Robinhood wallet fast-gap monitor stopped'));
     this.deepAbortController?.abort(new Error('Robinhood wallet deep monitor stopped'));
     this.gapAbortController?.abort(new Error('Robinhood wallet gap monitor stopped'));
+    this.marketDataAbortController.abort(new Error('Robinhood wallet monitor stopped'));
+    for (const timer of this.marketDataRetryTimers.values()) this.clearTimer(timer);
+    this.marketDataRetryTimers.clear();
+    this.marketDataQueue.length = 0;
+    this.marketDataQueued.clear();
+    this.marketDataPendingEventIds.clear();
+    this.marketDataFailures.clear();
     this.abortController = null;
     this.fastGapAbortController = null;
     this.deepAbortController = null;
@@ -818,7 +859,7 @@ export class RobinhoodWalletMonitor {
           this.health.fastLastRangeDurationMs = Math.max(0, Math.round(this.monotonicNow() - startedAt));
           detectedEvents = events;
           this.#advanceCursor(chainHead);
-          for (const event of events) this.#emit('event', event);
+          this.#publishEvents(events);
           if (events.length) this.#emit('snapshot', this.getSnapshot());
         }
       }
@@ -880,7 +921,7 @@ export class RobinhoodWalletMonitor {
       const events = await this.#scanFastRange(fromBlock, toBlock, wallets, signal);
       this.health.fastGapLastRangeDurationMs = Math.max(0, Math.round(this.monotonicNow() - startedAt));
       this.#removeFastGap(fromBlock, toBlock);
-      for (const event of events) this.#emit('event', event);
+      this.#publishEvents(events);
       if (events.length) this.#emit('snapshot', this.getSnapshot());
       this.#reconcileBarkAlerts(events.length > 0);
       this.health.fastGapLastSuccessAt = new Date(this.now()).toISOString();
@@ -931,7 +972,7 @@ export class RobinhoodWalletMonitor {
         this.health.deepLastRangeDurationMs = Math.max(0, Math.round(this.monotonicNow() - startedAt));
         this.#advanceDeepCursor(chainHead);
         for (const blockNumber of scan.retryBlocks) this.#enqueueDeepGap(blockNumber, blockNumber);
-        for (const event of detectedEvents) this.#emit('event', event);
+        this.#publishEvents(detectedEvents);
         if (detectedEvents.length) this.#emit('snapshot', this.getSnapshot());
       }
 
@@ -985,7 +1026,7 @@ export class RobinhoodWalletMonitor {
       this.health.deepGapLastRangeDurationMs = Math.max(0, Math.round(this.monotonicNow() - startedAt));
       this.#removeDeepGap(fromBlock, toBlock);
       for (const blockNumber of scan.retryBlocks) this.#enqueueDeepGap(blockNumber, blockNumber);
-      for (const event of scan.events) this.#emit('event', event);
+      this.#publishEvents(scan.events);
       if (scan.events.length) this.#emit('snapshot', this.getSnapshot());
       this.health.deepGapLastSuccessAt = new Date(this.now()).toISOString();
       this.health.deepGapLastError = '';
@@ -1375,6 +1416,9 @@ export class RobinhoodWalletMonitor {
         }
         continue;
       }
+      const marketData = candidate.assetType === 'erc20'
+        ? this.#cachedMarketData(candidate.tokenAddress)
+        : { marketCapUsd: null, tokenCreationTimestamp: null, marketDataAt: null };
       const result = this.store.insertMonitorEvent({
         ...candidate,
         walletAlias: annotation?.alias || '',
@@ -1385,7 +1429,8 @@ export class RobinhoodWalletMonitor {
         blockTimestamp: blockTimestampByNumber.get(candidate.blockNumber) ?? unixSeconds(this.now),
         detectedAt: unixSeconds(this.now),
         soundAlert: rule.sound,
-        barkAlert: rule.bark
+        barkAlert: rule.bark,
+        ...marketData
       });
       if (!result.inserted) continue;
       const event = publicEvent(result.event);
@@ -1670,6 +1715,220 @@ export class RobinhoodWalletMonitor {
         sentAt: new Date(this.now()).toISOString()
       });
     });
+  }
+
+  #publishEvents(events) {
+    for (const event of events) {
+      this.#emit('event', event);
+      if (event.assetType === 'erc20' && ADDRESS_PATTERN.test(event.tokenAddress)) {
+        if (!this.#trackMarketDataEvent(event)) continue;
+        const cached = this.#cachedMarketData(event.tokenAddress);
+        if (cached.marketCapUsd !== null && cached.tokenCreationTimestamp !== null) {
+          const updatedEvents = this.store.updateMonitorEventsTokenMarketData?.(
+            event.tokenAddress,
+            cached,
+            { eventIds: [event.id] }
+          ) || [];
+          this.#removePendingMarketDataEvents(event.tokenAddress, [event.id]);
+          this.#emitMarketDataPatches(updatedEvents);
+          continue;
+        }
+        this.#queueTokenMarketData(event.tokenAddress, { priority: true });
+      }
+    }
+  }
+
+  #queueRecentMarketData() {
+    if (!this.debotClient || !this.store.listMonitorEvents) return;
+    const cutoff = unixSeconds(this.now) - Math.max(15, this.marketDataCacheSeconds);
+    for (const event of this.store.listMonitorEvents({ limit: 100 })) {
+      if (Number(event.detectedAt) < cutoff || !this.#trackMarketDataEvent(event)) continue;
+      const cached = this.#cachedMarketData(event.tokenAddress);
+      if (cached.marketCapUsd !== null && cached.tokenCreationTimestamp !== null) {
+        this.store.updateMonitorEventsTokenMarketData?.(event.tokenAddress, cached, { eventIds: [event.id] });
+        this.#removePendingMarketDataEvents(event.tokenAddress, [event.id]);
+        continue;
+      }
+      this.#queueTokenMarketData(event.tokenAddress, { priority: false });
+    }
+  }
+
+  #trackMarketDataEvent(event) {
+    const address = normalizeAddress(event?.tokenAddress);
+    const eventId = Number(event?.id);
+    if (!ADDRESS_PATTERN.test(address) || !Number.isSafeInteger(eventId) || eventId <= 0) return false;
+    const hasMarketCap = event.marketCapUsd !== null && event.marketCapUsd !== undefined &&
+      Number.isFinite(Number(event.marketCapUsd));
+    const creationTimestamp = Number(event.tokenCreationTimestamp);
+    if (hasMarketCap && Number.isSafeInteger(creationTimestamp) && creationTimestamp > 0) return false;
+    if (!this.marketDataPendingEventIds.has(address)) this.marketDataPendingEventIds.set(address, new Set());
+    this.marketDataPendingEventIds.get(address).add(eventId);
+    return true;
+  }
+
+  #removePendingMarketDataEvents(address, eventIds) {
+    const pending = this.marketDataPendingEventIds.get(address);
+    if (!pending) return;
+    for (const eventId of eventIds) pending.delete(Number(eventId));
+    if (pending.size === 0) this.marketDataPendingEventIds.delete(address);
+  }
+
+  #emitMarketDataPatches(events) {
+    const patches = new Map();
+    for (const event of events) {
+      const key = JSON.stringify([
+        event.marketCapUsd,
+        event.tokenCreationTimestamp,
+        event.marketDataAt
+      ]);
+      const patch = patches.get(key) || {
+        eventIds: [],
+        tokenAddress: event.tokenAddress,
+        marketCapUsd: event.marketCapUsd,
+        tokenCreationTimestamp: event.tokenCreationTimestamp,
+        marketDataAt: event.marketDataAt
+      };
+      patch.eventIds.push(event.id);
+      patches.set(key, patch);
+    }
+    for (const patch of patches.values()) this.#emit('event_update', patch);
+  }
+
+  #cachedMarketData(address) {
+    const cached = this.store.getMonitorTokenMetadata?.(address);
+    const tokenCreationTimestamp = Number.isSafeInteger(Number(cached?.tokenCreationTimestamp)) &&
+      Number(cached.tokenCreationTimestamp) > 0
+      ? Number(cached.tokenCreationTimestamp)
+      : null;
+    if (!this.#marketDataIsFresh(cached)) {
+      return { marketCapUsd: null, tokenCreationTimestamp, marketDataAt: null };
+    }
+    return {
+      marketCapUsd: Number(cached.marketCapUsd),
+      tokenCreationTimestamp,
+      marketDataAt: Number(cached.marketDataAt)
+    };
+  }
+
+  #marketDataIsFresh(cached) {
+    const marketCap = cached?.marketCapUsd;
+    const marketDataAt = Number(cached?.marketDataAt);
+    const creationTimestamp = Number(cached?.tokenCreationTimestamp);
+    if (marketCap === null || marketCap === undefined || !Number.isFinite(Number(marketCap)) ||
+      !Number.isSafeInteger(marketDataAt) || marketDataAt <= 0 ||
+      !Number.isSafeInteger(creationTimestamp) || creationTimestamp <= 0) return false;
+    const age = unixSeconds(this.now) - marketDataAt;
+    return age >= 0 && age <= this.marketDataCacheSeconds;
+  }
+
+  #queueTokenMarketData(address, { priority = true, force = false } = {}) {
+    const normalized = normalizeAddress(address);
+    if (this.closed || !this.debotClient || !ADDRESS_PATTERN.test(normalized)) return;
+    if (!force && this.#marketDataIsFresh(this.store.getMonitorTokenMetadata?.(normalized))) return;
+    if (this.marketDataLookups.has(normalized) || this.marketDataRetryTimers.has(normalized)) return;
+    const queued = this.marketDataQueued.get(normalized);
+    if (queued) {
+      queued.force ||= force;
+      if (priority) {
+        const index = this.marketDataQueue.indexOf(queued);
+        if (index > 0) {
+          this.marketDataQueue.splice(index, 1);
+          this.marketDataQueue.unshift(queued);
+        }
+      }
+      return;
+    }
+    const job = { address: normalized, force };
+    this.marketDataQueued.set(normalized, job);
+    if (priority) this.marketDataQueue.unshift(job);
+    else this.marketDataQueue.push(job);
+    this.#drainMarketDataQueue();
+  }
+
+  #drainMarketDataQueue() {
+    if (this.closed || !this.debotClient) return;
+    while (this.marketDataActive < this.marketDataConcurrency && this.marketDataQueue.length > 0) {
+      const job = this.marketDataQueue.shift();
+      this.marketDataQueued.delete(job.address);
+      if (this.marketDataLookups.has(job.address) || this.marketDataRetryTimers.has(job.address)) continue;
+      if (!job.force && this.#marketDataIsFresh(this.store.getMonitorTokenMetadata?.(job.address))) continue;
+      this.marketDataActive += 1;
+      const lookup = this.#fetchTokenMarketData(job.address);
+      this.marketDataLookups.set(job.address, lookup);
+      void lookup.finally(() => {
+        this.marketDataLookups.delete(job.address);
+        this.marketDataActive = Math.max(0, this.marketDataActive - 1);
+        this.#drainMarketDataQueue();
+      }).catch(() => {});
+    }
+  }
+
+  async #fetchTokenMarketData(address) {
+    try {
+      const metrics = await this.debotClient.fetchTokenMetrics(address, {
+        signal: this.marketDataAbortController.signal
+      });
+      if (this.closed || this.marketDataAbortController.signal.aborted) return;
+      const marketCap = metrics?.marketCapUsd;
+      const marketCapUsd = marketCap === null || marketCap === undefined || marketCap === ''
+        ? null
+        : Number(marketCap);
+      const creation = Number(metrics?.creationTimestamp);
+      const tokenCreationTimestamp = Number.isSafeInteger(creation) && creation > 0 ? creation : null;
+      const normalizedMarketCap = Number.isFinite(marketCapUsd) && marketCapUsd >= 0 ? marketCapUsd : null;
+      if (normalizedMarketCap === null && tokenCreationTimestamp === null) {
+        throw new Error('DeBot token metrics did not include market cap or creation time');
+      }
+      const marketData = {
+        address,
+        marketCapUsd: normalizedMarketCap,
+        tokenCreationTimestamp,
+        marketDataAt: normalizedMarketCap === null ? null : unixSeconds(this.now)
+      };
+      this.store.upsertMonitorTokenMarketData?.(marketData);
+      const eventIds = [...(this.marketDataPendingEventIds.get(address) || [])];
+      const updatedEvents = this.store.updateMonitorEventsTokenMarketData?.(
+        address,
+        marketData,
+        { eventIds }
+      ) || [];
+      this.#emitMarketDataPatches(updatedEvents);
+      if (normalizedMarketCap === null || tokenCreationTimestamp === null) {
+        const completedIds = new Set(updatedEvents
+          .filter((event) => event.marketCapUsd !== null && event.tokenCreationTimestamp !== null)
+          .map((event) => Number(event.id)));
+        const unresolvedIds = eventIds.filter((eventId) => !completedIds.has(Number(eventId)));
+        if (unresolvedIds.length) this.marketDataPendingEventIds.set(address, new Set(unresolvedIds));
+        else this.marketDataPendingEventIds.delete(address);
+        throw new Error('DeBot token metrics were incomplete');
+      }
+      this.marketDataFailures.delete(address);
+      this.marketDataPendingEventIds.delete(address);
+    } catch (error) {
+      if (this.closed || this.marketDataAbortController.signal.aborted) return;
+      this.#scheduleMarketDataRetry(address);
+    }
+  }
+
+  #scheduleMarketDataRetry(address) {
+    if (this.closed || this.marketDataRetryTimers.has(address)) return;
+    const failures = (this.marketDataFailures.get(address) || 0) + 1;
+    this.marketDataFailures.set(address, failures);
+    if (failures >= MARKET_DATA_MAX_FAILURES) {
+      this.marketDataFailures.delete(address);
+      this.marketDataPendingEventIds.delete(address);
+      return;
+    }
+    const delay = Math.min(
+      this.marketDataRetryMaxMs,
+      this.marketDataRetryBaseMs * (2 ** Math.min(10, failures - 1))
+    );
+    const timer = this.setTimer(() => {
+      this.marketDataRetryTimers.delete(address);
+      this.#queueTokenMarketData(address, { priority: true, force: true });
+    }, delay);
+    timer?.unref?.();
+    this.marketDataRetryTimers.set(address, timer);
   }
 
   async #getTokenMetadata(address, signal) {

@@ -213,6 +213,16 @@ test('migrates legacy monitor events to buy/token and persists generic event fie
 
   const legacy = new DatabaseSync(filename);
   legacy.exec(`
+    CREATE TABLE monitor_token_metadata (
+      address TEXT PRIMARY KEY,
+      symbol TEXT NOT NULL,
+      name TEXT NOT NULL,
+      decimals INTEGER NOT NULL,
+      complete INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL
+    );
+    INSERT INTO monitor_token_metadata(address, symbol, name, decimals, complete, updated_at)
+    VALUES ('${token}', 'OLD', 'Old token', 18, 1, 99);
     CREATE TABLE monitor_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       wallet_address TEXT NOT NULL,
@@ -248,6 +258,20 @@ test('migrates legacy monitor events to buy/token and persists generic event fie
   assert.equal(oldEvent.platform, '');
   assert.equal(oldEvent.soundAlert, false);
   assert.equal(oldEvent.barkAlert, false);
+  assert.equal(oldEvent.marketCapUsd, null);
+  assert.equal(oldEvent.tokenCreationTimestamp, null);
+  assert.equal(oldEvent.marketDataAt, null);
+  assert.deepEqual(store.getMonitorTokenMetadata(token), {
+    address: token,
+    symbol: 'OLD',
+    name: 'Old token',
+    decimals: 18,
+    complete: true,
+    marketCapUsd: null,
+    tokenCreationTimestamp: null,
+    marketDataAt: null,
+    updatedAt: 99
+  });
 
   const inserted = store.insertMonitorEvent({
     eventType: 'sell',

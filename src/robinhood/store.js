@@ -129,6 +129,9 @@ export function createRobinhoodStore(filename) {
       name TEXT NOT NULL,
       decimals INTEGER NOT NULL,
       complete INTEGER NOT NULL DEFAULT 0,
+      market_cap_usd REAL,
+      token_creation_timestamp INTEGER,
+      market_data_at INTEGER,
       updated_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS monitor_events (
@@ -152,6 +155,9 @@ export function createRobinhoodStore(filename) {
       detected_at INTEGER NOT NULL,
       sound_alert INTEGER NOT NULL DEFAULT 0,
       bark_alert INTEGER NOT NULL DEFAULT 0,
+      market_cap_usd REAL,
+      token_creation_timestamp INTEGER,
+      market_data_at INTEGER,
       UNIQUE(tx_hash, log_index)
     );
     CREATE TABLE IF NOT EXISTS monitor_bark_targets (
@@ -199,6 +205,20 @@ export function createRobinhoodStore(filename) {
     if (row.monitor_rules !== normalizedRules) normalizeMonitorRulesStatement.run(normalizedRules, row.address);
   }
 
+  const monitorTokenMetadataColumns = new Set(
+    db.prepare('PRAGMA table_info(monitor_token_metadata)').all().map((column) => column.name)
+  );
+  const monitorTokenMetadataMigrations = [
+    ['market_cap_usd', 'REAL'],
+    ['token_creation_timestamp', 'INTEGER'],
+    ['market_data_at', 'INTEGER']
+  ];
+  for (const [column, definition] of monitorTokenMetadataMigrations) {
+    if (!monitorTokenMetadataColumns.has(column)) {
+      db.exec(`ALTER TABLE monitor_token_metadata ADD COLUMN ${column} ${definition}`);
+    }
+  }
+
   const monitorEventColumns = new Set(
     db.prepare('PRAGMA table_info(monitor_events)').all().map((column) => column.name)
   );
@@ -208,7 +228,10 @@ export function createRobinhoodStore(filename) {
     ['counterparty_address', "TEXT NOT NULL DEFAULT ''"],
     ['platform', "TEXT NOT NULL DEFAULT ''"],
     ['sound_alert', 'INTEGER NOT NULL DEFAULT 0'],
-    ['bark_alert', 'INTEGER NOT NULL DEFAULT 0']
+    ['bark_alert', 'INTEGER NOT NULL DEFAULT 0'],
+    ['market_cap_usd', 'REAL'],
+    ['token_creation_timestamp', 'INTEGER'],
+    ['market_data_at', 'INTEGER']
   ];
   for (const [column, definition] of monitorEventMigrations) {
     if (!monitorEventColumns.has(column)) db.exec(`ALTER TABLE monitor_events ADD COLUMN ${column} ${definition}`);
@@ -292,6 +315,11 @@ export function createRobinhoodStore(filename) {
       name: row.name,
       decimals: Number(row.decimals),
       complete: Boolean(row.complete),
+      marketCapUsd: row.market_cap_usd === null ? null : Number(row.market_cap_usd),
+      tokenCreationTimestamp: row.token_creation_timestamp === null
+        ? null
+        : Number(row.token_creation_timestamp),
+      marketDataAt: row.market_data_at === null ? null : Number(row.market_data_at),
       updatedAt: Number(row.updated_at)
     };
   }
@@ -318,7 +346,12 @@ export function createRobinhoodStore(filename) {
       blockTimestamp: Number(row.block_timestamp),
       detectedAt: Number(row.detected_at),
       soundAlert: Boolean(row.sound_alert),
-      barkAlert: Boolean(row.bark_alert)
+      barkAlert: Boolean(row.bark_alert),
+      marketCapUsd: row.market_cap_usd === null ? null : Number(row.market_cap_usd),
+      tokenCreationTimestamp: row.token_creation_timestamp === null
+        ? null
+        : Number(row.token_creation_timestamp),
+      marketDataAt: row.market_data_at === null ? null : Number(row.market_data_at)
     };
   }
 
@@ -629,6 +662,44 @@ export function createRobinhoodStore(filename) {
         db.prepare('SELECT * FROM monitor_token_metadata WHERE address = ?').get(String(address).toLowerCase())
       );
     },
+    upsertMonitorTokenMarketData(marketData) {
+      const address = String(marketData.address || '').toLowerCase();
+      if (!ADDRESS_PATTERN.test(address)) throw new TypeError('Invalid monitor token address');
+      const marketCap = marketData.marketCapUsd === null || marketData.marketCapUsd === undefined ||
+        marketData.marketCapUsd === '' ? NaN : Number(marketData.marketCapUsd);
+      const marketCapUsd = Number.isFinite(marketCap) && marketCap >= 0 ? marketCap : null;
+      const creationTimestamp = Number(marketData.tokenCreationTimestamp);
+      const tokenCreationTimestamp = Number.isSafeInteger(creationTimestamp) && creationTimestamp > 0
+        ? creationTimestamp
+        : null;
+      const fetchedAt = Number(marketData.marketDataAt);
+      const marketDataAt = marketCapUsd !== null && Number.isSafeInteger(fetchedAt) && fetchedAt > 0
+        ? fetchedAt
+        : null;
+      db.prepare(`
+        INSERT INTO monitor_token_metadata(
+          address, symbol, name, decimals, complete, market_cap_usd,
+          token_creation_timestamp, market_data_at, updated_at
+        ) VALUES (?, ?, ?, 18, 0, ?, ?, ?, 0)
+        ON CONFLICT(address) DO UPDATE SET
+          market_cap_usd = COALESCE(excluded.market_cap_usd, monitor_token_metadata.market_cap_usd),
+          token_creation_timestamp = COALESCE(
+            excluded.token_creation_timestamp,
+            monitor_token_metadata.token_creation_timestamp
+          ),
+          market_data_at = COALESCE(excluded.market_data_at, monitor_token_metadata.market_data_at)
+      `).run(
+        address,
+        address,
+        address,
+        marketCapUsd,
+        tokenCreationTimestamp,
+        marketDataAt
+      );
+      return monitorTokenMetadataFromRow(
+        db.prepare('SELECT * FROM monitor_token_metadata WHERE address = ?').get(address)
+      );
+    },
     insertMonitorEvent(event) {
       const eventType = String(event.eventType || 'buy').toLowerCase();
       if (!MONITOR_EVENT_TYPE_SET.has(eventType)) throw new TypeError('Unsupported monitor event type');
@@ -637,8 +708,9 @@ export function createRobinhoodStore(filename) {
           event_type, asset_type, wallet_address, wallet_alias, counterparty_address, platform,
           token_address, token_symbol, token_name,
           token_amount, raw_token_amount, token_decimals, tx_hash, log_index,
-          block_number, block_timestamp, detected_at, sound_alert, bark_alert
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          block_number, block_timestamp, detected_at, sound_alert, bark_alert,
+          market_cap_usd, token_creation_timestamp, market_data_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         eventType,
         String(event.assetType || 'token').trim().toLowerCase() || 'token',
@@ -658,13 +730,88 @@ export function createRobinhoodStore(filename) {
         Number(event.blockTimestamp),
         Number(event.detectedAt || Math.floor(Date.now() / 1000)),
         event.soundAlert === true ? 1 : 0,
-        event.barkAlert === true ? 1 : 0
+        event.barkAlert === true ? 1 : 0,
+        event.marketCapUsd !== null && event.marketCapUsd !== undefined && event.marketCapUsd !== '' &&
+          Number.isFinite(Number(event.marketCapUsd)) && Number(event.marketCapUsd) >= 0
+          ? Number(event.marketCapUsd)
+          : null,
+        Number.isSafeInteger(Number(event.tokenCreationTimestamp)) && Number(event.tokenCreationTimestamp) > 0
+          ? Number(event.tokenCreationTimestamp)
+          : null,
+        Number.isSafeInteger(Number(event.marketDataAt)) && Number(event.marketDataAt) > 0
+          ? Number(event.marketDataAt)
+          : null
       );
       const row = db.prepare('SELECT * FROM monitor_events WHERE tx_hash = ? AND log_index = ?').get(
         String(event.txHash || '').toLowerCase(),
         Number(event.logIndex)
       );
       return { inserted: Number(result.changes) > 0, event: monitorEventFromRow(row) };
+    },
+    updateMonitorEventsTokenMarketData(tokenAddress, marketData, { eventIds } = {}) {
+      const address = String(tokenAddress || '').toLowerCase();
+      if (!ADDRESS_PATTERN.test(address)) throw new TypeError('Invalid monitor token address');
+      const marketCap = marketData.marketCapUsd === null || marketData.marketCapUsd === undefined ||
+        marketData.marketCapUsd === '' ? NaN : Number(marketData.marketCapUsd);
+      const marketCapUsd = Number.isFinite(marketCap) && marketCap >= 0 ? marketCap : null;
+      const creationTimestamp = Number(marketData.tokenCreationTimestamp);
+      const tokenCreationTimestamp = Number.isSafeInteger(creationTimestamp) && creationTimestamp > 0
+        ? creationTimestamp
+        : null;
+      const fetchedAt = Number(marketData.marketDataAt);
+      const marketDataAt = marketCapUsd !== null && Number.isSafeInteger(fetchedAt) && fetchedAt > 0
+        ? fetchedAt
+        : null;
+      if (marketCapUsd === null && tokenCreationTimestamp === null) return [];
+      const hasEventFilter = Array.isArray(eventIds);
+      const normalizedEventIds = hasEventFilter
+        ? [...new Set(eventIds.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))]
+        : [];
+      if (hasEventFilter && normalizedEventIds.length === 0) return [];
+      const eventFilter = hasEventFilter
+        ? ` AND id IN (${normalizedEventIds.map(() => '?').join(', ')})`
+        : '';
+      const rows = db.prepare(`
+        SELECT id
+        FROM monitor_events
+        WHERE token_address = ?
+          AND ((? IS NOT NULL AND market_cap_usd IS NULL)
+            OR (? IS NOT NULL AND token_creation_timestamp IS NULL))
+          ${eventFilter}
+        ORDER BY id
+      `).all(address, marketCapUsd, tokenCreationTimestamp, ...normalizedEventIds);
+      if (!rows.length) return [];
+      db.exec('BEGIN');
+      try {
+        db.prepare(`
+          UPDATE monitor_events
+          SET market_cap_usd = COALESCE(market_cap_usd, ?),
+              token_creation_timestamp = COALESCE(token_creation_timestamp, ?),
+              market_data_at = CASE
+                WHEN market_cap_usd IS NULL AND ? IS NOT NULL THEN ?
+                ELSE market_data_at
+              END
+          WHERE token_address = ?
+            AND ((? IS NOT NULL AND market_cap_usd IS NULL)
+              OR (? IS NOT NULL AND token_creation_timestamp IS NULL))
+            ${eventFilter}
+        `).run(
+          marketCapUsd,
+          tokenCreationTimestamp,
+          marketCapUsd,
+          marketDataAt,
+          address,
+          marketCapUsd,
+          tokenCreationTimestamp,
+          ...normalizedEventIds
+        );
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+      const select = db.prepare('SELECT * FROM monitor_events WHERE id = ?');
+      return rows.map((row) => monitorEventFromRow(select.get(row.id)));
     },
     listMonitorEvents({ after = 0, limit = 100 } = {}) {
       const normalizedAfter = Math.max(0, Math.floor(Number(after) || 0));

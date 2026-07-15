@@ -640,9 +640,13 @@ export function createRobinhoodStandaloneServer({ service, monitor = null, publi
   return server;
 }
 
-export async function startRobinhoodStandaloneServer(env = process.env, { monitorRpcClient = null } = {}) {
+export async function startRobinhoodStandaloneServer(
+  env = process.env,
+  { monitorRpcClient = null, debotClient = null } = {}
+) {
   const config = createRobinhoodConfig(env);
   const store = createRobinhoodStore(config.dataFile);
+  const activeDebotClient = debotClient || new RobinhoodDebotClient({ timeoutMs: config.requestTimeoutMs });
   const rpcClient = monitorRpcClient || new RobinhoodRpcClient({
     rpcUrl: config.rpcUrl,
     timeoutMs: config.requestTimeoutMs,
@@ -656,7 +660,7 @@ export async function startRobinhoodStandaloneServer(env = process.env, { monito
   const service = createRobinhoodService({
     config,
     store,
-    debotClient: new RobinhoodDebotClient({ timeoutMs: config.requestTimeoutMs }),
+    debotClient: activeDebotClient,
     holderClient: new RobinhoodHolderClient({
       baseUrl: config.blockscoutApiUrl,
       timeoutMs: config.requestTimeoutMs
@@ -687,7 +691,8 @@ export async function startRobinhoodStandaloneServer(env = process.env, { monito
     deepGapPollIntervalMs: config.monitorDeepGapPollIntervalMs,
     tokenMetadataBudgetMs: config.monitorTokenMetadataBudgetMs,
     noxaLaunchFactory: config.noxaLaunchFactory,
-    barkNotifier
+    barkNotifier,
+    debotClient: activeDebotClient
   });
   const server = createRobinhoodStandaloneServer({
     service,

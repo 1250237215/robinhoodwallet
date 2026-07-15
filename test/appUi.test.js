@@ -720,6 +720,8 @@ test('monitoring prefers SSE event delivery and falls back to two-second increme
     assert.match(appJs, new RegExp(`source\\.addEventListener\\('${eventType}'`));
   }
   assert.match(appJs, /MONITOR_POLL_INTERVAL_MS = 2_000/);
+  assert.match(appJs, /MONITOR_RECENT_REFRESH_MS = 10_000/);
+  assert.match(appJs, /refreshRecent \? '0' : state\.monitorLastEventId/);
   assert.match(appJs, /\/monitor\/events\?after=\$\{after\}&limit=200/);
   assert.match(appJs, /\/monitor\?since=\$\{after\}&limit=200/);
   assert.match(appJs, /state\.monitorTransport === 'sse'/);
@@ -752,9 +754,9 @@ test('generic wallet events support native transfers, event metadata and safe li
   assert.match(indexHtml, /id="monitor-page-title">实时链上监控</);
   assert.match(indexHtml, /id="monitor-feed-title">实时链上流水</);
   assert.match(indexHtml, /等待钱包动态/);
-  assert.match(appJs, /firstValue\(source, \['eventType', 'event_type', 'type'\], 'buy'\)/);
-  assert.match(appJs, /recipient: normalizeAddress\(firstValue\(source, \[[\s\S]*'counterpartyAddress'[\s\S]*'to'/);
-  assert.match(appJs, /platform: String\(firstValue\(source, \['platform', 'protocol', 'dex', 'source'\]/);
+  assert.match(appJs, /pick\(\['eventType', 'event_type', 'type'\], 'buy'\)/);
+  assert.match(appJs, /recipient: normalizeAddress\(pick\(\[[\s\S]*'counterpartyAddress'[\s\S]*'to'/);
+  assert.match(appJs, /platform: String\(pick\(\['platform', 'protocol', 'dex', 'source'\]/);
   assert.match(appJs, /if \(!event\.walletAddress\) continue/);
   assert.match(appJs, /if \(event\.eventType !== 'buy'\) continue/);
   assert.match(appJs, /event\.tokenAddress[\s\S]*\? safeHttpUrl\(event\.debotTokenUrl\)[\s\S]*: ''/);
@@ -771,6 +773,40 @@ test('generic wallet events support native transfers, event metadata and safe li
   assert.match(stylesCss, /\.monitor-event-meta span \{[\s\S]*text-overflow: ellipsis/);
 });
 
+test('real-time token events upsert asynchronous market cap and token-age enrichment', () => {
+  assert.match(appJs, /marketCapUsd: pickNumber\(\['marketCapUsd', 'market_cap_usd'\]\)/);
+  assert.match(appJs, /tokenCreationTimestamp: pick\(\['tokenCreationTimestamp', 'token_creation_timestamp'\], null\)/);
+  assert.match(appJs, /marketDataAt: pick\(\['marketDataAt', 'market_data_at'\], null\)/);
+  const mergeSource = appJs.slice(appJs.indexOf('function mergeMonitorEvents'), appJs.indexOf('function markMonitorEventsFresh'));
+  assert.match(mergeSource, /indexesByKey\.get\(key\)/);
+  assert.match(mergeSource, /normalizeMonitorEvent\(rawEvent, state\.monitorEvents\[existingIndex\]\)/);
+  assert.doesNotMatch(mergeSource, /state\.monitorEventKeys\.has\(key\)[^\n]+continue/);
+  assert.match(appJs, /source\.addEventListener\('event_update', applyMonitorStreamEventUpdate\)/);
+  assert.match(appJs, /eventIds\.map\(\(id\) => \(\{ \.\.\.source, id \}\)\)/);
+  assert.match(appJs, /formatMonitorMarketCap\(event\.marketCapUsd\)/);
+  assert.match(appJs, /monitorTimestampMs\(event\?\.blockTimestamp\)[\s\S]*monitorTimestampMs\(event\?\.tokenCreationTimestamp\)/);
+  assert.match(appJs, /<dt>发现时市值<\/dt>/);
+  assert.match(appJs, /event\.eventType === 'buy' \? '买入时币龄' : '事件时币龄'/);
+  assert.match(appJs, /marketCap === null \? '待获取'/);
+  assert.match(appJs, /tokenAge !== '待获取'/);
+});
+
+test('real-time feed uses scan-friendly hierarchy, event colors and one-shot arrival emphasis', () => {
+  assert.match(stylesCss, /\.monitor-event-title a \{[\s\S]*font-size: 16px/);
+  assert.match(stylesCss, /\.monitor-event-amount \{[\s\S]*font-size: 15px/);
+  assert.match(stylesCss, /\.monitor-event-item time \{[\s\S]*font-size: 12px/);
+  assert.match(stylesCss, /\.monitor-event-meta span \{[\s\S]*font-size: 12px/);
+  for (const eventType of ['buy', 'sell', 'transfer', 'token_create']) {
+    assert.match(stylesCss, new RegExp(`\\.monitor-event-item\\[data-event-type="${eventType}"\\]`));
+  }
+  assert.match(stylesCss, /@keyframes monitor-event-arrival/);
+  assert.match(stylesCss, /\.monitor-event-item\.is-new \{[\s\S]*animation: monitor-event-arrival 1\.8s ease-out 1/);
+  assert.match(appJs, /state\.monitorFreshEventKeys\.delete\(eventKey\)/);
+  assert.match(stylesCss, /@media \(prefers-reduced-motion: reduce\)[\s\S]*animation: none/);
+  assert.match(stylesCss, /@media \(max-width: 440px\)[\s\S]*\.monitor-event-metrics > div \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.doesNotMatch(stylesCss.slice(stylesCss.indexOf('.monitor-event-item {'), stylesCss.indexOf('.monitor-empty-state {')), /linear-gradient|radial-gradient/);
+});
+
 test('single-wallet browser sound is gesture-driven and strictly gated by soundAlert', () => {
   assert.match(indexHtml, /id="monitor-sound-button"[\s\S]*开启声音 \/ 试听/);
   assert.match(indexHtml, /id="monitor-sound-status"[^>]*data-enabled="false"/);
@@ -778,7 +814,7 @@ test('single-wallet browser sound is gesture-driven and strictly gated by soundA
   assert.match(appJs, /window\.AudioContext \|\| window\.webkitAudioContext/);
   assert.match(appJs, /声音提醒已开启/);
   assert.match(appJs, /声音提醒已关闭/);
-  assert.match(appJs, /soundAlert: source\.soundAlert === true \|\| source\.sound_alert === true/);
+  assert.match(appJs, /const soundAlert = pick\(\['soundAlert', 'sound_alert'\], false\) === true/);
   assert.match(appJs, /if \(!events\.some\(\(event\) => event\.soundAlert === true\)\) return/);
   assert.match(appJs, /if \(!initial\) playMonitorEventSounds\(added\)/);
   assert.match(appJs, /playMonitorEventSounds\(added\);[\s\S]*synchronizeMonitorAlerts/);

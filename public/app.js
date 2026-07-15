@@ -10,6 +10,7 @@ const ACTIVE_JOB_STATES = new Set(['queued', 'pending', 'running', 'scanning', '
 const REVIEW_SCAN_BATCH_GAP_MS = 5 * 60 * 1000;
 const BUY_FREQUENCY_REFRESH_MS = 30_000;
 const MONITOR_POLL_INTERVAL_MS = 2_000;
+const MONITOR_RECENT_REFRESH_MS = 10_000;
 const MONITOR_THRESHOLD_STORAGE_KEY = 'robinhood-monitor-threshold';
 const MONITOR_SOUNDS = new Set(['alarm', 'bell', 'electronic', 'glass']);
 const MONITOR_EVENT_TYPES = Object.freeze(['buy', 'sell', 'transfer', 'token_create']);
@@ -213,7 +214,9 @@ const state = {
   monitorEvents: [],
   monitorServerClusters: [],
   monitorEventKeys: new Set(),
+  monitorFreshEventKeys: new Set(),
   monitorLastEventId: '',
+  monitorRecentRefreshAt: 0,
   monitorAlertedTokens: new Set(),
   monitorSoundEnabled: false,
   monitorAudioContext: null,
@@ -590,22 +593,28 @@ function normalizeTransactionHash(value) {
   return HASH_PATTERN.test(hash) ? hash.toLowerCase() : '';
 }
 
-function normalizeMonitorEvent(raw) {
+function normalizeMonitorEvent(raw, current = null) {
   const source = raw && typeof raw === 'object' ? raw : {};
-  const id = firstValue(source, ['id', 'eventId', 'event_id', 'sequence'], '');
-  const candidateType = String(firstValue(source, ['eventType', 'event_type', 'type'], 'buy')).toLowerCase();
+  const existing = current && typeof current === 'object' ? current : {};
+  const pick = (keys, fallback = null) => firstValue(source, keys, firstValue(existing, keys, fallback));
+  const pickNumber = (keys) => finiteNumber(...keys.map((key) => source[key]))
+    ?? finiteNumber(...keys.map((key) => existing[key]));
+  const id = pick(['id', 'eventId', 'event_id', 'sequence'], '');
+  const candidateType = String(pick(['eventType', 'event_type', 'type'], 'buy')).toLowerCase();
   const eventType = MONITOR_EVENT_TYPES.includes(candidateType) ? candidateType : 'buy';
+  const soundAlert = pick(['soundAlert', 'sound_alert'], false) === true;
   return {
+    ...existing,
     ...source,
     id: String(id ?? ''),
     eventType,
-    assetType: String(firstValue(source, ['assetType', 'asset_type'], 'token') || 'token').toLowerCase(),
-    walletAddress: normalizeAddress(firstValue(source, ['walletAddress', 'wallet_address', 'wallet', 'address'])),
-    walletAlias: String(firstValue(source, ['walletAlias', 'wallet_alias', 'alias', 'walletName'], '') || ''),
-    tokenAddress: normalizeAddress(firstValue(source, ['tokenAddress', 'token_address', 'token', 'contractAddress'])),
-    tokenSymbol: String(firstValue(source, ['tokenSymbol', 'token_symbol', 'symbol', 'ticker'], 'TOKEN') || 'TOKEN'),
-    tokenName: String(firstValue(source, ['tokenName', 'token_name', 'name'], '') || ''),
-    recipient: normalizeAddress(firstValue(source, [
+    assetType: String(pick(['assetType', 'asset_type'], 'token') || 'token').toLowerCase(),
+    walletAddress: normalizeAddress(pick(['walletAddress', 'wallet_address', 'wallet', 'address'])),
+    walletAlias: String(pick(['walletAlias', 'wallet_alias', 'alias', 'walletName'], '') || ''),
+    tokenAddress: normalizeAddress(pick(['tokenAddress', 'token_address', 'token', 'contractAddress'])),
+    tokenSymbol: String(pick(['tokenSymbol', 'token_symbol', 'symbol', 'ticker'], 'TOKEN') || 'TOKEN'),
+    tokenName: String(pick(['tokenName', 'token_name', 'name'], '') || ''),
+    recipient: normalizeAddress(pick([
       'recipient',
       'recipientAddress',
       'recipient_address',
@@ -613,15 +622,18 @@ function normalizeMonitorEvent(raw) {
       'counterparty_address',
       'to'
     ])),
-    platform: String(firstValue(source, ['platform', 'protocol', 'dex', 'source'], '') || ''),
-    soundAlert: source.soundAlert === true || source.sound_alert === true,
-    amount: firstValue(source, ['amount', 'tokenAmount', 'token_amount', 'amountIn', 'amount_in', 'spendAmount', 'value'], null),
-    amountUsd: finiteNumber(source.amountUsd, source.amount_usd, source.spendUsd, source.valueUsd),
-    amountSymbol: String(firstValue(source, ['amountSymbol', 'amount_symbol', 'spendSymbol', 'currency'], source.tokenAmount ? firstValue(source, ['tokenSymbol', 'token_symbol'], '') : '') || ''),
-    txHash: normalizeTransactionHash(firstValue(source, ['txHash', 'tx_hash', 'transactionHash', 'hash'])),
-    blockNumber: finiteNumber(source.blockNumber, source.block_number, source.block),
-    blockTimestamp: firstValue(source, ['blockTimestamp', 'block_timestamp', 'timestamp'], null),
-    detectedAt: firstValue(source, ['detectedAt', 'detected_at', 'createdAt', 'created_at'], null)
+    platform: String(pick(['platform', 'protocol', 'dex', 'source'], '') || ''),
+    soundAlert,
+    amount: pick(['amount', 'tokenAmount', 'token_amount', 'amountIn', 'amount_in', 'spendAmount', 'value'], null),
+    amountUsd: pickNumber(['amountUsd', 'amount_usd', 'spendUsd', 'valueUsd']),
+    amountSymbol: String(pick(['amountSymbol', 'amount_symbol', 'spendSymbol', 'currency'], source.tokenAmount ? pick(['tokenSymbol', 'token_symbol'], '') : '') || ''),
+    marketCapUsd: pickNumber(['marketCapUsd', 'market_cap_usd']),
+    tokenCreationTimestamp: pick(['tokenCreationTimestamp', 'token_creation_timestamp'], null),
+    marketDataAt: pick(['marketDataAt', 'market_data_at'], null),
+    txHash: normalizeTransactionHash(pick(['txHash', 'tx_hash', 'transactionHash', 'hash'])),
+    blockNumber: pickNumber(['blockNumber', 'block_number', 'block']),
+    blockTimestamp: pick(['blockTimestamp', 'block_timestamp', 'timestamp'], null),
+    detectedAt: pick(['detectedAt', 'detected_at', 'createdAt', 'created_at'], null)
   };
 }
 
@@ -658,20 +670,49 @@ function advanceMonitorCursor(events) {
 
 function mergeMonitorEvents(rawEvents) {
   const added = [];
+  const indexesByKey = new Map(state.monitorEvents.map((event, index) => [monitorEventKey(event), index]));
   for (const rawEvent of Array.isArray(rawEvents) ? rawEvents : []) {
     const event = normalizeMonitorEvent(rawEvent);
-    if (!event.walletAddress) continue;
     const key = monitorEventKey(event);
-    if (state.monitorEventKeys.has(key)) continue;
-    state.monitorEventKeys.add(key);
+    const existingIndex = indexesByKey.get(key);
+    if (existingIndex !== undefined) {
+      const merged = normalizeMonitorEvent(rawEvent, state.monitorEvents[existingIndex]);
+      state.monitorEvents[existingIndex] = merged;
+      indexesByKey.set(monitorEventKey(merged), existingIndex);
+      continue;
+    }
+    if (!event.walletAddress) continue;
+    indexesByKey.set(key, state.monitorEvents.length);
     state.monitorEvents.push(event);
     added.push(event);
   }
   state.monitorEvents.sort((left, right) => monitorEventTimestamp(right) - monitorEventTimestamp(left));
   state.monitorEvents = state.monitorEvents.slice(0, 200);
   state.monitorEventKeys = new Set(state.monitorEvents.map(monitorEventKey));
-  advanceMonitorCursor(added.length ? added : state.monitorEvents);
+  advanceMonitorCursor(added);
   return added;
+}
+
+function markMonitorEventsFresh(events) {
+  for (const event of events) state.monitorFreshEventKeys.add(monitorEventKey(event));
+}
+
+function applyMonitorEventUpdatePayload(payload) {
+  const source = payload && typeof payload === 'object'
+    ? (payload.eventUpdate || payload.event_update || payload.update || payload)
+    : {};
+  const rawIds = firstValue(source, ['eventIds', 'event_ids', 'ids'], []);
+  const eventIds = Array.isArray(rawIds) ? rawIds.filter((id) => id !== null && id !== undefined && id !== '') : [];
+  if (eventIds.length) {
+    mergeMonitorEvents(eventIds.map((id) => ({ ...source, id })));
+    return;
+  }
+  const tokenAddress = normalizeAddress(firstValue(source, ['tokenAddress', 'token_address']));
+  if (!tokenAddress) return;
+  state.monitorEvents = state.monitorEvents.map((event) => event.tokenAddress === tokenAddress
+    ? normalizeMonitorEvent(source, event)
+    : event);
+  state.monitorEventKeys = new Set(state.monitorEvents.map(monitorEventKey));
 }
 
 function computedMonitorClusters(now = Date.now()) {
@@ -763,6 +804,40 @@ function formatMonitorAmount(event) {
   }
   const raw = String(event.amount ?? '').trim();
   return raw || '金额待解析';
+}
+
+function formatMonitorMarketCap(value) {
+  const marketCap = finiteNumber(value);
+  return marketCap === null ? '待获取' : formatMoney(marketCap);
+}
+
+function formatMonitorTokenAge(event) {
+  const eventTimestamp = monitorTimestampMs(event?.blockTimestamp);
+  const creationTimestamp = monitorTimestampMs(event?.tokenCreationTimestamp);
+  if (eventTimestamp === null || creationTimestamp === null || creationTimestamp > eventTimestamp + 60_000) return '待获取';
+  const totalSeconds = Math.max(0, Math.floor((eventTimestamp - creationTimestamp) / 1_000));
+  if (totalSeconds < 5) return '刚刚诞生';
+  if (totalSeconds < 60) return `${totalSeconds} 秒`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes} 分钟`;
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) {
+    const minutes = totalMinutes % 60;
+    return minutes ? `${totalHours} 小时 ${minutes} 分` : `${totalHours} 小时`;
+  }
+  const totalDays = Math.floor(totalHours / 24);
+  if (totalDays < 30) {
+    const hours = totalHours % 24;
+    return hours ? `${totalDays} 天 ${hours} 小时` : `${totalDays} 天`;
+  }
+  if (totalDays < 365) {
+    const months = Math.floor(totalDays / 30);
+    const days = totalDays % 30;
+    return days ? `${months} 个月 ${days} 天` : `${months} 个月`;
+  }
+  const years = Math.floor(totalDays / 365);
+  const months = Math.floor((totalDays % 365) / 30);
+  return months ? `${years} 年 ${months} 个月` : `${years} 年`;
 }
 
 function monitorPlatformLabel(value) {
@@ -1006,6 +1081,8 @@ function renderMonitorEvents() {
     return;
   }
   elements.monitorEventFeed.innerHTML = events.map((event) => {
+    const eventKey = monitorEventKey(event);
+    const isFresh = state.monitorFreshEventKeys.delete(eventKey);
     const walletLabel = event.walletAlias || shortAddress(event.walletAddress);
     const eventType = MONITOR_EVENT_TYPES.includes(event.eventType) ? event.eventType : 'buy';
     const symbol = event.tokenSymbol || (event.assetType === 'native' ? 'ETH' : 'TOKEN');
@@ -1016,13 +1093,19 @@ function renderMonitorEvents() {
       : '';
     const transactionUrl = safeHttpUrl(event.explorerTxUrl) || (event.txHash ? `${EXPLORER_ROOT}/tx/${event.txHash}` : '');
     const recipientLabel = event.recipient ? shortAddress(event.recipient) : '';
+    const hasTokenMetrics = Boolean(event.tokenAddress) && event.assetType !== 'native';
+    const hasMarketCap = event.marketCapUsd !== null;
+    const tokenAge = formatMonitorTokenAge(event);
+    const hasTokenAge = tokenAge !== '待获取';
+    const marketDataTitle = event.marketDataAt ? `市值数据更新于 ${formatDateTime(event.marketDataAt)}` : '';
+    const ageLabel = event.eventType === 'buy' ? '买入时币龄' : '事件时币龄';
     const target = tokenUrl
-      ? `<a href="${escapeHtml(tokenUrl)}" target="_blank" rel="noopener noreferrer" title="在 DeBot 查看代币">${escapeHtml(symbol)}</a>`
+      ? `<a class="monitor-event-token" href="${escapeHtml(tokenUrl)}" target="_blank" rel="noopener noreferrer" title="在 DeBot 查看代币">${escapeHtml(symbol)}</a>`
       : event.recipient
         ? `<strong class="monitor-event-recipient-target" title="${escapeHtml(event.recipient)}">${escapeHtml(recipientLabel)}</strong>`
-        : `<strong class="monitor-event-recipient-target">${escapeHtml(symbol)}</strong>`;
+        : `<strong class="monitor-event-recipient-target monitor-event-token">${escapeHtml(symbol)}</strong>`;
     return `
-      <article class="monitor-event-item" data-event-id="${escapeHtml(event.id)}" data-event-type="${eventType}">
+      <article class="monitor-event-item${isFresh ? ' is-new' : ''}" data-event-id="${escapeHtml(event.id)}" data-event-type="${eventType}">
         <time datetime="${escapeHtml(String(eventTime || ''))}">${escapeHtml(formatMonitorAge(eventTime))}</time>
         <div class="monitor-event-main">
           <div class="monitor-event-title">
@@ -1038,6 +1121,18 @@ function renderMonitorEvents() {
           </div>
         </div>
         <strong class="monitor-event-amount">${escapeHtml(formatMonitorAmount(event))}</strong>
+        ${hasTokenMetrics ? `
+          <dl class="monitor-event-metrics" aria-label="代币发现指标">
+            <div data-state="${hasMarketCap ? 'ready' : 'pending'}">
+              <dt>发现时市值</dt>
+              <dd${marketDataTitle ? ` title="${escapeHtml(marketDataTitle)}"` : ''}>${escapeHtml(formatMonitorMarketCap(event.marketCapUsd))}</dd>
+            </div>
+            <div data-state="${hasTokenAge ? 'ready' : 'pending'}">
+              <dt>${ageLabel}</dt>
+              <dd>${escapeHtml(tokenAge)}</dd>
+            </div>
+          </dl>
+        ` : ''}
         <div class="monitor-event-links">
           <a class="inline-icon-button" href="${escapeHtml(walletUrl)}" target="_blank" rel="noopener noreferrer" title="DeBot 地址" aria-label="在 DeBot 查看地址"><i data-lucide="wallet" aria-hidden="true"></i></a>
           ${tokenUrl ? `<a class="inline-icon-button" href="${escapeHtml(tokenUrl)}" target="_blank" rel="noopener noreferrer" title="DeBot 代币" aria-label="在 DeBot 查看代币"><i data-lucide="coins" aria-hidden="true"></i></a>` : ''}
@@ -1103,6 +1198,7 @@ function applyMonitorPayload(payload, { initial = false } = {}) {
       : [];
   const events = getCollection(record, ['events', 'buys', 'items']) || [];
   const added = mergeMonitorEvents(events);
+  if (!initial) markMonitorEventsFresh(added);
   state.monitorConnected = record.ok !== false;
   if (!initial) playMonitorEventSounds(added);
   synchronizeMonitorAlerts({ playNew: !initial && added.length > 0 });
@@ -1330,11 +1426,19 @@ function applyMonitorStreamEvent(event) {
   const payload = parseMonitorStreamPayload(event);
   const rawEvent = payload.event || payload.buy || payload.sell || payload.transfer || payload.token_create || payload;
   const added = mergeMonitorEvents([rawEvent]);
+  markMonitorEventsFresh(added);
   state.monitorConnected = true;
   state.monitorTransport = 'sse';
   playMonitorEventSounds(added);
   synchronizeMonitorAlerts({ playNew: added.length > 0 });
   renderMonitorPage();
+}
+
+function applyMonitorStreamEventUpdate(event) {
+  applyMonitorEventUpdatePayload(parseMonitorStreamPayload(event));
+  state.monitorConnected = true;
+  state.monitorTransport = 'sse';
+  renderMonitorEvents();
 }
 
 function stopMonitorTransport() {
@@ -1346,6 +1450,7 @@ function stopMonitorTransport() {
   if (state.monitorEventSource) state.monitorEventSource.close();
   state.monitorEventSource = null;
   state.monitorStreamSnapshotReceived = false;
+  state.monitorRecentRefreshAt = 0;
   state.monitorPollBusy = false;
   state.monitorStarted = false;
   state.monitorTransport = 'idle';
@@ -1359,12 +1464,17 @@ function scheduleMonitorPoll(delay = MONITOR_POLL_INTERVAL_MS) {
 }
 
 async function fetchIncrementalMonitorEvents() {
-  const after = encodeURIComponent(state.monitorLastEventId || '0');
+  const refreshRecent = Date.now() - state.monitorRecentRefreshAt >= MONITOR_RECENT_REFRESH_MS;
+  const after = encodeURIComponent(refreshRecent ? '0' : state.monitorLastEventId || '0');
   try {
-    return await fetchJson(`${API_ROOT}/monitor/events?after=${after}&limit=200`);
+    const payload = await fetchJson(`${API_ROOT}/monitor/events?after=${after}&limit=200`);
+    if (refreshRecent) state.monitorRecentRefreshAt = Date.now();
+    return payload;
   } catch (error) {
     if (![404, 405].includes(error.status)) throw error;
-    return fetchJson(`${API_ROOT}/monitor?since=${after}&limit=200`);
+    const payload = await fetchJson(`${API_ROOT}/monitor?since=${after}&limit=200`);
+    if (refreshRecent) state.monitorRecentRefreshAt = Date.now();
+    return payload;
   }
 }
 
@@ -1411,6 +1521,7 @@ function connectMonitorStream() {
   source.addEventListener('sell', applyMonitorStreamEvent);
   source.addEventListener('transfer', applyMonitorStreamEvent);
   source.addEventListener('token_create', applyMonitorStreamEvent);
+  source.addEventListener('event_update', applyMonitorStreamEventUpdate);
   source.addEventListener('health', (event) => {
     const payload = parseMonitorStreamPayload(event);
     state.monitorHealth = { ...state.monitorHealth, ...(payload.health || payload) };
@@ -1429,6 +1540,7 @@ function connectMonitorStream() {
     state.monitorEventSource = null;
     state.monitorConnected = false;
     state.monitorTransport = 'polling';
+    state.monitorRecentRefreshAt = 0;
     renderMonitorHealth();
     scheduleMonitorPoll(0);
   });

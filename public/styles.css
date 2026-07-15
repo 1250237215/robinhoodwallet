@@ -3023,14 +3023,41 @@ select:hover {
 }
 
 .monitor-event-item {
+  --event-accent: #52615a;
+  --event-soft: #f4f6f5;
+  position: relative;
   min-width: 0;
   display: grid;
-  grid-template-columns: 68px minmax(180px, 1fr) minmax(90px, auto) auto;
+  grid-template-columns: 78px minmax(0, 1fr) minmax(120px, auto);
+  grid-template-rows: auto auto;
   align-items: center;
-  gap: 10px;
-  min-height: 66px;
-  padding: 9px 12px;
+  gap: 8px 16px;
+  min-height: 102px;
+  padding: 13px 14px 13px 17px;
   border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: inset 4px 0 var(--event-accent);
+  transition: background-color 140ms ease;
+}
+
+.monitor-event-item[data-event-type="buy"] {
+  --event-accent: #16834b;
+  --event-soft: #eef8f2;
+}
+
+.monitor-event-item[data-event-type="sell"] {
+  --event-accent: #ba3540;
+  --event-soft: #fcf0f1;
+}
+
+.monitor-event-item[data-event-type="transfer"] {
+  --event-accent: #397aaf;
+  --event-soft: #eff6fb;
+}
+
+.monitor-event-item[data-event-type="token_create"] {
+  --event-accent: #9a701d;
+  --event-soft: #fbf5e8;
 }
 
 .monitor-event-item:last-child {
@@ -3038,18 +3065,39 @@ select:hover {
 }
 
 .monitor-event-item:hover {
-  background: var(--surface-muted);
+  background: var(--event-soft);
+}
+
+@keyframes monitor-event-arrival {
+  0%, 18% {
+    background-color: #fff1bd;
+  }
+
+  100% {
+    background-color: var(--surface);
+  }
+}
+
+.monitor-event-item.is-new {
+  animation: monitor-event-arrival 1.8s ease-out 1;
 }
 
 .monitor-event-item time {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  align-self: start;
+  padding-top: 4px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
+  font-weight: 650;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 .monitor-event-main {
   min-width: 0;
+  grid-column: 2;
+  grid-row: 1;
 }
 
 .monitor-event-title {
@@ -3060,27 +3108,30 @@ select:hover {
 }
 
 .monitor-event-title a {
-  max-width: min(180px, 32%);
+  min-width: 0;
+  max-width: min(260px, 37%);
   overflow: hidden;
   color: var(--ink);
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 16px;
+  font-weight: 760;
+  line-height: 1.3;
   text-decoration: none;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.monitor-event-title a:last-child {
-  color: var(--positive);
+.monitor-event-title .monitor-event-token {
+  color: var(--event-accent);
 }
 
 .monitor-event-title > strong {
   min-width: 0;
-  max-width: min(180px, 32%);
+  max-width: min(260px, 37%);
   overflow: hidden;
   color: var(--ink-soft);
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 16px;
+  font-weight: 760;
+  line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3090,21 +3141,21 @@ select:hover {
 }
 
 .monitor-event-title svg {
-  width: 12px;
-  height: 12px;
-  flex: 0 0 12px;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
   color: var(--faint);
 }
 
 .monitor-event-type {
   flex: 0 0 auto;
-  padding: 3px 5px;
+  padding: 5px 7px;
   border: 1px solid #aebbb4;
   border-radius: 4px;
   background: #edf2ef;
   color: #3d5147;
-  font-size: 8px;
-  font-weight: 700;
+  font-size: 11px;
+  font-weight: 760;
   line-height: 1;
   white-space: nowrap;
 }
@@ -3138,8 +3189,8 @@ select:hover {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 3px 9px;
-  margin-top: 3px;
+  gap: 4px 12px;
+  margin-top: 6px;
 }
 
 .monitor-event-meta span {
@@ -3147,23 +3198,83 @@ select:hover {
   max-width: 100%;
   overflow: hidden;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .monitor-event-amount {
+  grid-column: 3;
+  grid-row: 1;
   min-width: 0;
+  max-width: 260px;
   overflow: hidden;
   color: var(--ink);
-  font-size: 11px;
+  font-size: 15px;
+  font-weight: 780;
   font-variant-numeric: tabular-nums;
+  line-height: 1.25;
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.monitor-event-metrics {
+  min-width: 0;
+  max-width: 520px;
+  grid-column: 2;
+  grid-row: 2;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  justify-content: start;
+  gap: 8px 22px;
+  margin: 0;
+}
+
+.monitor-event-metrics > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 7px;
+  padding-left: 9px;
+  border-left: 2px solid var(--line-strong);
+}
+
+.monitor-event-metrics dt,
+.monitor-event-metrics dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-event-metrics dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.monitor-event-metrics dd {
+  color: var(--ink);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 760;
+}
+
+.monitor-event-metrics > div[data-state="ready"] {
+  border-left-color: var(--event-accent);
+}
+
+.monitor-event-metrics > div[data-state="pending"] dd {
+  color: var(--faint);
+  font-weight: 650;
+}
+
 .monitor-event-links {
+  grid-column: 3;
+  grid-row: 2;
+  justify-self: end;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -3179,6 +3290,12 @@ select:hover {
 .monitor-panel-head .inline-icon-button svg {
   width: 13px;
   height: 13px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .monitor-event-item.is-new {
+    animation: none;
+  }
 }
 
 .monitor-empty-state {
@@ -3686,13 +3803,17 @@ select:hover {
 
   .monitor-event-item {
     grid-template-columns: minmax(0, 1fr) auto;
-    gap: 6px 10px;
-    padding: 10px 11px;
+    grid-template-rows: auto auto auto auto;
+    gap: 8px 10px;
+    min-height: 0;
+    padding: 12px 11px 13px 15px;
   }
 
   .monitor-event-item time {
     grid-column: 1;
     grid-row: 1;
+    align-self: center;
+    padding-top: 0;
   }
 
   .monitor-event-main {
@@ -3701,21 +3822,35 @@ select:hover {
   }
 
   .monitor-event-amount {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    max-width: 100%;
+    text-align: left;
+  }
+
+  .monitor-event-metrics {
+    grid-column: 1 / -1;
+    grid-row: 4;
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .monitor-event-links {
     grid-column: 2;
     grid-row: 1;
   }
 
-  .monitor-event-links {
-    grid-column: 1 / -1;
-    grid-row: 3;
+  .monitor-event-title {
+    flex-wrap: wrap;
   }
 
   .monitor-event-title a {
-    max-width: min(120px, 31%);
+    max-width: min(120px, 30%);
   }
 
   .monitor-event-title > strong {
-    max-width: min(120px, 31%);
+    max-width: min(120px, 30%);
   }
 
   .monitor-event-meta span {
@@ -4050,6 +4185,11 @@ select:hover {
 
   .monitor-alert-chip {
     font-size: 7px;
+  }
+
+  .monitor-event-metrics > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
   }
 
   .status-progress {

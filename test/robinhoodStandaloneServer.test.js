@@ -445,6 +445,7 @@ test('standalone startup wires the holder-first scanner and its two data clients
   try {
     assert.equal(running.service.scanToken, scanTokenHolders);
     assert.equal(running.service.debotClient instanceof RobinhoodDebotClient, true);
+    assert.equal(running.monitor.debotClient, running.service.debotClient);
     assert.equal(running.service.holderClient instanceof RobinhoodHolderClient, true);
     const health = running.monitor.getSnapshot().health;
     assert.equal(health.running, true);
