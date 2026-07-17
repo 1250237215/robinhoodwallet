@@ -972,7 +972,7 @@ test('Solana monitor readiness is explicit when Helius is not configured', () =>
   assert.match(healthSource, /realtimeReady: typeof health\.realtimeReady === 'boolean'/);
   assert.match(healthSource, /Array\.isArray\(health\.reasons\)/);
   assert.match(healthSource, /helius_api_key_missing/);
-  assert.match(healthSource, /当前仅 Holder 分析可用/);
+  assert.match(healthSource, /缺少 Helius Key，仅 Holder 可用/);
 
   const renderSource = appJs.slice(
     appJs.indexOf('function monitorConnectionState'),

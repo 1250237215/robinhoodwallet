@@ -1019,9 +1019,9 @@ function monitorHealthValues() {
 
 function monitorReadinessDetail(health) {
   if (health.realtimeReady !== false) return '';
-  if (health.reasons.includes('helius_api_key_missing')) return '缺少 Helius API Key，当前仅 Holder 分析可用';
-  if (health.reasons.includes('https_webhook_url_missing')) return '缺少 HTTPS webhook，当前仅 Holder 分析可用';
-  if (health.reasons.includes('webhook_auth_header_missing')) return '缺少 webhook 授权，当前仅 Holder 分析可用';
+  if (health.reasons.includes('helius_api_key_missing')) return '缺少 Helius Key，仅 Holder 可用';
+  if (health.reasons.includes('https_webhook_url_missing')) return '缺少 HTTPS webhook，仅 Holder 可用';
+  if (health.reasons.includes('webhook_auth_header_missing')) return '缺少 webhook 授权，仅 Holder 可用';
   if (health.reasons.includes('helius_webhook_sync_error')) return 'Helius webhook 同步失败';
   if (health.reasons.includes('helius_wallet_addresses_pending_sync')) return 'Helius 正在同步监控地址';
   return '实时监控提供方尚未就绪';
