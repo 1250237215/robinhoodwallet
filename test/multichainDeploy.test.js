@@ -46,8 +46,7 @@ test('reverse proxy routes each chain API to its own process', () => {
   assert.match(caddy, /\/api\/base\/\*[\s\S]*127\.0\.0\.1:18119/);
   assert.match(caddy, /\/api\/solana\/\*[\s\S]*127\.0\.0\.1:18120/);
   assert.match(caddy, /@solanaWebhook[\s\S]*monitor\/webhook[\s\S]*127\.0\.0\.1:18120/);
-  assert.match(caddy, /basicauth @radarProtected/);
-  assert.match(caddy, /not path \/robinhood-radar\/api\/solana\/monitor\/webhook/);
+  assert.doesNotMatch(caddy, /basic_?auth|basicauth|RADAR_BASIC_AUTH_HASH/);
 });
 
 test('Base and Solana systemd units bind independent ports and databases', () => {

@@ -130,12 +130,10 @@ marked partial.
   `deploy/solana-radar.service` are the isolated systemd units.
 - `deploy/install-remote.sh` installs a prepared release with backup and rollback
   checks for all three binaries, databases, and units.
-- `deploy/Caddyfile.example` contains an HTTPS prefix-based reverse proxy. Set
-  `ROBINHOOD_SITE_ADDRESS` and a Caddy-compatible bcrypt
-  `RADAR_BASIC_AUTH_HASH` before using it. The dashboard and management APIs are
-  protected by HTTP Basic authentication. The exact Solana webhook route is
-  exempt from browser authentication and remains protected by the independent
-  `SOLANA_HELIUS_AUTH_HEADER` secret.
+- `deploy/Caddyfile.example` contains the prefix-based reverse proxy used by the
+  existing radar URL. Set `ROBINHOOD_SITE_ADDRESS` to the public site address.
+  It does not add a browser login; the exact Solana webhook route remains
+  protected by the independent `SOLANA_HELIUS_AUTH_HEADER` secret.
 - If a complete `Caddyfile` is included in the deployment staging directory,
   `deploy/install-remote.sh` backs up, validates, installs, reloads, publicly
   verifies, and rolls it back with the rest of the release. External `.LEGAL.txt`

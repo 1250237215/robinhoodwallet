@@ -1,4 +1,4 @@
-{$ROBINHOOD_SITE_ADDRESS:https://radar.example.com} {
+{$ROBINHOOD_SITE_ADDRESS:http://localhost} {
 	encode zstd gzip
 	header Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
 	header {
@@ -14,14 +14,6 @@
 			header_up X-Forwarded-Proto {scheme}
 			header_up Host {host}
 		}
-	}
-
-	@radarProtected {
-		path /robinhood-radar /robinhood-radar/*
-		not path /robinhood-radar/api/solana/monitor/webhook
-	}
-	basicauth @radarProtected {
-		radar {$RADAR_BASIC_AUTH_HASH}
 	}
 
 	redir /robinhood-radar /robinhood-radar/ 308
