@@ -15,7 +15,7 @@ export function createSocialConfig(env = process.env, { fallbackDirectory = null
     dataFile,
     bridgeToken: String(env.SOCIAL_BRIDGE_TOKEN || '').trim(),
     retentionDays: boundedInteger(env.SOCIAL_RETENTION_DAYS, 7, 1, 90),
-    bridgeOfflineMs: boundedInteger(env.SOCIAL_BRIDGE_OFFLINE_MS, 15_000, 3_000, 300_000),
+    bridgeOfflineMs: boundedInteger(env.SOCIAL_BRIDGE_OFFLINE_MS, 90_000, 3_000, 300_000),
     cleanupIntervalMs: boundedInteger(
       env.SOCIAL_CLEANUP_INTERVAL_MS,
       60 * 60 * 1_000,

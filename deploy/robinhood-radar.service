@@ -15,7 +15,7 @@ Environment=ROBINHOOD_PUBLIC_DIR=/opt/robinhood-radar/public
 Environment=ROBINHOOD_DATA_FILE=/var/lib/robinhood-radar/robinhood.sqlite
 Environment=SOCIAL_DATA_FILE=/var/lib/robinhood-radar/social.sqlite
 Environment=SOCIAL_RETENTION_DAYS=7
-Environment=SOCIAL_BRIDGE_OFFLINE_MS=15000
+Environment=SOCIAL_BRIDGE_OFFLINE_MS=90000
 Environment=SOCIAL_COMMAND_LEASE_MS=30000
 Environment=ROBINHOOD_MIN_ENTRY_USD=500
 Environment=ROBINHOOD_SIGNIFICANT_PROFIT_RATE=0.002

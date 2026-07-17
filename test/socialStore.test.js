@@ -26,6 +26,7 @@ function fixture(t, initialNow = Date.parse('2026-07-17T12:00:00Z')) {
 }
 
 test('social config uses an independent database and bounded bridge settings', () => {
+  assert.equal(createSocialConfig({}).bridgeOfflineMs, 90_000);
   const config = createSocialConfig({
     SOCIAL_DATA_FILE: '/tmp/independent-social.sqlite',
     SOCIAL_BRIDGE_TOKEN: ' device-secret ',

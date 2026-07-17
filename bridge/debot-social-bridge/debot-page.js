@@ -2,9 +2,18 @@
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
   const DEFAULT_TYPES = 'tweet|retweet|quote|reName|reImage|reDescription|delTweet|follow|unfollow|reply';
+  const API_TIMEOUT_MS = 12_000;
+  const DELIVERY_TIMEOUT_MS = 20_000;
+  const DELIVERY_RETRY_BASE_MS = 2_000;
+  const DELIVERY_RETRY_MAX_MS = 30_000;
+  const ERROR_TYPES = new Set(['AUTH', 'TIMEOUT', 'NETWORK', 'DEBOT']);
   const seen = new Map();
+  const pendingPosts = new Map();
+  const pendingDeliveries = new Map();
   let lastWatchlistAt = 0;
-  let requestBusy = false;
+  let pollInFlight = null;
+  let deliverySequence = 0;
+  let commandQueue = Promise.resolve();
   let cachedAccounts = [];
 
   function emit(type, payload) {
@@ -90,30 +99,208 @@
     };
   }
 
-  function dedupe(posts) {
+  function postIdentity(post) {
+    return `${post.source}:${post.externalId}`;
+  }
+
+  function postFingerprint(post) {
+    return JSON.stringify([post.sourceUpdatedAt, post.deleted, post.content, post.translatedContent, post.feedSources]);
+  }
+
+  function clearDeliveryTimers(delivery) {
+    if (typeof clearTimeout !== 'function') return;
+    if (delivery.timeoutId !== null) clearTimeout(delivery.timeoutId);
+    if (delivery.retryTimerId !== null) clearTimeout(delivery.retryTimerId);
+  }
+
+  function detachPendingPost(key, pending) {
+    if (pendingPosts.get(key)?.deliveryId !== pending.deliveryId) return;
+    pendingPosts.delete(key);
+    const delivery = pendingDeliveries.get(pending.deliveryId);
+    if (!delivery) return;
+    delivery.items = delivery.items.filter((item) => item.key !== key);
+    if (delivery.items.length) return;
+    clearDeliveryTimers(delivery);
+    pendingDeliveries.delete(pending.deliveryId);
+  }
+
+  function acknowledgeDelivery(deliveryId) {
+    const delivery = pendingDeliveries.get(deliveryId);
+    if (!delivery) return;
+    clearDeliveryTimers(delivery);
     const now = Date.now();
-    const fresh = [];
+    for (const item of delivery.items) {
+      const pending = pendingPosts.get(item.key);
+      if (pending?.deliveryId !== deliveryId) continue;
+      pendingPosts.delete(item.key);
+      seen.set(item.key, {
+        fingerprint: item.fingerprint,
+        feedSources: item.feedSources,
+        post: item.post,
+        sourceUpdatedAt: item.post.sourceUpdatedAt,
+        at: now
+      });
+    }
+    pendingDeliveries.delete(deliveryId);
+  }
+
+  function retryDelivery(deliveryId) {
+    const delivery = pendingDeliveries.get(deliveryId);
+    if (!delivery || delivery.retryTimerId !== null) return;
+    if (delivery.timeoutId !== null && typeof clearTimeout === 'function') clearTimeout(delivery.timeoutId);
+    delivery.timeoutId = null;
+
+    const release = () => {
+      const current = pendingDeliveries.get(deliveryId);
+      if (current !== delivery) return;
+      const posts = [];
+      for (const item of delivery.items) {
+        const pending = pendingPosts.get(item.key);
+        if (pending?.deliveryId !== deliveryId) continue;
+        pendingPosts.delete(item.key);
+        const acknowledged = seen.get(item.key);
+        const acknowledgedAt = Number(acknowledged?.sourceUpdatedAt || 0);
+        const itemUpdatedAt = Number(item.post.sourceUpdatedAt || item.post.publishedAt || 0);
+        if (acknowledged?.fingerprint === item.fingerprint) continue;
+        if (acknowledged && acknowledgedAt >= itemUpdatedAt) continue;
+        posts.push(item.post);
+      }
+      pendingDeliveries.delete(deliveryId);
+      if (posts.length) deliverPosts(posts, delivery.attempt + 1);
+    };
+
+    if (typeof setTimeout !== 'function') {
+      for (const item of delivery.items) {
+        if (pendingPosts.get(item.key)?.deliveryId === deliveryId) pendingPosts.delete(item.key);
+      }
+      pendingDeliveries.delete(deliveryId);
+      return;
+    }
+    const delay = Math.min(
+      DELIVERY_RETRY_BASE_MS * (2 ** Math.min(delivery.attempt, 4)),
+      DELIVERY_RETRY_MAX_MS
+    );
+    delivery.retryTimerId = setTimeout(release, delay);
+  }
+
+  function deliverPosts(posts, attempt = 0) {
+    const now = Date.now();
+    const candidates = new Map();
     for (const post of posts) {
       if (!post) continue;
-      const key = `${post.source}:${post.externalId}`;
-      const fingerprint = JSON.stringify([post.sourceUpdatedAt, post.deleted, post.content, post.translatedContent, post.feedSources]);
-      if (seen.get(key)?.fingerprint === fingerprint) continue;
-      seen.set(key, { fingerprint, at: now });
-      fresh.push(post);
+      const key = postIdentity(post);
+      const previous = candidates.get(key);
+      const previousUpdatedAt = Number(previous?.sourceUpdatedAt || previous?.publishedAt || 0);
+      const nextUpdatedAt = Number(post.sourceUpdatedAt || post.publishedAt || 0);
+      const newest = !previous || nextUpdatedAt >= previousUpdatedAt ? post : previous;
+      candidates.set(key, {
+        ...newest,
+        feedSources: Array.from(new Set([
+          ...(previous?.feedSources || []),
+          ...(post.feedSources || [])
+        ])).sort()
+      });
+    }
+
+    const fresh = [];
+    for (const [key, candidate] of candidates) {
+      const acknowledged = seen.get(key);
+      const pending = pendingPosts.get(key);
+      const pendingUpdatedAt = Number(pending?.post?.sourceUpdatedAt || pending?.post?.publishedAt || 0);
+      const candidateUpdatedAt = Number(candidate.sourceUpdatedAt || candidate.publishedAt || 0);
+      const acknowledgedUpdatedAt = Number(acknowledged?.post?.sourceUpdatedAt || acknowledged?.post?.publishedAt || 0);
+      let newest = candidate;
+      if (pending?.post && pendingUpdatedAt >= candidateUpdatedAt) newest = pending.post;
+      else if (acknowledged?.post && acknowledgedUpdatedAt > candidateUpdatedAt) newest = acknowledged.post;
+      const post = {
+        ...newest,
+        feedSources: Array.from(new Set([
+          ...(acknowledged?.feedSources || []),
+          ...(pending?.feedSources || []),
+          ...(candidate.feedSources || [])
+        ])).sort()
+      };
+      const fingerprint = postFingerprint(post);
+      if (acknowledged?.fingerprint === fingerprint) continue;
+      if (pending?.fingerprint === fingerprint && now - pending.at < DELIVERY_TIMEOUT_MS) continue;
+      if (pending) detachPendingPost(key, pending);
+      fresh.push({ post, key, fingerprint });
     }
     for (const [key, value] of seen) if (now - value.at > 24 * 60 * 60 * 1_000) seen.delete(key);
-    return fresh;
+    for (const [deliveryId, delivery] of pendingDeliveries) {
+      if (delivery.timeoutId === null && delivery.retryTimerId === null && now - delivery.at >= DELIVERY_TIMEOUT_MS) {
+        retryDelivery(deliveryId);
+      }
+    }
+    if (!fresh.length) return 0;
+
+    deliverySequence += 1;
+    const deliveryId = `${now.toString(36)}-${deliverySequence.toString(36)}`;
+    const items = fresh.map(({ post, key, fingerprint }) => ({ post, key, fingerprint, feedSources: post.feedSources }));
+    for (const item of items) {
+      pendingPosts.set(item.key, { ...item, deliveryId, at: now });
+    }
+    const timeoutId = typeof setTimeout === 'function'
+      ? setTimeout(() => retryDelivery(deliveryId), DELIVERY_TIMEOUT_MS)
+      : null;
+    pendingDeliveries.set(deliveryId, { items, at: now, timeoutId, retryTimerId: null, attempt });
+    emit('posts', { posts: fresh.map(({ post }) => post), deliveryId });
+    return fresh.length;
+  }
+
+  class DeBotRequestError extends Error {
+    constructor(errorType) {
+      super(errorType);
+      this.name = 'DeBotRequestError';
+      this.errorType = errorType;
+    }
+  }
+
+  function coarseErrorType(error) {
+    if (ERROR_TYPES.has(error?.errorType)) return error.errorType;
+    if (error?.name === 'AbortError') return 'TIMEOUT';
+    if (error?.name === 'TypeError') return 'NETWORK';
+    return 'DEBOT';
+  }
+
+  function isAuthFailure(response, body) {
+    if ([401, 403, 419, 440].includes(Number(response?.status))) return true;
+    if ([401, 403, 419, 440, -401, -403, -419, -440].includes(Number(body?.code))) return true;
+    const hint = [body?.description, body?.message_en, body?.message, body?.message_cn]
+      .filter((value) => typeof value === 'string')
+      .join(' ');
+    return /(?:unauthori[sz]ed|not[ -]?logged[ -]?in|sign[ -]?in[ -]?required|log[ -]?in.{0,20}(?:required|expired|invalid)|(?:required|expired|invalid).{0,20}log[ -]?in|token.{0,20}(?:expired|invalid)|(?:expired|invalid).{0,20}token|\u672a\u767b\u5f55|\u8bf7\u767b\u5f55|\u767b\u5f55(?:\u8fc7\u671f|\u8d85\u65f6|\u5931\u6548|\u5df2\u5931\u6548))/i.test(hint);
   }
 
   async function api(path, options = {}) {
-    const response = await fetch(`/api/${String(path).replace(/^\/+/, '')}`, {
-      credentials: 'include',
-      headers: { accept: 'application/json', ...(options.body ? { 'content-type': 'application/json' } : {}) },
-      ...options
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok || (body.code !== undefined && body.code !== 0)) {
-      throw new Error(body.description || body.message_en || body.message || `DeBot HTTP ${response.status}`);
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const timeoutId = controller && typeof setTimeout === 'function'
+      ? setTimeout(() => controller.abort(), API_TIMEOUT_MS)
+      : null;
+    let response;
+    let body;
+    try {
+      response = await fetch(`/api/${String(path).replace(/^\/+/, '')}`, {
+        credentials: 'include',
+        headers: { accept: 'application/json', ...(options.body ? { 'content-type': 'application/json' } : {}) },
+        ...options,
+        ...(controller ? { signal: controller.signal } : {})
+      });
+      try {
+        body = await response.json();
+      } catch (error) {
+        if (controller?.signal.aborted || error?.name === 'AbortError') throw new DeBotRequestError('TIMEOUT');
+        throw new DeBotRequestError(response.ok ? 'DEBOT' : ([401, 403, 419, 440].includes(Number(response.status)) ? 'AUTH' : 'DEBOT'));
+      }
+    } catch (error) {
+      if (ERROR_TYPES.has(error?.errorType)) throw error;
+      if (controller?.signal.aborted || error?.name === 'AbortError') throw new DeBotRequestError('TIMEOUT');
+      throw new DeBotRequestError('NETWORK');
+    } finally {
+      if (timeoutId !== null && typeof clearTimeout === 'function') clearTimeout(timeoutId);
+    }
+    if (!response.ok || (body?.code !== undefined && Number(body.code) !== 0)) {
+      throw new DeBotRequestError(isAuthFailure(response, body) ? 'AUTH' : 'DEBOT');
     }
     return body.data ?? body;
   }
@@ -157,59 +344,100 @@
     return feeds.map((item) => normalizePost(item, feedSource)).filter(Boolean);
   }
 
-  async function fallbackPoll() {
-    if (requestBusy) return;
-    requestBusy = true;
+  async function runPoll() {
+    const configIds = cachedAccounts.map((account) => account.remoteId).filter(Boolean);
+    const configKey = [...configIds].sort().join('|');
+    const refreshWatchlist = Date.now() - lastWatchlistAt > 30_000;
+    let followUp = false;
     try {
-      const accounts = Date.now() - lastWatchlistAt > 30_000 ? await fetchWatchlist() : null;
-      const current = accounts || cachedAccounts;
-      const configIds = current.map((account) => account.remoteId).filter(Boolean);
-      const batches = await Promise.all([
-        fetchTimeline('my', configIds),
-        fetchTimeline('featured'),
-        fetchTimeline('all', configIds)
+      const deliverTimeline = (promise) => promise.then((posts) => {
+        deliverPosts(posts);
+        return posts;
+      });
+      const results = await Promise.allSettled([
+        refreshWatchlist ? fetchWatchlist() : Promise.resolve(null),
+        deliverTimeline(fetchTimeline('my', configIds)),
+        deliverTimeline(fetchTimeline('featured')),
+        deliverTimeline(fetchTimeline('all', configIds))
       ]);
-      const posts = dedupe(batches.flat());
-      if (posts.length) emit('posts', { posts });
+      followUp = refreshWatchlist
+        && cachedAccounts.map((account) => account.remoteId).filter(Boolean).sort().join('|') !== configKey;
+      const errorTypes = results
+        .filter((result) => result.status === 'rejected')
+        .map((result) => coarseErrorType(result.reason));
+      if (errorTypes.length) {
+        const errorType = ['AUTH', 'TIMEOUT', 'NETWORK', 'DEBOT'].find((type) => errorTypes.includes(type)) || 'DEBOT';
+        throw new DeBotRequestError(errorType);
+      }
       emit('heartbeat', {
         bridgeId: 'debot-browser-extension',
         version: '1.0.0',
         sessionId: String(Date.now()),
         capabilities: ['posts', 'watchlist', 'commands', 'debot-session']
       });
+      return { ok: true, followUp };
     } catch (error) {
+      const errorType = coarseErrorType(error);
       emit('heartbeat', {
         bridgeId: 'debot-browser-extension',
         version: '1.0.0',
         capabilities: ['error'],
-        error: error instanceof Error ? error.message : String(error)
+        error: errorType
       });
-    } finally {
-      requestBusy = false;
+      return { ok: false, errorType, followUp };
     }
+  }
+
+  function fallbackPoll() {
+    if (pollInFlight) return pollInFlight;
+    let followUp = false;
+    const operation = runPoll().then((result) => {
+      followUp = result?.followUp === true;
+      return result;
+    }).finally(() => {
+      if (pollInFlight !== operation) return;
+      pollInFlight = null;
+      if (followUp) void fallbackPoll();
+    });
+    pollInFlight = operation;
+    return operation;
   }
 
   async function executeCommand(command) {
     const payload = command?.payload || {};
     const handle = String(payload.handle || payload.accountKey || '').replace(/^@/, '');
     const platform = payload.platform === 'binance' ? 1 : 0;
+    const platformName = platform === 1 ? 'binance' : 'twitter';
+    if (!handle.trim()) throw new Error('Watchlist handle is required');
     if (command.type === 'watchlist.add') {
+      const before = await fetchWatchlist();
+      const existing = before.find((item) => item.platform === platformName
+        && item.accountKey === handle.toLowerCase());
+      if (existing) return { remoteId: String(existing.remoteId || '') };
       const result = await api('social/subscribe/custom/add', {
         method: 'POST',
         body: JSON.stringify({ tweet_username: handle, platform })
       });
       const accounts = await fetchWatchlist();
-      const synced = accounts.find((item) => item.platform === payload.platform && item.accountKey === handle.toLowerCase());
+      const synced = accounts.find((item) => item.platform === platformName
+        && item.accountKey === handle.toLowerCase());
       return { remoteId: String(synced?.remoteId || result?.config_id || result?.id || '') };
     }
     if (command.type === 'watchlist.delete') {
       const accounts = await fetchWatchlist();
       const remoteIds = accounts
-        .filter((item) => item.platform === payload.platform && item.accountKey === handle.toLowerCase())
+        .filter((item) => item.platform === platformName && item.accountKey === handle.toLowerCase())
         .map((item) => Number(item.remoteId))
-        .filter((id) => Number.isFinite(id));
-      const explicitId = Number(payload.remoteId);
-      if (Number.isFinite(explicitId) && !remoteIds.includes(explicitId)) remoteIds.push(explicitId);
+        .filter((id) => Number.isSafeInteger(id) && id > 0);
+      const knownRemoteIds = new Set(accounts
+        .map((item) => Number(item.remoteId))
+        .filter((id) => Number.isSafeInteger(id) && id > 0));
+      const explicitText = String(payload.remoteId ?? '').trim();
+      const explicitId = explicitText ? Number(explicitText) : null;
+      if (Number.isSafeInteger(explicitId) && explicitId > 0
+        && knownRemoteIds.has(explicitId) && !remoteIds.includes(explicitId)) {
+        remoteIds.push(explicitId);
+      }
       if (remoteIds.length) {
         await api('social/subscribe/remove', {
           method: 'POST',
@@ -234,8 +462,7 @@
       const parsed = typeof envelope.Payload === 'string' ? JSON.parse(envelope.Payload) : envelope.Payload || envelope;
       const payload = parsed?.data || parsed;
       const post = normalizePost(payload, channel === 'social-user-twitter' ? 'my' : 'featured');
-      const posts = dedupe([post]);
-      if (posts.length) emit('posts', { posts });
+      deliverPosts([post]);
     } catch {
       // Fallback polling covers socket frames from an unknown protocol version.
     }
@@ -255,8 +482,29 @@
   window.addEventListener('message', (event) => {
     if (event.source !== window || event.origin !== window.location.origin) return;
     const message = event.data;
-    if (!message || message.source !== RELAY_SOURCE || message.type !== 'command') return;
-    void executeCommand(message.command).then((result) => {
+    if (!message || message.source !== RELAY_SOURCE) return;
+    if (message.type === 'force-poll') {
+      const requestId = typeof message.requestId === 'string' ? message.requestId : '';
+      if (!requestId.trim()) return;
+      void fallbackPoll().then((result) => {
+        emit('force-poll-result', {
+          requestId,
+          ok: result?.ok === true,
+          ...(result?.ok === true ? {} : { errorType: coarseErrorType(result) })
+        });
+      });
+      return;
+    }
+    if (message.type === 'posts-delivery-result') {
+      const deliveryId = String(message.payload?.deliveryId || '');
+      if (deliveryId && message.payload?.ok === true) acknowledgeDelivery(deliveryId);
+      else if (deliveryId) retryDelivery(deliveryId);
+      return;
+    }
+    if (message.type !== 'command') return;
+    const operation = commandQueue.then(() => executeCommand(message.command));
+    commandQueue = operation.catch(() => {});
+    void operation.then((result) => {
       emit('command-result', { commandId: message.command.id, success: true, remoteId: result.remoteId || '' });
     }).catch((error) => {
       emit('command-result', {

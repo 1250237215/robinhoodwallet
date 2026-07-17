@@ -90,6 +90,7 @@ test('Base and Solana systemd units bind independent ports and databases', () =>
 test('Robinhood owns the independent social store and loads its private bridge token from an environment file', () => {
   assert.match(robinhoodUnit, /Environment=SOCIAL_DATA_FILE=\/var\/lib\/robinhood-radar\/social\.sqlite/);
   assert.match(robinhoodUnit, /Environment=SOCIAL_RETENTION_DAYS=7/);
+  assert.match(robinhoodUnit, /Environment=SOCIAL_BRIDGE_OFFLINE_MS=90000/);
   assert.match(robinhoodUnit, /EnvironmentFile=-\/etc\/robinhood-radar\/social\.env/);
   assert.doesNotMatch(robinhoodUnit, /SOCIAL_BRIDGE_TOKEN=/);
 });

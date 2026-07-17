@@ -71,7 +71,7 @@ Configuration is supplied through environment variables. Common settings are:
 | `SOCIAL_DATA_FILE` | Next to the Robinhood database | Independent DeBot social cache and command queue |
 | `SOCIAL_BRIDGE_TOKEN` | Empty | Private browser-bridge device token; keep it in `/etc/robinhood-radar/social.env` |
 | `SOCIAL_RETENTION_DAYS` | `7` | Social post and completed-command retention |
-| `SOCIAL_BRIDGE_OFFLINE_MS` | `15000` | Time without a browser heartbeat before the bridge is shown offline |
+| `SOCIAL_BRIDGE_OFFLINE_MS` | `90000` | Time without a browser heartbeat before the bridge is shown offline; allows for Chrome background-tab timer throttling |
 
 See `src/robinhood/config.js` for all bounded settings and defaults.
 

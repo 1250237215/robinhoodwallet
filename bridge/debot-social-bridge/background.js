@@ -1,10 +1,28 @@
+import { createPostOutbox } from './post-outbox.js';
+
 const DEFAULT_SERVER_BASE = 'https://radar.217-116-171-250.sslip.io/robinhood-radar/api/social';
 const SOCIAL_API_PATH = '/robinhood-radar/api/social';
+const DEBOT_URL = 'https://debot.ai/';
+const DEBOT_URL_PATTERN = 'https://debot.ai/*';
+const RECOVERY_ALARM = 'debot-social-bridge-recovery';
+const RECOVERY_STATE_KEY = 'debotSocialBridgeRecoveryV1';
+const RECOVERY_PERIOD_MINUTES = 0.5;
+const RECOVERY_LOAD_GRACE_MS = 45_000;
+const RECOVERY_PROBE_TIMEOUT_MS = 25_000;
+const RECOVERY_RELOAD_BACKOFF_MS = [60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000];
+const SOCIAL_REQUEST_TIMEOUT_MS = 15_000;
 const ALLOWED_SERVER_ORIGINS = new Set([
-  'http://217.116.171.250',
   'https://radar.217-116-171-250.sslip.io'
 ]);
-let localConfig = {};
+const storageReady = Promise.all([
+  chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }),
+  chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' })
+]);
+const postOutbox = createPostOutbox({ storage: chrome.storage.local });
+let settingsWriteQueue = Promise.resolve();
+let postFlushInFlight = null;
+let postFlushRequested = false;
+let bridgeMaintenanceInFlight = null;
 
 function normalizeServerBase(value) {
   const url = new URL(String(value || DEFAULT_SERVER_BASE));
@@ -109,35 +127,63 @@ function redactSensitiveText(value) {
     .replace(/\b(sub_token|access_token|refresh_token|auth_token|session_token|authorization|cookie|password|secret)\b\s*[:=]\s*[^\s,;]+/gi, '$1=[redacted]');
 }
 
-try {
-  localConfig = (await import('./config.local.js')).default || {};
-} catch {
-  // config.local.js is intentionally absent from Git and optional at runtime.
-}
-
 async function settings() {
+  await storageReady;
   const saved = await chrome.storage.local.get(['serverBase', 'bridgeToken']);
   let serverBase;
   try {
-    serverBase = normalizeServerBase(saved.serverBase || localConfig.serverBase || DEFAULT_SERVER_BASE);
+    serverBase = normalizeServerBase(saved.serverBase || DEFAULT_SERVER_BASE);
   } catch {
     serverBase = DEFAULT_SERVER_BASE;
   }
   return {
     serverBase,
-    bridgeToken: String(saved.bridgeToken || localConfig.bridgeToken || '').trim()
+    bridgeToken: String(saved.bridgeToken || '').trim()
   };
 }
 
-async function saveSettings(next) {
-  const current = await settings();
-  const value = {
-    serverBase: normalizeServerBase(next.serverBase || current.serverBase || DEFAULT_SERVER_BASE),
-    bridgeToken: String(next.bridgeToken ?? current.bridgeToken ?? '').trim()
-  };
-  await chrome.storage.local.set(value);
-  await updateBadge(value.bridgeToken ? 'ON' : '?', value.bridgeToken ? '#16834b' : '#bd8121');
+function serializeSettingsWrite(operation) {
+  const result = settingsWriteQueue.then(operation, operation);
+  settingsWriteQueue = result.catch(() => {});
+  return result;
+}
+
+function publicSettings(value) {
   return { ...value, bridgeToken: value.bridgeToken ? 'configured' : '' };
+}
+
+function saveSettings(next) {
+  return serializeSettingsWrite(async () => {
+    const current = await settings();
+    const value = {
+      serverBase: normalizeServerBase(next.serverBase || current.serverBase || DEFAULT_SERVER_BASE),
+      bridgeToken: String(next.bridgeToken ?? current.bridgeToken ?? '').trim()
+    };
+    await chrome.storage.local.set(value);
+    await updateBadge(value.bridgeToken ? 'ON' : '?', value.bridgeToken ? '#16834b' : '#bd8121');
+    return publicSettings(value);
+  });
+}
+
+function migrateLocalSettings(next) {
+  return serializeSettingsWrite(async () => {
+    await storageReady;
+    const saved = await chrome.storage.local.get(['serverBase', 'bridgeToken']);
+    const existingToken = String(saved.bridgeToken || '').trim();
+    let serverBase;
+    try {
+      serverBase = normalizeServerBase(saved.serverBase || next.serverBase || DEFAULT_SERVER_BASE);
+    } catch {
+      serverBase = DEFAULT_SERVER_BASE;
+    }
+    if (existingToken) return publicSettings({ serverBase, bridgeToken: existingToken });
+    const bridgeToken = String(next.bridgeToken || '').trim();
+    if (!bridgeToken) throw new Error('Bridge token is required');
+    const value = { serverBase, bridgeToken };
+    await chrome.storage.local.set(value);
+    await updateBadge('ON', '#16834b');
+    return publicSettings(value);
+  });
 }
 
 async function updateBadge(text, color) {
@@ -153,25 +199,92 @@ async function socialRequest(path, { method = 'GET', body = null } = {}) {
   const config = await settings();
   if (!config.bridgeToken) throw new Error('Bridge token is not configured');
   const normalizedPath = String(path || '').startsWith('/') ? String(path) : `/${path}`;
-  const response = await fetch(`${config.serverBase}${normalizedPath}`, {
-    method,
-    headers: {
-      accept: 'application/json',
-      authorization: `Bearer ${config.bridgeToken}`,
-      ...(body === null ? {} : { 'content-type': 'application/json' })
-    },
-    ...(body === null ? {} : { body: JSON.stringify(body) })
-  });
-  const text = await response.text();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SOCIAL_REQUEST_TIMEOUT_MS);
+  let response;
+  let responseText;
+  try {
+    response = await fetch(`${config.serverBase}${normalizedPath}`, {
+      method,
+      signal: controller.signal,
+      headers: {
+        accept: 'application/json',
+        authorization: `Bearer ${config.bridgeToken}`,
+        ...(body === null ? {} : { 'content-type': 'application/json' })
+      },
+      ...(body === null ? {} : { body: JSON.stringify(body) })
+    });
+    responseText = await response.text();
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error('Radar social API timed out');
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
   let payload = {};
   try {
-    payload = text ? JSON.parse(text) : {};
+    payload = responseText ? JSON.parse(responseText) : {};
   } catch {
-    payload = { error: text || `HTTP ${response.status}` };
+    payload = { error: responseText || `HTTP ${response.status}` };
   }
   if (!response.ok) throw new Error(payload.error || payload.message || `HTTP ${response.status}`);
   await updateBadge('ON', '#16834b');
   return payload;
+}
+
+function flushPostOutbox() {
+  if (postFlushInFlight) return postFlushInFlight;
+  postFlushRequested = false;
+  postFlushInFlight = (async () => {
+    await storageReady;
+    let sent = 0;
+    for (let batchNumber = 0; batchNumber < 5; batchNumber += 1) {
+      const batch = await postOutbox.readBatch(200);
+      if (!batch.count) break;
+      const acknowledgement = await socialRequest('/bridge/posts', {
+        method: 'POST',
+        body: { posts: batch.records.map((record) => record.post) }
+      });
+      if (acknowledgement?.ok !== true) {
+        throw new Error('Radar social API did not acknowledge the post batch');
+      }
+      await postOutbox.acknowledge(batch.records.map((record) => record.key));
+      sent += batch.count;
+      if (!batch.remaining) break;
+    }
+    return { ok: true, sent, ...(await postOutbox.stats()) };
+  })().catch(async (error) => {
+    await updateBadge('!', '#b33a45');
+    return { ok: false, error: redactSensitiveText(error instanceof Error ? error.message : String(error)) };
+  }).finally(() => {
+    postFlushInFlight = null;
+    if (postFlushRequested) void flushPostOutbox();
+  });
+  return postFlushInFlight;
+}
+
+function requestPostFlush() {
+  if (postFlushInFlight) postFlushRequested = true;
+  return flushPostOutbox();
+}
+
+async function queuePosts(value) {
+  const posts = (Array.isArray(value) ? value : [])
+    .map(safePost)
+    .filter((post) => post.source && post.externalId)
+    .slice(0, 200)
+    .sort((left, right) => (left.sourceUpdatedAt || left.publishedAt) - (right.sourceUpdatedAt || right.publishedAt));
+  if (!posts.length) return { queued: 0, skipped: true };
+  await storageReady;
+  const result = await postOutbox.enqueue(posts);
+  void requestPostFlush();
+  return {
+    queued: result.queued,
+    added: result.added,
+    duplicates: result.duplicates,
+    overflow: result.overflow,
+    durable: result.overflow === 0
+  };
 }
 
 async function handleBridgePayload(message) {
@@ -179,11 +292,7 @@ async function handleBridgePayload(message) {
     return socialRequest('/bridge/heartbeat', { method: 'POST', body: safeHeartbeat(message.payload) });
   }
   if (message.type === 'posts') {
-    const posts = Array.isArray(message.payload?.posts)
-      ? message.payload.posts.map(safePost).filter((post) => post.externalId)
-      : [];
-    if (!posts.length) return { ok: true, skipped: true };
-    return socialRequest('/bridge/posts', { method: 'POST', body: { posts: posts.slice(0, 200) } });
+    return queuePosts(message.payload?.posts);
   }
   if (message.type === 'watchlist') {
     const accounts = Array.isArray(message.payload?.accounts)
@@ -195,6 +304,180 @@ async function handleBridgePayload(message) {
     });
   }
   throw new Error('Unsupported bridge payload');
+}
+
+function normalizedRecoveryState(value) {
+  const state = value && typeof value === 'object' ? value : {};
+  return {
+    managedTabId: Number.isSafeInteger(Number(state.managedTabId)) ? Number(state.managedTabId) : null,
+    createdAt: Math.max(0, number(state.createdAt)),
+    lastHealthyAt: Math.max(0, number(state.lastHealthyAt)),
+    lastProbeAt: Math.max(0, number(state.lastProbeAt)),
+    structuralFailures: Math.max(0, Math.trunc(number(state.structuralFailures))),
+    lastReloadAt: Math.max(0, number(state.lastReloadAt)),
+    reloadLevel: Math.max(0, Math.trunc(number(state.reloadLevel))),
+    lastErrorType: text(state.lastErrorType, 40)
+  };
+}
+
+async function loadRecoveryState() {
+  await storageReady;
+  const stored = await chrome.storage.session.get(RECOVERY_STATE_KEY);
+  return normalizedRecoveryState(stored?.[RECOVERY_STATE_KEY]);
+}
+
+async function saveRecoveryState(state) {
+  await storageReady;
+  await chrome.storage.session.set({ [RECOVERY_STATE_KEY]: normalizedRecoveryState(state) });
+}
+
+function ensureRecoveryAlarm() {
+  chrome.alarms.create(RECOVERY_ALARM, { periodInMinutes: RECOVERY_PERIOD_MINUTES });
+}
+
+function chooseManagedTab(tabs, managedTabId) {
+  return tabs.find((tab) => tab.id === managedTabId)
+    || tabs.find((tab) => tab.pinned && !tab.discarded)
+    || tabs.find((tab) => !tab.discarded)
+    || tabs[0]
+    || null;
+}
+
+async function findDeBotTabs() {
+  const tabs = await chrome.tabs.query({ url: DEBOT_URL_PATTERN });
+  return tabs.filter((tab) => Number.isSafeInteger(tab.id));
+}
+
+async function probeDeBotTab(tabId, requestId) {
+  let timeoutId;
+  try {
+    return await Promise.race([
+      chrome.tabs.sendMessage(tabId, {
+        source: 'debot-social-background',
+        type: 'force-poll',
+        requestId
+      }),
+      new Promise((resolve) => {
+        timeoutId = setTimeout(() => {
+          resolve({ ok: false, requestId, errorType: 'PAGE_TIMEOUT' });
+        }, RECOVERY_PROBE_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function createManagedDeBotTab(state, now) {
+  const existing = await findDeBotTabs();
+  if (existing.length) return chooseManagedTab(existing, state.managedTabId);
+  const created = await chrome.tabs.create({ url: DEBOT_URL, active: false, pinned: true });
+  if (!Number.isSafeInteger(created?.id)) throw new Error('Chrome did not return the DeBot tab id');
+  await chrome.tabs.update(created.id, { autoDiscardable: false }).catch(() => {});
+  await saveRecoveryState({
+    ...state,
+    managedTabId: created.id,
+    createdAt: now,
+    structuralFailures: 0,
+    lastProbeAt: now,
+    lastErrorType: ''
+  });
+  return created;
+}
+
+async function reloadManagedTab(tab, state, now, errorType) {
+  const reloadIndex = Math.min(state.reloadLevel, RECOVERY_RELOAD_BACKOFF_MS.length - 1);
+  const cooldown = RECOVERY_RELOAD_BACKOFF_MS[reloadIndex];
+  if (state.lastReloadAt && now - state.lastReloadAt < cooldown) {
+    await saveRecoveryState({ ...state, lastProbeAt: now, lastErrorType: errorType });
+    return { ok: false, action: 'reload-backoff', errorType };
+  }
+  await chrome.tabs.reload(tab.id);
+  await saveRecoveryState({
+    ...state,
+    managedTabId: tab.id,
+    createdAt: now,
+    lastProbeAt: now,
+    structuralFailures: 0,
+    lastReloadAt: now,
+    reloadLevel: Math.min(state.reloadLevel + 1, RECOVERY_RELOAD_BACKOFF_MS.length - 1),
+    lastErrorType: errorType
+  });
+  return { ok: false, action: 'reloaded', errorType };
+}
+
+async function maintainDeBotConnection() {
+  const config = await settings();
+  if (!config.bridgeToken) return { ok: false, action: 'unconfigured' };
+
+  const now = Date.now();
+  let state = await loadRecoveryState();
+  const tabs = await findDeBotTabs();
+  const tab = tabs.length ? chooseManagedTab(tabs, state.managedTabId) : await createManagedDeBotTab(state, now);
+  if (!tab) return { ok: false, action: 'missing-tab' };
+  if (!tabs.length) state = await loadRecoveryState();
+  await chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => {});
+
+  const requestId = `recovery-${now}-${Math.random().toString(36).slice(2, 10)}`;
+  let result;
+  try {
+    result = await probeDeBotTab(tab.id, requestId);
+  } catch {
+    result = { ok: false, errorType: 'NO_RECEIVER' };
+  }
+
+  if (result?.ok === true && result.requestId === requestId) {
+    await saveRecoveryState({
+      ...state,
+      managedTabId: tab.id,
+      createdAt: state.managedTabId === tab.id ? state.createdAt : 0,
+      lastHealthyAt: now,
+      lastProbeAt: now,
+      structuralFailures: 0,
+      reloadLevel: 0,
+      lastErrorType: ''
+    });
+    return { ok: true, action: 'healthy' };
+  }
+
+  const errorType = text(result?.errorType || 'PAGE_TIMEOUT', 40).toUpperCase();
+  if (['AUTH', 'TIMEOUT', 'NETWORK', 'DEBOT'].includes(errorType)) {
+    await saveRecoveryState({
+      ...state,
+      managedTabId: tab.id,
+      lastProbeAt: now,
+      structuralFailures: 0,
+      lastErrorType: errorType
+    });
+    return { ok: false, action: 'retry', errorType };
+  }
+
+  const structuralFailures = state.structuralFailures + 1;
+  const withinLoadGrace = state.createdAt > 0
+    && now - state.createdAt < RECOVERY_LOAD_GRACE_MS;
+  const nextState = {
+    ...state,
+    managedTabId: tab.id,
+    lastProbeAt: now,
+    structuralFailures,
+    lastErrorType: errorType
+  };
+  if (!tab.discarded && (withinLoadGrace || structuralFailures < 2)) {
+    await saveRecoveryState(nextState);
+    return { ok: false, action: withinLoadGrace ? 'loading-grace' : 'probe-failed', errorType };
+  }
+  return reloadManagedTab(tab, nextState, now, errorType);
+}
+
+function runBridgeMaintenance() {
+  if (bridgeMaintenanceInFlight) return bridgeMaintenanceInFlight;
+  bridgeMaintenanceInFlight = Promise.allSettled([
+    flushPostOutbox(),
+    maintainDeBotConnection()
+  ]).finally(() => {
+    bridgeMaintenanceInFlight = null;
+  });
+  return bridgeMaintenanceInFlight;
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -236,6 +519,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.source === 'bridge-options' && message.type === 'save-settings') {
       return saveSettings(message.payload || {});
     }
+    if (message.source === 'bridge-options' && message.type === 'migrate-local-settings') {
+      return migrateLocalSettings(message.payload || {});
+    }
     throw new Error('Unsupported bridge message');
   };
   void run().then((payload) => sendResponse({ ok: true, payload })).catch(async (error) => {
@@ -245,4 +531,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-void settings().then((value) => updateBadge(value.bridgeToken ? 'ON' : '?', value.bridgeToken ? '#16834b' : '#bd8121'));
+ensureRecoveryAlarm();
+chrome.runtime.onInstalled.addListener(() => {
+  ensureRecoveryAlarm();
+  void runBridgeMaintenance();
+});
+chrome.runtime.onStartup.addListener(() => {
+  ensureRecoveryAlarm();
+  void runBridgeMaintenance();
+});
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm?.name === RECOVERY_ALARM) void runBridgeMaintenance();
+});
+
+void settings().then(async (value) => {
+  await updateBadge(value.bridgeToken ? 'ON' : '?', value.bridgeToken ? '#16834b' : '#bd8121');
+  await runBridgeMaintenance();
+});

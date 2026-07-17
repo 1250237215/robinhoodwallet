@@ -3,7 +3,7 @@
   "name": "Robinhood Radar DeBot Bridge",
   "version": "1.0.0",
   "description": "Synchronizes the signed-in DeBot social monitor with Robinhood Radar.",
-  "permissions": ["storage"],
+  "permissions": ["storage", "alarms"],
   "host_permissions": [
     "https://debot.ai/*",
     "http://217.116.171.250/*",
