@@ -17,6 +17,7 @@ declare -A was_active=()
 declare -A unit_existed=()
 rollback_needed=0
 caddy_changed=0
+caddy_candidate=""
 
 [[ "$allow_solana_degraded" == "0" || "$allow_solana_degraded" == "1" ]] || {
   echo "ALLOW_SOLANA_DEGRADED must be 0 or 1." >&2
@@ -78,6 +79,7 @@ restore_optional_file() {
 rollback() {
   local exit_code=$?
   trap - EXIT
+  rm -f "${caddy_candidate:-}"
 
   if [[ $exit_code -ne 0 ]]; then
     echo "Deployment failed; restoring the previous three-chain release." >&2
@@ -106,6 +108,7 @@ rollback() {
         rm -rf "$app_dir/public"
         cp -a "$release_backup/public" "$app_dir/public"
       fi
+      restore_optional_file "$release_backup/REVISION" "$app_dir/REVISION"
 
       if [[ $caddy_changed -eq 1 ]]; then
         restore_optional_file "$release_backup/Caddyfile" "$caddy_config"
@@ -147,6 +150,7 @@ done
 install -d -m 0700 "$backup_root" "$release_backup"
 install -d -o robinhood-radar -g robinhood-radar -m 0750 "$data_dir"
 backup_optional_file "$caddy_config" "$release_backup/Caddyfile"
+backup_optional_file "$app_dir/REVISION" "$release_backup/REVISION"
 
 for service in "${services[@]}"; do
   if systemctl is-active --quiet "$service.service" 2>/dev/null; then
@@ -185,9 +189,12 @@ for chain in "${chains[@]}"; do
   backup_optional_file "$(bundle_path "$chain").LEGAL.txt" "$release_backup/$chain-server.mjs.LEGAL.txt"
   backup_optional_file "$(unit_path "$chain-radar")" "$release_backup/$chain-radar.service"
 done
-
 cp -a "$app_dir/public" "$release_backup/public"
 rollback_needed=1
+
+if [[ -f "$staging_dir/REVISION" ]]; then
+  install -m 0644 "$staging_dir/REVISION" "$app_dir/REVISION"
+fi
 
 for chain in "${chains[@]}"; do
   install -m 0644 "$staging_dir/$chain-server.mjs" "$(bundle_path "$chain")"
@@ -299,6 +306,7 @@ if [[ -f "$staging_dir/Caddyfile" ]]; then
   caddy validate --config "$caddy_candidate" --adapter caddyfile
   install -m 0644 "$caddy_candidate" "$caddy_config"
   rm -f "$caddy_candidate"
+  caddy_candidate=""
   caddy_changed=1
   caddy validate --config "$caddy_config" --adapter caddyfile
   systemctl reload caddy.service

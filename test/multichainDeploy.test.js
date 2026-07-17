@@ -81,5 +81,8 @@ test('remote installer backs up, checks, deploys, and validates all three databa
   assert.doesNotMatch(installer, /DROP TABLE IF EXISTS wallet_token_performance/);
   assert.doesNotMatch(installer, /DELETE FROM wallet_summaries/);
   assert.match(installer, /systemctl is-active --quiet "\$service\.service"/);
+  assert.match(installer, /backup_optional_file "\$app_dir\/REVISION"/);
+  assert.match(installer, /install -m 0644 "\$staging_dir\/REVISION" "\$app_dir\/REVISION"/);
+  assert.match(installer, /restore_optional_file "\$release_backup\/REVISION"/);
   assert.doesNotMatch(installer, /staging_dir\/robinhood-server\.mjs\.LEGAL\.txt" \\\n/);
 });
