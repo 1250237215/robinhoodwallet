@@ -89,7 +89,7 @@ function writeEvent(res, change) {
   res.write(`id: ${change.id}\nevent: ${change.type}\ndata: ${JSON.stringify(change)}\n\n`);
 }
 
-function openStream(req, res, service, after) {
+function openStream(req, res, service, after, onClose) {
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
     'cache-control': 'no-store',
@@ -113,21 +113,34 @@ function openStream(req, res, service, after) {
   }, 15_000);
   heartbeat.unref?.();
   let closed = false;
-  const close = () => {
+  const cleanup = () => {
     if (closed) return;
     closed = true;
     clearInterval(heartbeat);
     unsubscribe();
+    onClose();
   };
-  req.on('close', close);
-  res.on('close', close);
-  res.on('error', close);
+  const close = () => {
+    cleanup();
+    if (res.destroyed || res.writableEnded) return;
+    try {
+      // Ending a valid SSE response lets EventSource reconnect after the process restarts.
+      res.end('retry: 1000\n\n');
+    } catch {
+      res.destroy();
+    }
+  };
+  req.on('close', cleanup);
+  res.on('close', cleanup);
+  res.on('error', cleanup);
+  return close;
 }
 
 export function createSocialApiHandler({ service, bridgeToken = '' }) {
   if (!service) throw new TypeError('Social service is required');
   const token = String(bridgeToken || '').trim();
-  return async function handleSocialApi(req, res, url) {
+  const streams = new Set();
+  async function handleSocialApi(req, res, url) {
     if (url.pathname !== '/api/social' && !url.pathname.startsWith('/api/social/')) return false;
     try {
       if (url.pathname === '/api/social' || url.pathname === '/api/social/snapshot') {
@@ -230,7 +243,9 @@ export function createSocialApiHandler({ service, bridgeToken = '' }) {
         const after = url.searchParams.has('after')
           ? integerParam(url.searchParams, 'after', 0, 0, Number.MAX_SAFE_INTEGER)
           : Number.isSafeInteger(headerAfter) && headerAfter > 0 ? headerAfter : 0;
-        openStream(req, res, service, after);
+        let close = null;
+        close = openStream(req, res, service, after, () => streams.delete(close));
+        streams.add(close);
         return true;
       }
 
@@ -314,5 +329,9 @@ export function createSocialApiHandler({ service, bridgeToken = '' }) {
       });
       return true;
     }
+  }
+  handleSocialApi.closeStreams = () => {
+    for (const close of [...streams]) close();
   };
+  return handleSocialApi;
 }

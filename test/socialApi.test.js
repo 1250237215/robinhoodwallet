@@ -28,10 +28,11 @@ async function withSocialServer(t, { token = '' } = {}) {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => {
-    await new Promise((resolve) => server.close(resolve));
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+    socialService.close();
     fs.rmSync(directory, { recursive: true, force: true });
   });
-  return { baseUrl, socialService };
+  return { baseUrl, server, socialService };
 }
 
 function auth(token) {
@@ -195,4 +196,46 @@ test('social SSE sends an initial snapshot and live normalized changes', async (
   assert.match(received, /event: post\.created/);
   assert.match(received, /"externalId":"stream-1"/);
   controller.abort();
+});
+
+test('server shutdown drains active social SSE before closing its store', async (t) => {
+  const { baseUrl, server, socialService } = await withSocialServer(t, {
+    token: 'shutdown-device-token'
+  });
+  const closeStore = socialService.store.close.bind(socialService.store);
+  let storeCloseCalls = 0;
+  socialService.store.close = () => {
+    storeCloseCalls += 1;
+    closeStore();
+  };
+
+  const response = await fetch(`${baseUrl}/api/social/stream`);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const first = await reader.read();
+  assert.match(decoder.decode(first.value, { stream: true }), /event: snapshot/);
+
+  let timeout;
+  await Promise.race([
+    new Promise((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    }),
+    new Promise((_, reject) => {
+      timeout = setTimeout(() => reject(new Error('server.close timed out with an active social SSE client')), 1_000);
+      timeout.unref?.();
+    })
+  ]).finally(() => clearTimeout(timeout));
+
+  let remainder = '';
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    remainder += decoder.decode(chunk.value, { stream: true });
+  }
+  remainder += decoder.decode();
+  assert.match(remainder, /retry: 1000/);
+  assert.equal(server.listening, false);
+  server.closeSocialStreams();
+  socialService.close();
+  assert.equal(storeCloseCalls, 1);
 });

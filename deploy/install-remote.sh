@@ -13,8 +13,6 @@ readonly allow_solana_degraded="${ALLOW_SOLANA_DEGRADED:-0}"
 readonly services=("robinhood-radar" "base-radar" "solana-radar")
 readonly chains=("robinhood" "base" "solana")
 
-declare -A was_active=()
-declare -A unit_existed=()
 rollback_needed=0
 caddy_changed=0
 caddy_candidate=""
@@ -64,6 +62,72 @@ quick_check_database() {
   }
 }
 
+checkpoint_database() {
+  local database="$1"
+  node --input-type=module -e '
+    import { DatabaseSync } from "node:sqlite";
+    const db = new DatabaseSync(process.argv[1]);
+    try {
+      db.exec("PRAGMA busy_timeout = 10000");
+      const checkpoint = db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+      if (Number(checkpoint?.busy) !== 0) {
+        throw new Error(`WAL checkpoint remained busy: ${JSON.stringify(checkpoint)}`);
+      }
+    } finally {
+      db.close();
+    }
+  ' "$database"
+}
+
+backup_database_file() {
+  local database="$1"
+  local backup="$2"
+  local temporary_backup="$backup.tmp.$$"
+
+  rm -f "$backup" "$backup.missing" "$temporary_backup"
+  if [[ ! -f "$database" ]]; then
+    touch "$backup.missing"
+    return
+  fi
+
+  checkpoint_database "$database"
+  cp -p "$database" "$temporary_backup"
+  chmod 0600 "$temporary_backup"
+  if ! quick_check_database "$temporary_backup"; then
+    rm -f "$temporary_backup"
+    return 1
+  fi
+  mv "$temporary_backup" "$backup"
+}
+
+remove_database_sidecars() {
+  local database="$1"
+  rm -f "$database-wal" "$database-shm"
+}
+
+restore_database_file() {
+  local backup="$1"
+  local database="$2"
+  local owner="${3:-}"
+  local group="${4:-}"
+
+  if [[ -f "$backup.missing" ]]; then
+    remove_database_sidecars "$database"
+    rm -f "$database"
+  elif [[ -f "$backup" ]]; then
+    remove_database_sidecars "$database"
+    if [[ -n "$owner" || -n "$group" ]]; then
+      [[ -n "$owner" && -n "$group" ]] || {
+        echo "Database restore owner and group must be provided together." >&2
+        return 1
+      }
+      install -o "$owner" -g "$group" -m 0640 "$backup" "$database"
+    else
+      install -m 0640 "$backup" "$database"
+    fi
+  fi
+}
+
 backup_optional_file() {
   local source="$1"
   local destination="$2"
@@ -105,22 +169,14 @@ rollback() {
         local backup
         database="$(database_path "$chain")"
         backup="$(database_backup_path "$chain")"
-        if [[ -f "$backup.missing" ]]; then
-          rm -f "$database"
-        elif [[ -f "$backup" ]]; then
-          install -o robinhood-radar -g robinhood-radar -m 0640 "$backup" "$database"
-        fi
+        restore_database_file "$backup" "$database" robinhood-radar robinhood-radar
       done
 
       local social_database
       local social_backup
       social_database="$(social_database_path)"
       social_backup="$(social_database_backup_path)"
-      if [[ -f "$social_backup.missing" ]]; then
-        rm -f "$social_database"
-      elif [[ -f "$social_backup" ]]; then
-        install -o robinhood-radar -g robinhood-radar -m 0640 "$social_backup" "$social_database"
-      fi
+      restore_database_file "$social_backup" "$social_database" robinhood-radar robinhood-radar
 
       if [[ -d "$release_backup/public" ]]; then
         rm -rf "$app_dir/public"
@@ -151,6 +207,13 @@ rollback() {
 
   exit "$exit_code"
 }
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
+declare -A was_active=()
+declare -A unit_existed=()
 
 trap rollback EXIT
 
@@ -195,13 +258,7 @@ done
 for chain in "${chains[@]}"; do
   database="$(database_path "$chain")"
   database_backup="$(database_backup_path "$chain")"
-  if [[ -f "$database" ]]; then
-    cp --preserve=mode,ownership,timestamps "$database" "$database_backup"
-    chmod 0600 "$database_backup"
-    quick_check_database "$database_backup"
-  else
-    touch "$database_backup.missing"
-  fi
+  backup_database_file "$database" "$database_backup"
 
   backup_optional_file "$(bundle_path "$chain")" "$release_backup/$chain-server.mjs"
   backup_optional_file "$(bundle_path "$chain").LEGAL.txt" "$release_backup/$chain-server.mjs.LEGAL.txt"
@@ -210,13 +267,7 @@ done
 
 social_database="$(social_database_path)"
 social_database_backup="$(social_database_backup_path)"
-if [[ -f "$social_database" ]]; then
-  cp --preserve=mode,ownership,timestamps "$social_database" "$social_database_backup"
-  chmod 0600 "$social_database_backup"
-  quick_check_database "$social_database_backup"
-else
-  touch "$social_database_backup.missing"
-fi
+backup_database_file "$social_database" "$social_database_backup"
 cp -a "$app_dir/public" "$release_backup/public"
 rollback_needed=1
 

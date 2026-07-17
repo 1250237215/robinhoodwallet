@@ -430,7 +430,9 @@ test('standalone startup wires holder scans separately from DexScreener-first mo
       HOST: '127.0.0.1',
       PORT: '0',
       ROBINHOOD_DATA_FILE: path.join(directory, 'radar.sqlite'),
-      ROBINHOOD_PUBLIC_DIR: path.resolve('public')
+      ROBINHOOD_PUBLIC_DIR: path.resolve('public'),
+      ROBINHOOD_MARKET_DEBOT_FALLBACK_CONCURRENCY: '4',
+      ROBINHOOD_MARKET_DEBOT_FALLBACK_BATCH_BUDGET_MS: '6500'
     },
     {
       monitorRpcClient: {
@@ -452,6 +454,8 @@ test('standalone startup wires holder scans separately from DexScreener-first mo
     assert.equal(running.monitor.debotClient, running.marketDataClient);
     assert.equal(running.marketDataClient.primary, running.dexScreenerClient);
     assert.equal(running.marketDataClient.fallback, running.service.debotClient);
+    assert.equal(running.marketDataClient.fallbackConcurrency, 4);
+    assert.equal(running.marketDataClient.fallbackBatchBudgetMs, 6_500);
     assert.equal(running.monitor.marketDataBatchSize, 30);
     assert.equal(running.monitor.marketDataCacheSeconds, 60);
     assert.equal(running.service.holderClient instanceof RobinhoodHolderClient, true);

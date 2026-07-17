@@ -43,6 +43,8 @@ test('uses verified Robinhood mainnet addresses and bounded scan settings', () =
   assert.equal(config.autoScanLimit, 20);
   assert.equal(config.marketRequestTimeoutMs, 5_000);
   assert.equal(config.marketDebotFallbackTimeoutMs, 3_000);
+  assert.equal(config.marketDebotFallbackConcurrency, 2);
+  assert.equal(config.marketDebotFallbackBatchBudgetMs, 5_000);
   assert.equal(config.monitorMarketDataCacheSeconds, 60);
   assert.equal(config.monitorMarketDataBatchSize, 30);
   assert.equal(config.rpcMaxRetries, 6);

@@ -1,5 +1,19 @@
-function announceReady() {
-  window.postMessage({ source: 'robinhood-social-bridge', type: 'ready' }, window.location.origin);
+async function announceReady() {
+  let configured = false;
+  try {
+    const result = await chrome.runtime.sendMessage({
+      source: 'robinhood-radar-content',
+      type: 'status'
+    });
+    configured = result?.ok === true && result?.payload?.configured === true;
+  } catch {
+    // The Radar page can still use its browser-local pairing token.
+  }
+  window.postMessage({
+    source: 'robinhood-social-bridge',
+    type: 'ready',
+    configured
+  }, window.location.origin);
 }
 
 window.addEventListener('message', (event) => {
@@ -30,6 +44,6 @@ window.addEventListener('message', (event) => {
   });
 });
 
-announceReady();
-window.addEventListener('DOMContentLoaded', announceReady, { once: true });
-setTimeout(announceReady, 1_000);
+void announceReady();
+window.addEventListener('DOMContentLoaded', () => void announceReady(), { once: true });
+setTimeout(() => void announceReady(), 1_000);

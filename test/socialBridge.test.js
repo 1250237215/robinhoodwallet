@@ -235,6 +235,48 @@ test('relay transports only supported page events and delivers claimed commands 
   assert.equal(runtimeMessages.length, before);
 });
 
+test('Radar content bridge announces readiness only when the extension has a configured token', async () => {
+  const window = new FakeWindow('http://217.116.171.250');
+  const runtimeMessages = [];
+  let configured = false;
+  const chrome = {
+    runtime: {
+      async sendMessage(message) {
+        runtimeMessages.push(message);
+        if (message.type === 'status') {
+          return { ok: true, payload: { configured } };
+        }
+        return { ok: true, payload: { accepted: true } };
+      }
+    }
+  };
+  vm.runInNewContext(bridgeSource('radar-content.js'), {
+    window,
+    chrome,
+    setTimeout: () => 1
+  }, { filename: 'radar-content.js' });
+
+  await eventually(() => assert.ok(window.messages.some((message) =>
+    message.source === 'robinhood-social-bridge' && message.type === 'ready')));
+  assert.equal(window.messages.find((message) => message.type === 'ready').configured, false);
+
+  configured = true;
+  window.messages.length = 0;
+  for (const listener of window.listeners.get('DOMContentLoaded') || []) listener();
+  await eventually(() => assert.equal(window.messages.find((message) => message.type === 'ready')?.configured, true));
+
+  window.dispatchMessage({
+    source: 'robinhood-radar',
+    type: 'social-command',
+    requestId: 'request-1',
+    command: { method: 'POST', path: '/watchlist/batch', body: { accounts: [] } }
+  });
+  await eventually(() => assert.ok(window.messages.some((message) =>
+    message.source === 'robinhood-social-bridge' && message.type === 'response')));
+  assert.ok(runtimeMessages.some((message) => message.type === 'status'));
+  assert.ok(runtimeMessages.some((message) => message.type === 'api'));
+});
+
 test('background uses the bridge secret only as authorization and submits allowlisted social data', async (t) => {
   const saved = {
     serverBase: 'https://radar.217-116-171-250.sslip.io/robinhood-radar/api/social',
@@ -294,6 +336,11 @@ test('background uses the bridge secret only as authorization and submits allowl
   assert.equal(settings.ok, true);
   assert.equal(settings.payload.bridgeToken, 'configured');
   assert.equal(JSON.stringify(settings).includes(saved.bridgeToken), false);
+
+  const contentStatus = await send({ source: 'robinhood-radar-content', type: 'status' });
+  assert.equal(contentStatus.ok, true);
+  assert.deepEqual(contentStatus.payload, { configured: true });
+  assert.equal(JSON.stringify(contentStatus).includes(saved.bridgeToken), false);
 
   const invalidServer = await send({
     source: 'bridge-options',

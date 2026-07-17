@@ -689,6 +689,13 @@ export function createRobinhoodStandaloneServer({
       });
     }
   });
+  const closeSocialStreams = () => socialApiHandler?.closeStreams?.();
+  const closeServer = server.close.bind(server);
+  server.closeSocialStreams = closeSocialStreams;
+  server.close = (...args) => {
+    closeSocialStreams();
+    return closeServer(...args);
+  };
   if (monitor?.close) server.once('close', () => monitor.close());
   if (socialService?.close) server.once('close', () => socialService.close());
   return server;
@@ -719,7 +726,9 @@ export async function startRobinhoodStandaloneServer(
   const activeMarketDataClient = marketDataClient || new RobinhoodMarketDataClient({
     primary: activeDexScreenerClient,
     fallback: activeDebotClient,
-    fallbackTimeoutMs: config.marketDebotFallbackTimeoutMs
+    fallbackTimeoutMs: config.marketDebotFallbackTimeoutMs,
+    fallbackConcurrency: config.marketDebotFallbackConcurrency,
+    fallbackBatchBudgetMs: config.marketDebotFallbackBatchBudgetMs
   });
   const rpcClient = monitorRpcClient || new RobinhoodRpcClient({
     rpcUrl: config.rpcUrl,

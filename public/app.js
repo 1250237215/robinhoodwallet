@@ -1251,7 +1251,7 @@ function applySocialSnapshot(payload) {
   if (record.bridge && typeof record.bridge === 'object') state.socialBridge = { ...state.socialBridge, ...record.bridge };
   if (record.counts && typeof record.counts === 'object') state.socialCounts = { ...record.counts };
   const latestChangeId = finiteNumber(record.latestChangeId);
-  if (latestChangeId !== null) state.socialLatestChangeId = Math.max(state.socialLatestChangeId, latestChangeId);
+  if (latestChangeId !== null) state.socialLatestChangeId = Math.max(0, Math.trunc(latestChangeId));
   state.socialConnected = record.ok !== false;
   renderSocialMonitor();
 }
@@ -5053,7 +5053,7 @@ window.addEventListener('message', (event) => {
   const message = event.data;
   if (!message || message.source !== 'robinhood-social-bridge') return;
   if (message.type === 'ready') {
-    state.socialExtensionReady = true;
+    state.socialExtensionReady = message.configured === true;
     renderSocialBridgeStatus();
     return;
   }

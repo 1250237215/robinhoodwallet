@@ -1070,6 +1070,8 @@ test('social snapshot and SSE lifecycle stay pinned to the Robinhood host servic
   assert.match(appJs, /clearInterval\(state\.socialStatusTimer\)/);
   assert.match(appJs, /void startSocialMonitor\(\{ manual \}\)/);
   assert.match(appJs, /function stopMonitorTransport\(\)[\s\S]*stopSocialMonitor\(\)/);
+  assert.match(appJs, /state\.socialLatestChangeId = Math\.max\(0, Math\.trunc\(latestChangeId\)\)/);
+  assert.match(appJs, /state\.socialExtensionReady = message\.configured === true/);
   assert.match(appJs, /if \(state\.socialExtensionReady\) return requestSocialExtension/);
   assert.match(appJs, /authorization: `Bearer \$\{token\}`/);
 });

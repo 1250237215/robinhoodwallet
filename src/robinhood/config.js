@@ -109,6 +109,18 @@ export function createRobinhoodConfig(env = process.env) {
       250,
       20_000
     ),
+    marketDebotFallbackConcurrency: Math.floor(boundedNumber(
+      env.ROBINHOOD_MARKET_DEBOT_FALLBACK_CONCURRENCY,
+      2,
+      1,
+      6
+    )),
+    marketDebotFallbackBatchBudgetMs: boundedNumber(
+      env.ROBINHOOD_MARKET_DEBOT_FALLBACK_BATCH_BUDGET_MS,
+      5_000,
+      250,
+      30_000
+    ),
     monitorMarketDataCacheSeconds: Math.floor(boundedNumber(
       env.ROBINHOOD_MONITOR_MARKET_DATA_CACHE_SECONDS,
       60,

@@ -3,6 +3,8 @@ const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 export const ROBINHOOD_DEXSCREENER_BATCH_SIZE = 30;
 export const ROBINHOOD_DEXSCREENER_TOKENS_URL =
   'https://api.dexscreener.com/tokens/v1/robinhood';
+export const ROBINHOOD_DEBOT_FALLBACK_CONCURRENCY = 2;
+export const ROBINHOOD_DEBOT_FALLBACK_BATCH_BUDGET_MS = 5_000;
 
 function normalizeAddress(value) {
   return String(value || '').trim().toLowerCase();
@@ -248,6 +250,66 @@ function retryableError(error) {
   return error ? error.retryable !== false : false;
 }
 
+function timeoutError(message, code) {
+  const error = requestError(message, { retryable: true });
+  error.name = 'TimeoutError';
+  error.code = code;
+  return error;
+}
+
+function signalReason(signal, fallbackMessage) {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : requestError(fallbackMessage, { retryable: true, cause: signal?.reason });
+}
+
+function createAbortScope({ parentSignal = null, timeoutMs, timeoutReason }) {
+  const controller = new AbortController();
+  const forwardParentAbort = () => controller.abort(signalReason(
+    parentSignal,
+    'Market data request was cancelled'
+  ));
+
+  if (parentSignal?.aborted) forwardParentAbort();
+  else parentSignal?.addEventListener('abort', forwardParentAbort, { once: true });
+
+  const timeout = controller.signal.aborted
+    ? null
+    : setTimeout(() => controller.abort(timeoutReason), timeoutMs);
+  timeout?.unref?.();
+
+  return {
+    controller,
+    signal: controller.signal,
+    cleanup() {
+      if (timeout) clearTimeout(timeout);
+      parentSignal?.removeEventListener('abort', forwardParentAbort);
+    }
+  };
+}
+
+function awaitWithSignal(value, signal) {
+  if (signal.aborted) return Promise.reject(signalReason(signal, 'Market data request was cancelled'));
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (handler, result) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      handler(result);
+    };
+    const onAbort = () => finish(
+      reject,
+      signalReason(signal, 'Market data request was cancelled')
+    );
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(value).then(
+      (result) => finish(resolve, result),
+      (error) => finish(reject, error)
+    );
+  });
+}
+
 function mergeMetrics(address, primary, fallback, { primaryError = null, fallbackError = null } = {}) {
   const primaryMarketCap = nonNegativeNumber(primary?.marketCapUsd);
   const fallbackMarketCap = nonNegativeNumber(fallback?.marketCapUsd);
@@ -285,7 +347,13 @@ function mergeMetrics(address, primary, fallback, { primaryError = null, fallbac
 }
 
 export class RobinhoodMarketDataClient {
-  constructor({ primary, fallback = null, fallbackTimeoutMs = 3_000 } = {}) {
+  constructor({
+    primary,
+    fallback = null,
+    fallbackTimeoutMs = 3_000,
+    fallbackConcurrency = ROBINHOOD_DEBOT_FALLBACK_CONCURRENCY,
+    fallbackBatchBudgetMs = ROBINHOOD_DEBOT_FALLBACK_BATCH_BUDGET_MS
+  } = {}) {
     if (!primary?.fetchTokenMetricsBatch && !primary?.fetchTokenMetrics) {
       throw new TypeError('A primary Robinhood market data client is required');
     }
@@ -295,7 +363,38 @@ export class RobinhoodMarketDataClient {
     this.primary = primary;
     this.fallback = fallback;
     this.fallbackTimeoutMs = Math.max(250, Math.min(20_000, Number(fallbackTimeoutMs) || 3_000));
+    this.fallbackConcurrency = Math.floor(Math.max(
+      1,
+      Math.min(6, Number(fallbackConcurrency) || ROBINHOOD_DEBOT_FALLBACK_CONCURRENCY)
+    ));
+    this.fallbackBatchBudgetMs = Math.max(
+      250,
+      Math.min(
+        30_000,
+        Number(fallbackBatchBudgetMs) || ROBINHOOD_DEBOT_FALLBACK_BATCH_BUDGET_MS
+      )
+    );
     this.fallbackBlockedError = null;
+  }
+
+  async fetchFallbackMetrics(address, { signal }) {
+    const requestScope = createAbortScope({
+      parentSignal: signal,
+      timeoutMs: this.fallbackTimeoutMs,
+      timeoutReason: timeoutError(
+        `DeBot fallback timed out for ${address}`,
+        'DEBOT_FALLBACK_TIMEOUT'
+      )
+    });
+    try {
+      if (requestScope.signal.aborted) {
+        throw signalReason(requestScope.signal, 'Fallback market data request was cancelled');
+      }
+      const request = this.fallback.fetchTokenMetrics(address, { signal: requestScope.signal });
+      return await awaitWithSignal(request, requestScope.signal);
+    } finally {
+      requestScope.cleanup();
+    }
   }
 
   async fetchTokenMetricsBatch(tokenAddresses, { signal } = {}) {
@@ -322,26 +421,80 @@ export class RobinhoodMarketDataClient {
 
     const fallbackByAddress = new Map();
     const fallbackErrors = new Map();
-    for (const address of addresses) {
-      const primary = primaryByAddress.get(address) || null;
-      if (metricsComplete(primary) || !this.fallback) continue;
-      if (this.fallbackBlockedError) {
+    const fallbackAddresses = this.fallback
+      ? addresses.filter((address) => !metricsComplete(primaryByAddress.get(address)))
+      : [];
+    if (this.fallbackBlockedError) {
+      for (const address of fallbackAddresses) {
         fallbackErrors.set(address, this.fallbackBlockedError);
-        continue;
       }
+    } else if (fallbackAddresses.length) {
+      const budgetError = timeoutError(
+        `DeBot fallback batch exceeded ${this.fallbackBatchBudgetMs}ms`,
+        'DEBOT_FALLBACK_BATCH_TIMEOUT'
+      );
+      const batchScope = createAbortScope({
+        parentSignal: signal,
+        timeoutMs: this.fallbackBatchBudgetMs,
+        timeoutReason: budgetError
+      });
+      let nextIndex = 0;
+
+      const fetchAddress = async (address) => {
+        try {
+          fallbackByAddress.set(
+            address,
+            await this.fetchFallbackMetrics(address, { signal: batchScope.signal })
+          );
+        } catch (error) {
+          const normalized = asError(error, 'Fallback market data request failed');
+          if (signal?.aborted) throw signalReason(signal, 'Market data request was cancelled');
+          if (typeof normalized.retryable !== 'boolean') normalized.retryable = true;
+          fallbackErrors.set(address, normalized);
+          if (fallbackGloballyBlocked(normalized)) {
+            this.fallbackBlockedError = normalized;
+            batchScope.controller.abort(normalized);
+          }
+        }
+      };
+
+      const runWorker = async () => {
+        while (!batchScope.signal.aborted) {
+          const index = nextIndex;
+          if (index >= fallbackAddresses.length) return;
+          nextIndex += 1;
+          await fetchAddress(fallbackAddresses[index]);
+        }
+      };
+
       try {
-        const timeoutSignal = AbortSignal.timeout(this.fallbackTimeoutMs);
-        const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-        fallbackByAddress.set(
-          address,
-          await this.fallback.fetchTokenMetrics(address, { signal: combinedSignal })
-        );
-      } catch (error) {
-        const normalized = asError(error, 'Fallback market data request failed');
-        if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : normalized;
-        if (typeof normalized.retryable !== 'boolean') normalized.retryable = true;
-        fallbackErrors.set(address, normalized);
-        if (fallbackGloballyBlocked(normalized)) this.fallbackBlockedError = normalized;
+        // Probe once before opening the worker pool so a blocked DeBot session costs one request.
+        nextIndex = 1;
+        await fetchAddress(fallbackAddresses[0]);
+        if (!batchScope.signal.aborted) {
+          await Promise.all(Array.from(
+            {
+              length: Math.min(
+                this.fallbackConcurrency,
+                fallbackAddresses.length - nextIndex
+              )
+            },
+            () => runWorker()
+          ));
+        }
+      } finally {
+        batchScope.cleanup();
+      }
+
+      const interruptionError = this.fallbackBlockedError || (
+        batchScope.signal.aborted
+          ? signalReason(batchScope.signal, 'Fallback market data batch was cancelled')
+          : null
+      );
+      for (const address of fallbackAddresses) {
+        if (!fallbackByAddress.has(address) && !fallbackErrors.has(address)) {
+          fallbackErrors.set(address, interruptionError || budgetError);
+        }
       }
     }
 
@@ -368,6 +521,8 @@ export function createRobinhoodMarketDataClient({
   return new RobinhoodMarketDataClient({
     primary: dexScreenerClient || new RobinhoodDexScreenerClient(options),
     fallback: debotClient,
-    fallbackTimeoutMs: options.fallbackTimeoutMs
+    fallbackTimeoutMs: options.fallbackTimeoutMs,
+    fallbackConcurrency: options.fallbackConcurrency,
+    fallbackBatchBudgetMs: options.fallbackBatchBudgetMs
   });
 }

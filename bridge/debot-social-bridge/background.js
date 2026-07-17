@@ -218,6 +218,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
       });
     }
+    if (message.source === 'robinhood-radar-content' && message.type === 'status') {
+      const value = await settings();
+      return { configured: Boolean(value.bridgeToken) };
+    }
     if (message.source === 'robinhood-radar-content' && message.type === 'api') {
       const path = String(message.command?.path || '');
       if (!/^\/watchlist(?:\/batch|\/\d+)?$/.test(path)) throw new Error('Radar requested a disallowed social route');
