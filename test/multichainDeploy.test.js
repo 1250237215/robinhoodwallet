@@ -7,6 +7,7 @@ import { build } from 'esbuild';
 const packageJson = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const caddy = fs.readFileSync(new URL('../deploy/Caddyfile.example', import.meta.url), 'utf8');
 const installer = fs.readFileSync(new URL('../deploy/install-remote.sh', import.meta.url), 'utf8');
+const robinhoodUnit = fs.readFileSync(new URL('../deploy/robinhood-radar.service', import.meta.url), 'utf8');
 const baseUnit = fs.readFileSync(new URL('../deploy/base-radar.service', import.meta.url), 'utf8');
 const solanaUnit = fs.readFileSync(new URL('../deploy/solana-radar.service', import.meta.url), 'utf8');
 
@@ -61,10 +62,20 @@ test('Base and Solana systemd units bind independent ports and databases', () =>
   assert.doesNotMatch(solanaUnit, /SOLANA_HELIUS_AUTH_HEADER=/);
 });
 
+test('Robinhood owns the independent social store and loads its private bridge token from an environment file', () => {
+  assert.match(robinhoodUnit, /Environment=SOCIAL_DATA_FILE=\/var\/lib\/robinhood-radar\/social\.sqlite/);
+  assert.match(robinhoodUnit, /Environment=SOCIAL_RETENTION_DAYS=7/);
+  assert.match(robinhoodUnit, /EnvironmentFile=-\/etc\/robinhood-radar\/social\.env/);
+  assert.doesNotMatch(robinhoodUnit, /SOCIAL_BRIDGE_TOKEN=/);
+});
+
 test('remote installer backs up, checks, deploys, and validates all three databases', () => {
   assert.match(installer, /readonly chains=\("robinhood" "base" "solana"\)/);
   assert.match(installer, /PRAGMA quick_check/);
   assert.match(installer, /database_backup_path/);
+  assert.match(installer, /social_database_backup_path/);
+  assert.match(installer, /api\/social\?postLimit=1/);
+  assert.match(installer, /quick_check_database "\$\(social_database_path\)"/);
   assert.match(installer, /restore_optional_file/);
   assert.match(installer, /api\/\$chain\/dashboard/);
   assert.match(installer, /dashboard\.chain !== expectedChain/);

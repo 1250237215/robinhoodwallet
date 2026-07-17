@@ -68,6 +68,7 @@ async function eventually(assertion, timeoutMs = 500) {
 function insertEvent(store, {
   transactionHash = hash('90'),
   logIndex = 1,
+  tokenAddress = token,
   marketCapUsd = null,
   tokenCreationTimestamp = null,
   marketDataAt = null,
@@ -78,7 +79,7 @@ function insertEvent(store, {
     assetType: 'erc20',
     walletAddress: wallet,
     walletAlias: 'Alpha',
-    tokenAddress: token,
+    tokenAddress,
     tokenSymbol: 'TOK',
     tokenName: 'Token',
     tokenAmount: '1',
@@ -388,4 +389,92 @@ test('retries failed enrichment with bounded scheduling and aborts pending work 
   abortMonitor.close();
   await eventually(() => assert.equal(aborted, true));
   abortStore.close();
+});
+
+test('batches queued token enrichment into at most 30 addresses per request', async () => {
+  const store = createRobinhoodStore(':memory:');
+  const nowMs = 2_000_000_000_000;
+  const addresses = Array.from({ length: 31 }, (_, index) =>
+    `0x${(index + 100).toString(16).padStart(40, '0')}`);
+  for (const [index, tokenAddress] of addresses.entries()) {
+    insertEvent(store, {
+      tokenAddress,
+      transactionHash: hash((index + 1).toString(16).padStart(2, '0')),
+      logIndex: index + 1,
+      detectedAt: Math.floor(nowMs / 1_000) - 1
+    });
+  }
+  const batches = [];
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    now: () => nowMs,
+    marketDataConcurrency: 1,
+    marketDataBatchSize: 30,
+    debotClient: {
+      async fetchTokenMetricsBatch(batch) {
+        batches.push([...batch]);
+        return new Map(batch.map((address, index) => [
+          address,
+          { marketCapUsd: 100_000 + index, creationTimestamp: 1_999_999_000 }
+        ]));
+      }
+    },
+    rpcClient: {
+      async getBlockNumber() {
+        return 100;
+      },
+      async getLogs() {
+        return [];
+      }
+    }
+  });
+
+  monitor.start();
+  await eventually(() => {
+    assert.equal(batches.length, 2);
+    assert.equal(store.listMonitorEvents({ limit: 100 }).every((event) => event.marketCapUsd !== null), true);
+  });
+
+  assert.deepEqual(batches.map((batch) => batch.length), [30, 1]);
+  assert.equal(new Set(batches.flat()).size, 31);
+  assert.equal(batches.flat().every((address) => addresses.includes(address)), true);
+  monitor.close();
+  store.close();
+});
+
+test('does not schedule monitor retries for a non-retryable market-data 403', async () => {
+  const store = createRobinhoodStore(':memory:');
+  insertEvent(store, { detectedAt: 2_000_000_000 });
+  let calls = 0;
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    now: () => 2_000_000_001_000,
+    marketDataRetryBaseMs: 10,
+    marketDataRetryMaxMs: 10,
+    debotClient: {
+      async fetchTokenMetricsBatch() {
+        calls += 1;
+        const error = new Error('DeBot request failed with HTTP 403');
+        error.status = 403;
+        error.retryable = false;
+        throw error;
+      }
+    },
+    rpcClient: {
+      async getBlockNumber() {
+        return 100;
+      },
+      async getLogs() {
+        return [];
+      }
+    }
+  });
+
+  monitor.start();
+  await eventually(() => assert.equal(calls, 1));
+  assert.equal(monitor.marketDataRetryTimers.size, 0);
+  assert.equal(monitor.marketDataFailures.size, 0);
+  assert.equal(store.listMonitorEvents()[0].marketCapUsd, null);
+  monitor.close();
+  store.close();
 });

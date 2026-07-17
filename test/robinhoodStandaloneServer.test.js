@@ -13,6 +13,7 @@ import {
 import { RobinhoodDebotClient } from '../src/robinhood/debotClient.js';
 import { RobinhoodHolderClient } from '../src/robinhood/holderClient.js';
 import { scanTokenHolders } from '../src/robinhood/holderScanner.js';
+import { RobinhoodDexScreenerClient, RobinhoodMarketDataClient } from '../src/robinhood/marketClient.js';
 
 const wallet = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const token = '0x1111111111111111111111111111111111111111';
@@ -421,7 +422,7 @@ test('standalone monitor routes expose snapshots, incremental events, and valida
   }, monitor);
 });
 
-test('standalone startup wires the holder-first scanner and its two data clients', async (t) => {
+test('standalone startup wires holder scans separately from DexScreener-first monitor enrichment', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-holder-server-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const running = await startRobinhoodStandaloneServer(
@@ -445,7 +446,14 @@ test('standalone startup wires the holder-first scanner and its two data clients
   try {
     assert.equal(running.service.scanToken, scanTokenHolders);
     assert.equal(running.service.debotClient instanceof RobinhoodDebotClient, true);
-    assert.equal(running.monitor.debotClient, running.service.debotClient);
+    assert.equal(running.debotClient, running.service.debotClient);
+    assert.equal(running.dexScreenerClient instanceof RobinhoodDexScreenerClient, true);
+    assert.equal(running.marketDataClient instanceof RobinhoodMarketDataClient, true);
+    assert.equal(running.monitor.debotClient, running.marketDataClient);
+    assert.equal(running.marketDataClient.primary, running.dexScreenerClient);
+    assert.equal(running.marketDataClient.fallback, running.service.debotClient);
+    assert.equal(running.monitor.marketDataBatchSize, 30);
+    assert.equal(running.monitor.marketDataCacheSeconds, 60);
     assert.equal(running.service.holderClient instanceof RobinhoodHolderClient, true);
     const health = running.monitor.getSnapshot().health;
     assert.equal(health.running, true);

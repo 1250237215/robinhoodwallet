@@ -32,6 +32,14 @@ database_backup_path() {
   echo "$backup_root/$1-$stamp.sqlite"
 }
 
+social_database_path() {
+  echo "$data_dir/social.sqlite"
+}
+
+social_database_backup_path() {
+  echo "$backup_root/social-$stamp.sqlite"
+}
+
 unit_path() {
   echo "/etc/systemd/system/$1.service"
 }
@@ -103,6 +111,16 @@ rollback() {
           install -o robinhood-radar -g robinhood-radar -m 0640 "$backup" "$database"
         fi
       done
+
+      local social_database
+      local social_backup
+      social_database="$(social_database_path)"
+      social_backup="$(social_database_backup_path)"
+      if [[ -f "$social_backup.missing" ]]; then
+        rm -f "$social_database"
+      elif [[ -f "$social_backup" ]]; then
+        install -o robinhood-radar -g robinhood-radar -m 0640 "$social_backup" "$social_database"
+      fi
 
       if [[ -d "$release_backup/public" ]]; then
         rm -rf "$app_dir/public"
@@ -189,6 +207,16 @@ for chain in "${chains[@]}"; do
   backup_optional_file "$(bundle_path "$chain").LEGAL.txt" "$release_backup/$chain-server.mjs.LEGAL.txt"
   backup_optional_file "$(unit_path "$chain-radar")" "$release_backup/$chain-radar.service"
 done
+
+social_database="$(social_database_path)"
+social_database_backup="$(social_database_backup_path)"
+if [[ -f "$social_database" ]]; then
+  cp --preserve=mode,ownership,timestamps "$social_database" "$social_database_backup"
+  chmod 0600 "$social_database_backup"
+  quick_check_database "$social_database_backup"
+else
+  touch "$social_database_backup.missing"
+fi
 cp -a "$app_dir/public" "$release_backup/public"
 rollback_needed=1
 
@@ -300,6 +328,20 @@ for chain in "${chains[@]}"; do
   quick_check_database "$(database_path "$chain")"
 done
 
+social_file="$(mktemp)"
+curl --fail --silent --show-error \
+  "http://127.0.0.1:18118/api/social?postLimit=1" \
+  > "$social_file"
+node --input-type=module -e '
+  import fs from "node:fs";
+  const social = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (social.ok !== true || social.status !== "ready") throw new Error("social API is not ready");
+  if (!social.bridge || typeof social.bridge.state !== "string") throw new Error("social bridge state is unavailable");
+  if (!social.counts || !Number.isInteger(Number(social.counts.posts))) throw new Error("social counts are unavailable");
+' "$social_file"
+rm -f "$social_file"
+quick_check_database "$(social_database_path)"
+
 if [[ -f "$staging_dir/Caddyfile" ]]; then
   caddy_candidate="$(mktemp /etc/caddy/Caddyfile.robinhood-radar.XXXXXX)"
   install -m 0644 "$staging_dir/Caddyfile" "$caddy_candidate"
@@ -335,6 +377,17 @@ if [[ -n "${RADAR_PUBLIC_BASE_URL:-}" ]]; then
     ' "$public_file" "$chain"
     rm -f "$public_file"
   done
+
+  public_social_file="$(mktemp)"
+  curl "${public_curl_options[@]}" \
+    "${RADAR_PUBLIC_BASE_URL%/}/api/social?postLimit=1" \
+    > "$public_social_file"
+  node --input-type=module -e '
+    import fs from "node:fs";
+    const payload = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (payload.ok !== true || payload.status !== "ready") throw new Error("public social API is not ready");
+  ' "$public_social_file"
+  rm -f "$public_social_file"
 fi
 
 for service in "${services[@]}"; do
@@ -347,6 +400,7 @@ rollback_needed=0
 for chain in "${chains[@]}"; do
   echo "${chain}_database_backup=$(database_backup_path "$chain")"
 done
+echo "social_database_backup=$(social_database_backup_path)"
 echo "release_backup=$release_backup"
 echo "caddy_backup=$release_backup/Caddyfile"
 for service in "${services[@]}"; do

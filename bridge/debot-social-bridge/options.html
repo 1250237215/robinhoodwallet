@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DeBot 桥接设置</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>DeBot 社媒桥接</h1>
+      <form id="settings-form">
+        <label>
+          <span>社媒服务地址</span>
+          <input id="server-base" type="url" required />
+        </label>
+        <label>
+          <span>设备配对密钥</span>
+          <input id="bridge-token" type="password" autocomplete="off" placeholder="留空则保留现有密钥" />
+        </label>
+        <button type="submit">保存</button>
+        <output id="status"></output>
+      </form>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

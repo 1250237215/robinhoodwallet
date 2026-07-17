@@ -177,6 +177,7 @@ async function fetchResponse(url, { timeoutMs, signal, fetchImpl }) {
       const retryable = response.status === 429 || response.status >= 500;
       if (!retryable || attempt >= 3) {
         const error = new Error(`DeBot request failed with HTTP ${response.status}`);
+        error.status = response.status;
         error.retryable = false;
         throw error;
       }

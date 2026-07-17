@@ -62,8 +62,16 @@ Configuration is supplied through environment variables. Common settings are:
 | `ROBINHOOD_MONITOR_DEEP_GAP_BLOCK_SPAN` | `20` | Historical full blocks scanned by each low-priority backfill pass |
 | `ROBINHOOD_MONITOR_DEEP_GAP_POLL_INTERVAL_MS` | `5000` | Delay between low-priority deep gap passes |
 | `ROBINHOOD_MONITOR_TOKEN_METADATA_BUDGET_MS` | `1500` | Per-event metadata wait budget before a fallback label is used |
+| `ROBINHOOD_MARKET_REQUEST_TIMEOUT_MS` | `5000` | DexScreener batch request timeout |
+| `ROBINHOOD_MARKET_DEBOT_FALLBACK_TIMEOUT_MS` | `3000` | DeBot fallback budget when DexScreener data is incomplete |
+| `ROBINHOOD_MONITOR_MARKET_DATA_CACHE_SECONDS` | `60` | Fresh market-cap snapshot lifetime for Robinhood events |
+| `ROBINHOOD_MONITOR_MARKET_DATA_BATCH_SIZE` | `30` | Maximum token addresses per DexScreener request |
 | `ROBINHOOD_NOXA_LAUNCH_FACTORY` | Official Robinhood Noxa factory | Noxa `TokenLaunched` event source |
 | `ROBINHOOD_REQUEST_TIMEOUT_MS` | `20000` | External request timeout |
+| `SOCIAL_DATA_FILE` | Next to the Robinhood database | Independent DeBot social cache and command queue |
+| `SOCIAL_BRIDGE_TOKEN` | Empty | Private browser-bridge device token; keep it in `/etc/robinhood-radar/social.env` |
+| `SOCIAL_RETENTION_DAYS` | `7` | Social post and completed-command retention |
+| `SOCIAL_BRIDGE_OFFLINE_MS` | `15000` | Time without a browser heartbeat before the bridge is shown offline |
 
 See `src/robinhood/config.js` for all bounded settings and defaults.
 
@@ -129,7 +137,8 @@ marked partial.
 - `deploy/robinhood-radar.service`, `deploy/base-radar.service`, and
   `deploy/solana-radar.service` are the isolated systemd units.
 - `deploy/install-remote.sh` installs a prepared release with backup and rollback
-  checks for all three binaries, databases, and units.
+  checks for all three binaries, their databases, the independent social database,
+  and all service units.
 - `deploy/Caddyfile.example` contains the prefix-based reverse proxy used by the
   existing radar URL. Set `ROBINHOOD_SITE_ADDRESS` to the public site address.
   It does not add a browser login; the exact Solana webhook route remains

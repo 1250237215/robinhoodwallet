@@ -600,7 +600,7 @@ test('Lucide powers icon controls and scan controls are accessible', () => {
 test('relative static assets and a scoped API root support VPS prefix deployment', () => {
   assert.match(indexHtml, /href="styles\.css"/);
   assert.match(indexHtml, /src="app\.js"/);
-  assert.match(appJs, /window\.location\.pathname\.startsWith\('\/robinhood-radar\/'\)/);
+  assert.equal(appJs.includes("const APP_BASE = /^\\/robinhood-radar(?:\\/|$)/.test(window.location.pathname)"), true);
   assert.match(appJs, /API_ROOT = `\$\{APP_BASE\}\/api\/\$\{chain\.apiPath\}`/);
 });
 
@@ -782,7 +782,9 @@ test('all API reads and writes use an immutable abortable chain context', () => 
   assert.match(requestHelpers, /fetchJson\(`\$\{context\.apiRoot\}\$\{path\}`/);
   assert.match(requestHelpers, /signal: context\.signal/);
 
-  assert.equal((appJs.match(/\bfetchJson\(/g) || []).length, 2, 'API calls must go through fetchChainJson');
+  assert.equal((appJs.match(/\bfetchJson\(/g) || []).length, 5, 'direct API calls must be limited to shared helpers and social root');
+  assert.match(appJs, /fetchJson\(`\$\{SOCIAL_API_ROOT\}\?postLimit=100`/);
+  assert.match(appJs, /fetchJson\(`\$\{SOCIAL_API_ROOT\}\/status`/);
   assert.doesNotMatch(appJs, /\$\{API_ROOT\}\//, 'async paths must not interpolate the mutable API root');
 
   const guardedOperations = [
@@ -909,7 +911,9 @@ test('real-time monitoring is a first-level page that replaces the research work
     'monitor-deep-live-backlog',
     'monitor-deep-gap',
     'monitor-deep-duration',
-    'monitor-cluster-list',
+    'social-monitor-panel',
+    'social-monitor-summary',
+    'social-feed',
     'monitor-event-feed'
   ]) {
     assert.match(indexHtml, new RegExp(`id="${id}"`));
@@ -976,7 +980,7 @@ test('Solana monitor readiness is explicit when Helius is not configured', () =>
 
   const renderSource = appJs.slice(
     appJs.indexOf('function monitorConnectionState'),
-    appJs.indexOf('function renderMonitorClusters')
+    appJs.indexOf('function socialPostKey')
   );
   assert.match(renderSource, /health\.realtimeReady === false/);
   assert.match(renderSource, /label: '实时未配置'/);
@@ -1011,16 +1015,69 @@ test('monitoring prefers SSE event delivery and falls back to two-second increme
   assert.match(appJs, /state\.monitorEvents\.sort\(\(left, right\) => monitorEventTimestamp\(right\) - monitorEventTimestamp\(left\)\)/);
 });
 
-test('custom-window clusters count distinct wallets and permanently deduplicate alerted CAs', () => {
-  assert.match(indexHtml, /id="monitor-cluster-title">60 秒同币聚合/);
-  assert.match(indexHtml, /滚动统计最近 60 秒的不同地址/);
-  assert.match(indexHtml, /id="monitor-window-chip-label">60 秒/);
+test('social monitoring replaces the visible same-token aggregation panel with a larger complete feed', () => {
+  assert.match(indexHtml, /id="social-monitor-panel"[^>]*aria-labelledby="social-monitor-title"/);
+  assert.match(indexHtml, /id="social-monitor-title">社媒监控/);
+  assert.match(indexHtml, /id="social-bridge-badge"[^>]*data-state="loading"/);
+  assert.match(appJs, /bridge\.state === 'error'/);
+  assert.match(appJs, /'DeBot 异常'/);
+  assert.match(stylesCss, /\.social-bridge-badge\[data-state="error"\]/);
+  for (const [feed, label] of [['all', '全部'], ['featured', '精选'], ['my', '我的']]) {
+    assert.match(indexHtml, new RegExp(`data-social-feed="${feed}"[^>]*>${label}<`));
+  }
+  for (const id of [
+    'social-platform-filter',
+    'social-chain-filter',
+    'social-search',
+    'social-watchlist-manager',
+    'social-watchlist-form',
+    'social-pairing-row',
+    'social-watchlist',
+    'social-feed'
+  ]) {
+    assert.match(indexHtml, new RegExp(`id="${id}"`));
+  }
+  assert.match(indexHtml, /value="twitter">推特</);
+  assert.match(indexHtml, /value="binance">币安广场</);
+  assert.match(indexHtml, /value="robinhood">Robinhood</);
+  assert.match(indexHtml, /value="base">Base</);
+  assert.match(indexHtml, /value="solana">Solana</);
+  assert.doesNotMatch(indexHtml, /id="monitor-cluster-(?:title|summary|list)"|60 秒同币聚合/);
+  assert.match(appJs, /socialMonitorPanel: document\.querySelector\('#social-monitor-panel'\)/);
+  assert.match(appJs, /function renderSocialFeed\(\)/);
+  assert.match(appJs, /post\.translatedContent/);
+  assert.match(appJs, /post\.contractAddresses/);
+  assert.match(appJs, /post\.media/);
+  assert.match(stylesCss, /\.monitor-workspace \{[\s\S]*grid-template-columns: minmax\(520px, 1\.35fr\) minmax\(390px, 0\.9fr\)/);
+  assert.match(stylesCss, /\.social-feed \{[\s\S]*height: min\(820px, calc\(100vh - 118px\)\)/);
+  assert.match(stylesCss, /@media \(max-width: 960px\)[\s\S]*\.monitor-workspace \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.social-feed \{[\s\S]*height: 68svh/);
+});
+
+test('social snapshot and SSE lifecycle stay pinned to the Robinhood host service', () => {
+  assert.match(appJs, /const APP_BASE = \/\^\\\/robinhood-radar\(\?:\\\/\|\$\)\/\.test\(window\.location\.pathname\)/);
+  assert.match(appJs, /const SOCIAL_API_ROOT = `\$\{APP_BASE\}\/api\/social`/);
+  assert.match(appJs, /fetchJson\(`\$\{SOCIAL_API_ROOT\}\?postLimit=100`, \{ signal: controller\.signal \}\)/);
+  assert.match(appJs, /fetchJson\(`\$\{SOCIAL_API_ROOT\}\/status`\)/);
+  assert.match(appJs, /new EventSource\(`\$\{SOCIAL_API_ROOT\}\/stream\?after=\$\{encodeURIComponent\(state\.socialLatestChangeId\)\}`\)/);
+  for (const eventType of ['snapshot', 'post.created', 'post.updated', 'post.deleted', 'post.restored', 'watchlist.updated']) {
+    assert.equal(appJs.includes(`'${eventType}'`), true, `missing social SSE event ${eventType}`);
+  }
+  assert.match(appJs, /function socialLifecycleIsCurrent\(sequence\)/);
+  assert.match(appJs, /state\.socialSnapshotAbortController\?\.abort\(\)/);
+  assert.match(appJs, /source\.close\(\);[\s\S]{0,180}scheduleSocialReconnect\(sequence\)/);
+  assert.match(appJs, /clearTimeout\(state\.socialReconnectTimer\)/);
+  assert.match(appJs, /clearInterval\(state\.socialStatusTimer\)/);
+  assert.match(appJs, /void startSocialMonitor\(\{ manual \}\)/);
+  assert.match(appJs, /function stopMonitorTransport\(\)[\s\S]*stopSocialMonitor\(\)/);
+  assert.match(appJs, /if \(state\.socialExtensionReady\) return requestSocialExtension/);
+  assert.match(appJs, /authorization: `Bearer \$\{token\}`/);
+});
+
+test('same-token alerts remain active as background logic after their panel is removed', () => {
   assert.match(appJs, /function formatMonitorWindowDuration\(value = state\.monitorWindowSeconds\)/);
   assert.match(appJs, /elements\.monitorWindowDescription\.textContent = `已确认地址 · 金额不限 · \$\{windowLabel\}滚动窗口`/);
   assert.match(appJs, /elements\.monitorThresholdLabel\.textContent = `\$\{windowLabel\}同币提醒人数`/);
-  assert.match(appJs, /elements\.monitorClusterTitle\.textContent = `\$\{windowLabel\}同币聚合`/);
-  assert.match(appJs, /elements\.monitorWindowChipLabel\.textContent = windowLabel/);
-  assert.match(appJs, /elements\.monitorClusterSummary\.textContent = `滚动 \$\{windowLabel\}/);
   assert.match(appJs, /state\.monitorWindowSeconds\) \* 1000/);
   assert.match(appJs, /if \(!cluster\.wallets\.has\(event\.walletAddress\)\) cluster\.wallets\.set/);
   assert.match(appJs, /walletCount: cluster\.wallets\.size/);

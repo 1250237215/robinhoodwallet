@@ -31,6 +31,8 @@ const MARKET_DATA_CACHE_SECONDS = 12;
 const MARKET_DATA_RETRY_BASE_MS = 30_000;
 const MARKET_DATA_RETRY_MAX_MS = 5 * 60_000;
 const MARKET_DATA_MAX_FAILURES = 6;
+const MARKET_DATA_BATCH_SIZE = 30;
+const MARKET_DATA_BATCH_WINDOW_MS = 0;
 const DEBOT_TOKEN_ROOT = 'https://debot.ai/token/robinhood/308574_';
 const DEFAULT_CHAIN_PROFILE = Object.freeze({
   id: 'robinhood',
@@ -318,6 +320,8 @@ export class RobinhoodWalletMonitor {
     debotClient = null,
     marketDataCacheSeconds = MARKET_DATA_CACHE_SECONDS,
     marketDataConcurrency = 2,
+    marketDataBatchSize = MARKET_DATA_BATCH_SIZE,
+    marketDataBatchWindowMs = MARKET_DATA_BATCH_WINDOW_MS,
     marketDataRetryBaseMs = MARKET_DATA_RETRY_BASE_MS,
     marketDataRetryMaxMs = MARKET_DATA_RETRY_MAX_MS,
     quoteTokenAddresses = [ROBINHOOD_CHAIN.weth, ROBINHOOD_CHAIN.usdg],
@@ -358,12 +362,30 @@ export class RobinhoodWalletMonitor {
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
     this.barkNotifier = barkNotifier;
-    if (debotClient !== null && typeof debotClient?.fetchTokenMetrics !== 'function') {
-      throw new TypeError('A DeBot token metrics client is required');
+    if (debotClient !== null && typeof debotClient?.fetchTokenMetrics !== 'function' &&
+      typeof debotClient?.fetchTokenMetricsBatch !== 'function') {
+      throw new TypeError('A token metrics client is required');
     }
     this.debotClient = debotClient;
-    this.marketDataCacheSeconds = boundedInteger(marketDataCacheSeconds, MARKET_DATA_CACHE_SECONDS, 10, 15);
+    this.marketDataCacheSeconds = boundedInteger(
+      marketDataCacheSeconds,
+      MARKET_DATA_CACHE_SECONDS,
+      10,
+      60 * 60
+    );
     this.marketDataConcurrency = boundedInteger(marketDataConcurrency, 2, 1, 4);
+    this.marketDataBatchSize = boundedInteger(
+      marketDataBatchSize,
+      MARKET_DATA_BATCH_SIZE,
+      1,
+      MARKET_DATA_BATCH_SIZE
+    );
+    this.marketDataBatchWindowMs = boundedInteger(
+      marketDataBatchWindowMs,
+      MARKET_DATA_BATCH_WINDOW_MS,
+      0,
+      250
+    );
     this.marketDataRetryBaseMs = boundedInteger(
       marketDataRetryBaseMs,
       MARKET_DATA_RETRY_BASE_MS,
@@ -382,6 +404,7 @@ export class RobinhoodWalletMonitor {
     this.marketDataFailures = new Map();
     this.marketDataPendingEventIds = new Map();
     this.marketDataActive = 0;
+    this.marketDataDrainTimer = null;
     this.chainProfile = {
       ...DEFAULT_CHAIN_PROFILE,
       ...(chainProfile || {})
@@ -509,6 +532,8 @@ export class RobinhoodWalletMonitor {
     this.deepAbortController?.abort(new Error('Robinhood wallet deep monitor stopped'));
     this.gapAbortController?.abort(new Error('Robinhood wallet gap monitor stopped'));
     this.marketDataAbortController.abort(new Error('Robinhood wallet monitor stopped'));
+    if (this.marketDataDrainTimer) this.clearTimer(this.marketDataDrainTimer);
+    this.marketDataDrainTimer = null;
     for (const timer of this.marketDataRetryTimers.values()) this.clearTimer(timer);
     this.marketDataRetryTimers.clear();
     this.marketDataQueue.length = 0;
@@ -1867,76 +1892,142 @@ export class RobinhoodWalletMonitor {
     this.marketDataQueued.set(normalized, job);
     if (priority) this.marketDataQueue.unshift(job);
     else this.marketDataQueue.push(job);
-    this.#drainMarketDataQueue();
+    if (typeof this.debotClient.fetchTokenMetricsBatch === 'function') this.#scheduleMarketDataDrain();
+    else this.#drainMarketDataQueue();
+  }
+
+  #scheduleMarketDataDrain() {
+    if (this.closed || !this.debotClient || this.marketDataDrainTimer || !this.marketDataQueue.length) return;
+    this.marketDataDrainTimer = this.setTimer(() => {
+      this.marketDataDrainTimer = null;
+      this.#drainMarketDataQueue();
+    }, this.marketDataBatchWindowMs);
+    this.marketDataDrainTimer?.unref?.();
   }
 
   #drainMarketDataQueue() {
     if (this.closed || !this.debotClient) return;
     while (this.marketDataActive < this.marketDataConcurrency && this.marketDataQueue.length > 0) {
-      const job = this.marketDataQueue.shift();
-      this.marketDataQueued.delete(job.address);
-      if (this.marketDataLookups.has(job.address) || this.marketDataRetryTimers.has(job.address)) continue;
-      if (!job.force && this.#marketDataIsFresh(this.store.getMonitorTokenMetadata?.(job.address))) continue;
+      const batchSize = typeof this.debotClient.fetchTokenMetricsBatch === 'function'
+        ? this.marketDataBatchSize
+        : 1;
+      const jobs = [];
+      while (jobs.length < batchSize && this.marketDataQueue.length > 0) {
+        const job = this.marketDataQueue.shift();
+        this.marketDataQueued.delete(job.address);
+        if (this.marketDataLookups.has(job.address) || this.marketDataRetryTimers.has(job.address)) continue;
+        if (!job.force && this.#marketDataIsFresh(this.store.getMonitorTokenMetadata?.(job.address))) continue;
+        jobs.push(job);
+      }
+      if (!jobs.length) continue;
       this.marketDataActive += 1;
-      const lookup = this.#fetchTokenMarketData(job.address);
-      this.marketDataLookups.set(job.address, lookup);
+      const lookup = this.#fetchTokenMarketDataBatch(jobs);
+      for (const job of jobs) this.marketDataLookups.set(job.address, lookup);
       void lookup.finally(() => {
-        this.marketDataLookups.delete(job.address);
+        for (const job of jobs) {
+          if (this.marketDataLookups.get(job.address) === lookup) this.marketDataLookups.delete(job.address);
+        }
         this.marketDataActive = Math.max(0, this.marketDataActive - 1);
         this.#drainMarketDataQueue();
       }).catch(() => {});
     }
   }
 
-  async #fetchTokenMarketData(address) {
+  async #fetchTokenMarketDataBatch(jobs) {
+    const addresses = jobs.map((job) => job.address);
+    let metricsByAddress;
     try {
-      const metrics = await this.debotClient.fetchTokenMetrics(address, {
-        signal: this.marketDataAbortController.signal
-      });
-      if (this.closed || this.marketDataAbortController.signal.aborted) return;
-      const marketCap = metrics?.marketCapUsd;
-      const marketCapUsd = marketCap === null || marketCap === undefined || marketCap === ''
-        ? null
-        : Number(marketCap);
-      const creation = Number(metrics?.creationTimestamp);
-      const tokenCreationTimestamp = Number.isSafeInteger(creation) && creation > 0 ? creation : null;
-      const normalizedMarketCap = Number.isFinite(marketCapUsd) && marketCapUsd >= 0 ? marketCapUsd : null;
-      if (normalizedMarketCap === null && tokenCreationTimestamp === null) {
-        throw new Error('DeBot token metrics did not include market cap or creation time');
+      if (typeof this.debotClient.fetchTokenMetricsBatch === 'function') {
+        const result = await this.debotClient.fetchTokenMetricsBatch(addresses, {
+          signal: this.marketDataAbortController.signal
+        });
+        if (result instanceof Map) {
+          metricsByAddress = new Map([...result].map(([address, metrics]) => [normalizeAddress(address), metrics]));
+        } else if (Array.isArray(result)) {
+          metricsByAddress = new Map(result.map((metrics, index) => [
+            normalizeAddress(metrics?.address || addresses[index]),
+            metrics
+          ]));
+        } else {
+          metricsByAddress = new Map(Object.entries(result || {}).map(([address, metrics]) => [
+            normalizeAddress(address),
+            metrics
+          ]));
+        }
+      } else {
+        metricsByAddress = new Map([[
+          addresses[0],
+          await this.debotClient.fetchTokenMetrics(addresses[0], {
+            signal: this.marketDataAbortController.signal
+          })
+        ]]);
       }
-      const marketData = {
-        address,
-        marketCapUsd: normalizedMarketCap,
-        tokenCreationTimestamp,
-        marketDataAt: normalizedMarketCap === null ? null : unixSeconds(this.now)
-      };
-      this.store.upsertMonitorTokenMarketData?.(marketData);
-      const eventIds = [...(this.marketDataPendingEventIds.get(address) || [])];
-      const updatedEvents = this.store.updateMonitorEventsTokenMarketData?.(
-        address,
-        marketData,
-        { eventIds }
-      ) || [];
-      this.#emitMarketDataPatches(updatedEvents);
-      if (normalizedMarketCap === null || tokenCreationTimestamp === null) {
-        const completedIds = new Set(updatedEvents
-          .filter((event) => event.marketCapUsd !== null && event.tokenCreationTimestamp !== null)
-          .map((event) => Number(event.id)));
-        const unresolvedIds = eventIds.filter((eventId) => !completedIds.has(Number(eventId)));
-        if (unresolvedIds.length) this.marketDataPendingEventIds.set(address, new Set(unresolvedIds));
-        else this.marketDataPendingEventIds.delete(address);
-        throw new Error('DeBot token metrics were incomplete');
-      }
-      this.marketDataFailures.delete(address);
-      this.marketDataPendingEventIds.delete(address);
     } catch (error) {
       if (this.closed || this.marketDataAbortController.signal.aborted) return;
-      this.#scheduleMarketDataRetry(address);
+      for (const address of addresses) this.#scheduleMarketDataRetry(address, error);
+      return;
+    }
+    if (this.closed || this.marketDataAbortController.signal.aborted) return;
+    for (const address of addresses) {
+      try {
+        this.#applyTokenMarketData(address, metricsByAddress.get(address));
+      } catch (error) {
+        this.#scheduleMarketDataRetry(address, error);
+      }
     }
   }
 
-  #scheduleMarketDataRetry(address) {
+  #applyTokenMarketData(address, metrics) {
+    const marketCap = metrics?.marketCapUsd;
+    const marketCapUsd = marketCap === null || marketCap === undefined || marketCap === ''
+      ? null
+      : Number(marketCap);
+    const creation = Number(metrics?.creationTimestamp);
+    const tokenCreationTimestamp = Number.isSafeInteger(creation) && creation > 0 ? creation : null;
+    const normalizedMarketCap = Number.isFinite(marketCapUsd) && marketCapUsd >= 0 ? marketCapUsd : null;
+    if (normalizedMarketCap === null && tokenCreationTimestamp === null) {
+      const error = new Error('Token metrics did not include market cap or creation time');
+      error.retryable = metrics?.retryable !== false;
+      error.status = metrics?.upstreamStatus ?? null;
+      throw error;
+    }
+    const marketData = {
+      address,
+      marketCapUsd: normalizedMarketCap,
+      tokenCreationTimestamp,
+      marketDataAt: normalizedMarketCap === null ? null : unixSeconds(this.now)
+    };
+    this.store.upsertMonitorTokenMarketData?.(marketData);
+    const eventIds = [...(this.marketDataPendingEventIds.get(address) || [])];
+    const updatedEvents = this.store.updateMonitorEventsTokenMarketData?.(
+      address,
+      marketData,
+      { eventIds }
+    ) || [];
+    this.#emitMarketDataPatches(updatedEvents);
+    if (normalizedMarketCap === null || tokenCreationTimestamp === null) {
+      const completedIds = new Set(updatedEvents
+        .filter((event) => event.marketCapUsd !== null && event.tokenCreationTimestamp !== null)
+        .map((event) => Number(event.id)));
+      const unresolvedIds = eventIds.filter((eventId) => !completedIds.has(Number(eventId)));
+      if (unresolvedIds.length) this.marketDataPendingEventIds.set(address, new Set(unresolvedIds));
+      else this.marketDataPendingEventIds.delete(address);
+      const error = new Error('Token metrics were incomplete');
+      error.retryable = metrics?.retryable !== false;
+      error.status = metrics?.upstreamStatus ?? null;
+      throw error;
+    }
+    this.marketDataFailures.delete(address);
+    this.marketDataPendingEventIds.delete(address);
+  }
+
+  #scheduleMarketDataRetry(address, error = null) {
     if (this.closed || this.marketDataRetryTimers.has(address)) return;
+    if (error?.retryable === false) {
+      this.marketDataFailures.delete(address);
+      this.marketDataPendingEventIds.delete(address);
+      return;
+    }
     const failures = (this.marketDataFailures.get(address) || 0) + 1;
     this.marketDataFailures.set(address, failures);
     if (failures >= MARKET_DATA_MAX_FAILURES) {

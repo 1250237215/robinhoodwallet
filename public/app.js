@@ -1,4 +1,4 @@
-const APP_BASE = window.location.pathname.startsWith('/robinhood-radar/') ? '/robinhood-radar' : '';
+const APP_BASE = /^\/robinhood-radar(?:\/|$)/.test(window.location.pathname) ? '/robinhood-radar' : '';
 const CHAIN_CONFIGS = Object.freeze({
   robinhood: Object.freeze({
     id: 'robinhood',
@@ -72,6 +72,11 @@ const REVIEW_SCAN_BATCH_GAP_MS = 5 * 60 * 1000;
 const BUY_FREQUENCY_REFRESH_MS = 30_000;
 const MONITOR_POLL_INTERVAL_MS = 2_000;
 const MONITOR_RECENT_REFRESH_MS = 10_000;
+const SOCIAL_API_ROOT = `${APP_BASE}/api/social`;
+const SOCIAL_DEVICE_TOKEN_STORAGE_KEY = 'robinhood-social-device-token';
+const SOCIAL_SEARCH_DEBOUNCE_MS = 180;
+const SOCIAL_STREAM_RETRY_MS = 2_000;
+const SOCIAL_STATUS_REFRESH_MS = 10_000;
 let MONITOR_THRESHOLD_STORAGE_KEY = 'robinhood-monitor-threshold';
 const MONITOR_SOUNDS = new Set(['alarm', 'bell', 'electronic', 'glass']);
 const MONITOR_EVENT_TYPES = Object.freeze(['buy', 'sell', 'transfer', 'token_create']);
@@ -257,10 +262,31 @@ const elements = {
   monitorDeepLiveBacklog: document.querySelector('#monitor-deep-live-backlog'),
   monitorDeepGap: document.querySelector('#monitor-deep-gap'),
   monitorDeepDuration: document.querySelector('#monitor-deep-duration'),
-  monitorClusterTitle: document.querySelector('#monitor-cluster-title'),
-  monitorClusterSummary: document.querySelector('#monitor-cluster-summary'),
-  monitorWindowChipLabel: document.querySelector('#monitor-window-chip-label'),
-  monitorClusterList: document.querySelector('#monitor-cluster-list'),
+  socialMonitorPanel: document.querySelector('#social-monitor-panel'),
+  socialMonitorSummary: document.querySelector('#social-monitor-summary'),
+  socialBridgeBadge: document.querySelector('#social-bridge-badge'),
+  socialBridgeLabel: document.querySelector('#social-bridge-label'),
+  socialManageButton: document.querySelector('#social-manage-button'),
+  socialRefreshButton: document.querySelector('#social-refresh-button'),
+  socialFeedTabs: document.querySelector('#social-feed-tabs'),
+  socialPlatformFilter: document.querySelector('#social-platform-filter'),
+  socialChainFilter: document.querySelector('#social-chain-filter'),
+  socialSearch: document.querySelector('#social-search'),
+  socialWatchlistManager: document.querySelector('#social-watchlist-manager'),
+  socialManagerClose: document.querySelector('#social-manager-close'),
+  socialWatchlistSummary: document.querySelector('#social-watchlist-summary'),
+  socialWatchlistForm: document.querySelector('#social-watchlist-form'),
+  socialWatchlistInput: document.querySelector('#social-watchlist-input'),
+  socialWatchlistPlatform: document.querySelector('#social-watchlist-platform'),
+  socialWatchlistAdd: document.querySelector('#social-watchlist-add'),
+  socialPairingRow: document.querySelector('#social-pairing-row'),
+  socialPairingToken: document.querySelector('#social-pairing-token'),
+  socialPairingSave: document.querySelector('#social-pairing-save'),
+  socialWatchlistSelectAll: document.querySelector('#social-watchlist-select-all'),
+  socialWatchlistSelectedCount: document.querySelector('#social-watchlist-selected-count'),
+  socialWatchlistDelete: document.querySelector('#social-watchlist-delete'),
+  socialWatchlist: document.querySelector('#social-watchlist'),
+  socialFeed: document.querySelector('#social-feed'),
   monitorFeedSummary: document.querySelector('#monitor-feed-summary'),
   monitorEventFeed: document.querySelector('#monitor-event-feed'),
   monitorRefreshButton: document.querySelector('#monitor-refresh-button'),
@@ -323,6 +349,28 @@ const state = {
   monitorBarkVolume: 5,
   monitorBarkTargets: [],
   monitorBarkBusy: new Set(),
+  socialStarted: false,
+  socialConnected: false,
+  socialSequence: 0,
+  socialEventSource: null,
+  socialReconnectTimer: null,
+  socialStatusTimer: null,
+  socialSnapshotAbortController: null,
+  socialLatestChangeId: 0,
+  socialPosts: [],
+  socialWatchlist: [],
+  socialBridge: { state: 'loading', paired: false, online: false, readOnly: true },
+  socialCounts: {},
+  socialFeedFilter: 'all',
+  socialPlatformFilter: 'all',
+  socialChainFilter: 'all',
+  socialSearchQuery: '',
+  socialSearchTimer: null,
+  socialSelectedWatchlist: new Set(),
+  socialMutationBusy: false,
+  socialExtensionReady: false,
+  socialExtensionRequestSequence: 0,
+  socialExtensionRequests: new Map(),
   detailView: 'placeholder',
   detailAddress: '',
   loading: false
@@ -1158,57 +1206,254 @@ function renderMonitorHealth() {
   elements.monitorDeepDuration.textContent = `上轮 ${formatMonitorRangeDuration(health.deepLastRangeDurationMs)}`;
 }
 
-function renderMonitorClusters() {
-  const clusters = currentMonitorClusters();
-  const threshold = state.monitorThreshold;
-  const windowLabel = formatMonitorWindowDuration();
-  elements.monitorClusterSummary.textContent = `滚动 ${windowLabel} · ${clusters.length} 个代币 · ${threshold} 个地址触发提醒`;
-  if (!clusters.length) {
-    elements.monitorClusterList.innerHTML = `
-      <div class="monitor-empty-state">
-        <i data-lucide="activity" aria-hidden="true"></i>
-        <strong>暂时没有同币聚合买入</strong>
-        <span>有已确认地址买入后会立即出现。</span>
-      </div>
-    `;
-    refreshIcons(elements.monitorClusterList);
+function socialPostKey(post) {
+  return `${String(post?.source || 'debot')}:${String(post?.externalId || post?.id || '')}`;
+}
+
+function socialFeedSources(post) {
+  const sources = post?.feedSources ?? post?.feed_sources ?? [];
+  return Array.isArray(sources) ? sources.map((value) => String(value).toLowerCase()) : [];
+}
+
+function mergeSocialPosts(posts) {
+  const byKey = new Map(state.socialPosts.map((post) => [socialPostKey(post), post]));
+  let added = 0;
+  for (const post of Array.isArray(posts) ? posts : []) {
+    const key = socialPostKey(post);
+    if (key.endsWith(':')) continue;
+    if (!byKey.has(key)) added += 1;
+    byKey.set(key, { ...(byKey.get(key) || {}), ...post });
+  }
+  state.socialPosts = [...byKey.values()]
+    .sort((left, right) => Number(right.publishedAt || 0) - Number(left.publishedAt || 0) || Number(right.id || 0) - Number(left.id || 0))
+    .slice(0, 500);
+  return added;
+}
+
+function applySocialWatchlistEntry(entry) {
+  if (!entry || !Number.isSafeInteger(Number(entry.id))) return false;
+  const id = Number(entry.id);
+  const byId = new Map(state.socialWatchlist.map((item) => [Number(item.id), item]));
+  if (entry.desiredState === 'removed') byId.delete(id);
+  else byId.set(id, { ...(byId.get(id) || {}), ...entry, id });
+  state.socialWatchlist = [...byId.values()].sort((left, right) => String(left.handle || '').localeCompare(String(right.handle || '')));
+  return true;
+}
+
+function applySocialSnapshot(payload) {
+  const record = unwrapRecord(payload || {});
+  if (Array.isArray(record.posts)) mergeSocialPosts(record.posts);
+  if (Array.isArray(record.watchlist)) {
+    state.socialWatchlist = record.watchlist
+      .filter((entry) => entry?.desiredState !== 'removed')
+      .sort((left, right) => String(left.handle || '').localeCompare(String(right.handle || '')));
+  }
+  if (record.bridge && typeof record.bridge === 'object') state.socialBridge = { ...state.socialBridge, ...record.bridge };
+  if (record.counts && typeof record.counts === 'object') state.socialCounts = { ...record.counts };
+  const latestChangeId = finiteNumber(record.latestChangeId);
+  if (latestChangeId !== null) state.socialLatestChangeId = Math.max(state.socialLatestChangeId, latestChangeId);
+  state.socialConnected = record.ok !== false;
+  renderSocialMonitor();
+}
+
+function applySocialChange(change) {
+  if (!change || typeof change !== 'object') return;
+  const id = finiteNumber(change.id);
+  if (id !== null) state.socialLatestChangeId = Math.max(state.socialLatestChangeId, id);
+  if (change.entityType === 'post' && change.data) {
+    const added = mergeSocialPosts([change.data]);
+    if (added > 0) {
+      const previous = finiteNumber(state.socialCounts.posts) ?? Math.max(0, state.socialPosts.length - added);
+      state.socialCounts.posts = previous + added;
+    }
+  }
+  if (change.entityType === 'watchlist' && change.data && applySocialWatchlistEntry(change.data)) {
+    state.socialCounts.watchlist = state.socialWatchlist.length;
+    state.socialCounts.unsyncedWatchlist = state.socialWatchlist
+      .filter((entry) => entry.syncStatus !== 'synced').length;
+  }
+  renderSocialMonitor();
+}
+
+function socialSourceLabel(source) {
+  if (source === 'twitter') return '推特';
+  if (source === 'binance') return '币安广场';
+  return 'DeBot';
+}
+
+function socialKindLabel(post) {
+  if (post?.deleted) return '删推';
+  if (post?.kind === 'reply') return '回复';
+  if (post?.kind === 'quote') return '引用';
+  if (post?.kind === 'repost') return '转发';
+  return '发帖';
+}
+
+function socialProfileUrl(post) {
+  const handle = String(post?.author?.handle || '').replace(/^@/, '');
+  if (!handle) return '';
+  return post.source === 'binance'
+    ? `https://www.binance.com/square/profile/${encodeURIComponent(handle)}`
+    : `https://x.com/${encodeURIComponent(handle)}`;
+}
+
+function socialContractUrl(contract, post) {
+  const address = String(contract?.address || contract || '').trim();
+  const requestedChain = String(contract?.chain || post?.chainTags?.[0] || '').toLowerCase();
+  const chain = CHAIN_CONFIGS[requestedChain];
+  if (!chain || !address) return '';
+  return `${chain.explorerRoot}/${chain.explorerTokenPath}/${encodeURIComponent(address)}`;
+}
+
+function socialInitials(post) {
+  const value = String(post?.author?.name || post?.author?.handle || 'S').trim();
+  return value.slice(0, 2).toUpperCase() || 'S';
+}
+
+function visibleSocialPosts() {
+  const query = state.socialSearchQuery.trim().toLowerCase();
+  return state.socialPosts.filter((post) => {
+    if (state.socialPlatformFilter !== 'all' && post.source !== state.socialPlatformFilter) return false;
+    if (state.socialChainFilter !== 'all' && !(Array.isArray(post.chainTags) && post.chainTags.includes(state.socialChainFilter))) return false;
+    const feeds = socialFeedSources(post);
+    if (state.socialFeedFilter !== 'all' && !feeds.includes(state.socialFeedFilter)) return false;
+    if (!query) return true;
+    const searchable = [post.content, post.translatedContent, post.author?.name, post.author?.handle]
+      .map((value) => String(value || '').toLowerCase())
+      .join('\n');
+    return searchable.includes(query);
+  });
+}
+
+function renderSocialBridgeStatus() {
+  const bridge = state.socialBridge || {};
+  const stateName = !state.socialConnected
+    ? 'loading'
+    : bridge.state === 'error'
+      ? 'error'
+      : bridge.online
+      ? 'online'
+      : bridge.paired
+        ? 'offline'
+        : 'unpaired';
+  elements.socialBridgeBadge.dataset.state = stateName;
+  elements.socialBridgeLabel.textContent = stateName === 'loading'
+    ? state.socialStarted ? '正在连接' : '等待连接'
+    : stateName === 'error'
+      ? 'DeBot 异常'
+    : stateName === 'online'
+      ? 'DeBot 已连接'
+      : stateName === 'offline'
+        ? 'DeBot 离线'
+        : '等待配对';
+  const lastSeen = bridge.lastSeenAt ? ` · ${formatMonitorAge(bridge.lastSeenAt)}` : '';
+  elements.socialMonitorSummary.textContent = `${formatInteger(state.socialCounts.posts ?? state.socialPosts.length)} 条消息 · ${formatInteger(state.socialCounts.watchlist ?? state.socialWatchlist.length)} 个账号${lastSeen}`;
+  elements.socialPairingRow.hidden = state.socialExtensionReady;
+}
+
+function renderSocialWatchlist() {
+  const entries = state.socialWatchlist;
+  const validIds = new Set(entries.map((entry) => Number(entry.id)));
+  for (const id of state.socialSelectedWatchlist) if (!validIds.has(id)) state.socialSelectedWatchlist.delete(id);
+  const selectedCount = state.socialSelectedWatchlist.size;
+  elements.socialWatchlistSummary.textContent = `${entries.length} 个账号 · ${formatInteger(state.socialCounts.unsyncedWatchlist ?? 0)} 个待同步`;
+  elements.socialWatchlistSelectedCount.textContent = `已选 ${selectedCount} 个`;
+  elements.socialWatchlistDelete.disabled = selectedCount === 0 || state.socialMutationBusy;
+  elements.socialWatchlistSelectAll.checked = entries.length > 0 && selectedCount === entries.length;
+  elements.socialWatchlistSelectAll.indeterminate = selectedCount > 0 && selectedCount < entries.length;
+  elements.socialWatchlistAdd.disabled = state.socialMutationBusy;
+  if (!entries.length) {
+    elements.socialWatchlist.innerHTML = '<div class="monitor-empty-state"><i data-lucide="user-round-search" aria-hidden="true"></i><strong>监控名单为空</strong><span>加入账号后会同步到 DeBot。</span></div>';
+    refreshIcons(elements.socialWatchlist);
     return;
   }
-  elements.monitorClusterList.innerHTML = clusters.map((cluster) => {
-    const alerted = cluster.walletCount >= threshold;
-    const tokenAddress = normalizeAddress(cluster.tokenAddress);
-    const symbol = String(cluster.tokenSymbol || 'TOKEN');
-    const tokenUrl = safeHttpUrl(cluster.debotTokenUrl) || (tokenAddress ? `${DEBOT_TOKEN_ROOT}${tokenAddress}` : '');
-    const wallets = [...(cluster.wallets instanceof Map ? cluster.wallets : new Map()).entries()];
-    const walletCopy = wallets.slice(0, 3).map(([, alias]) => alias).join('、');
-    const extraWallets = Math.max(0, cluster.walletCount - Math.min(wallets.length, 3));
+  elements.socialWatchlist.innerHTML = entries.map((entry) => {
+    const id = Number(entry.id);
+    const handle = String(entry.handle || entry.accountKey || 'unknown').replace(/^@/, '');
+    const status = String(entry.syncStatus || 'pending');
+    const statusLabel = status === 'synced' ? '已同步' : status === 'failed' ? '失败' : '待同步';
     return `
-      <article class="monitor-cluster-item${alerted ? ' is-alert' : ''}" data-token="${escapeHtml(cluster.key)}">
-        <div class="monitor-token-mark" aria-hidden="true">${escapeHtml(tokenInitials(symbol))}</div>
-        <div class="monitor-cluster-copy">
-          <div class="monitor-cluster-title">
-            ${tokenUrl ? `<a href="${escapeHtml(tokenUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(symbol)}<i data-lucide="external-link" aria-hidden="true"></i></a>` : `<strong>${escapeHtml(symbol)}</strong>`}
-            ${alerted ? '<span class="monitor-alert-chip"><i data-lucide="bell-ring" aria-hidden="true"></i>已触发</span>' : ''}
-          </div>
-          <p>${escapeHtml(walletCopy || `${cluster.walletCount} 个已确认地址`)}${extraWallets ? ` 等 ${formatInteger(cluster.walletCount)} 个地址` : ''}</p>
-          <span>${escapeHtml(formatMonitorAge(cluster.latestAt))}有新买入</span>
-        </div>
-        <div class="monitor-cluster-count">
-          <strong>${formatInteger(cluster.walletCount)}</strong>
-          <span>/ ${formatInteger(threshold)} 地址</span>
+      <label class="social-watchlist-item" data-social-watchlist-id="${id}">
+        <input type="checkbox" data-social-watchlist-select="${id}"${state.socialSelectedWatchlist.has(id) ? ' checked' : ''} />
+        <span class="social-watchlist-avatar" aria-hidden="true">${escapeHtml(handle.slice(0, 2).toUpperCase())}</span>
+        <span class="social-watchlist-copy"><strong>${escapeHtml(entry.name || `@${handle}`)}</strong><span>@${escapeHtml(handle)} · ${escapeHtml(socialSourceLabel(entry.platform))}</span></span>
+        <span class="social-sync-chip" data-state="${escapeHtml(status)}" title="${escapeHtml(entry.lastError || '')}">${statusLabel}</span>
+      </label>
+    `;
+  }).join('');
+}
+
+function renderSocialFeed() {
+  const posts = visibleSocialPosts();
+  if (!posts.length) {
+    elements.socialFeed.innerHTML = '<div class="monitor-empty-state"><i data-lucide="messages-square" aria-hidden="true"></i><strong>没有符合条件的消息</strong><span>等待 DeBot 新消息或调整筛选。</span></div>';
+    refreshIcons(elements.socialFeed);
+    return;
+  }
+  elements.socialFeed.innerHTML = posts.map((post) => {
+    const author = post.author || {};
+    const profileUrl = safeHttpUrl(socialProfileUrl(post));
+    const postUrl = safeHttpUrl(post.url);
+    const avatarUrl = safeHttpUrl(author.avatarUrl);
+    const followers = finiteNumber(author.followers);
+    const contracts = Array.isArray(post.contractAddresses) ? post.contractAddresses : [];
+    const chainTags = Array.isArray(post.chainTags) ? post.chainTags : [];
+    const media = Array.isArray(post.media) ? post.media : [];
+    const contractMarkup = contracts.map((contract) => {
+      const address = String(contract?.address || contract || '');
+      const url = safeHttpUrl(socialContractUrl(contract, post));
+      const label = address.length > 16 ? `${address.slice(0, 8)}...${address.slice(-6)}` : address;
+      return url ? `<a class="social-contract-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer"><i data-lucide="scan-line" aria-hidden="true"></i>${escapeHtml(label)}</a>` : '';
+    }).join('');
+    const mediaMarkup = media.slice(0, 6).map((item) => {
+      const url = safeHttpUrl(item?.url || item?.previewUrl);
+      if (!url) return '';
+      return item.type === 'video'
+        ? `<video src="${escapeHtml(url)}" controls preload="metadata"></video>`
+        : `<img src="${escapeHtml(url)}" alt="" loading="lazy" />`;
+    }).join('');
+    return `
+      <article class="social-post${post.deleted ? ' is-deleted' : ''}" data-source="${escapeHtml(post.source || 'debot')}">
+        <div class="social-avatar">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" loading="lazy" />` : escapeHtml(socialInitials(post))}</div>
+        <div class="social-post-copy">
+          <header class="social-post-head">
+            <div class="social-post-author">
+              <div class="social-post-author-line">
+                <strong>${escapeHtml(author.name || author.handle || '未知账号')}</strong>
+                ${profileUrl ? `<a href="${escapeHtml(profileUrl)}" target="_blank" rel="noopener noreferrer">@${escapeHtml(author.handle || '')}</a>` : ''}
+              </div>
+              <div class="social-post-meta">
+                <span class="social-source-chip" data-source="${escapeHtml(post.source || 'debot')}">${escapeHtml(socialSourceLabel(post.source))}</span>
+                <span class="social-post-kind">${escapeHtml(socialKindLabel(post))}</span>
+                ${followers !== null ? `<span>${escapeHtml(compactNumberFormatter.format(followers))} 粉丝</span>` : ''}
+                ${chainTags.map((chain) => `<span class="social-chain-chip" data-chain="${escapeHtml(chain)}">${escapeHtml(CHAIN_CONFIGS[chain]?.label || chain)}</span>`).join('')}
+              </div>
+            </div>
+            <time class="social-post-time" datetime="${escapeHtml(String(post.publishedAt || ''))}" title="${escapeHtml(formatDateTime(post.publishedAt))}">${escapeHtml(formatMonitorAge(post.publishedAt))}</time>
+          </header>
+          ${post.content ? `<p class="social-post-content">${escapeHtml(post.content)}</p>` : ''}
+          ${post.translatedContent && post.translatedContent !== post.content ? `<p class="social-post-translation">${escapeHtml(post.translatedContent)}</p>` : ''}
+          ${contractMarkup ? `<div class="social-post-contracts">${contractMarkup}</div>` : ''}
+          ${mediaMarkup ? `<div class="social-post-media">${mediaMarkup}</div>` : ''}
+          ${postUrl ? `<footer class="social-post-footer"><a href="${escapeHtml(postUrl)}" target="_blank" rel="noopener noreferrer">查看原文<i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a></footer>` : ''}
         </div>
       </article>
     `;
   }).join('');
-  refreshIcons(elements.monitorClusterList);
+  refreshIcons(elements.socialFeed);
+}
+
+function renderSocialMonitor() {
+  renderSocialBridgeStatus();
+  renderSocialWatchlist();
+  renderSocialFeed();
+  refreshIcons(elements.socialMonitorPanel);
 }
 
 function renderMonitorWindowLabels() {
   const windowLabel = formatMonitorWindowDuration();
   elements.monitorWindowDescription.textContent = `已确认地址 · 金额不限 · ${windowLabel}滚动窗口`;
   elements.monitorThresholdLabel.textContent = `${windowLabel}同币提醒人数`;
-  elements.monitorClusterTitle.textContent = `${windowLabel}同币聚合`;
-  elements.monitorWindowChipLabel.textContent = windowLabel;
 }
 
 function renderMonitorEvents() {
@@ -1303,8 +1548,8 @@ function renderMonitorPage() {
   renderMonitorBarkTargets();
   renderMonitorHealth();
   renderMonitorWindowLabels();
-  renderMonitorClusters();
   renderMonitorEvents();
+  renderSocialMonitor();
   refreshIcons(elements.monitorPage);
 }
 
@@ -1621,6 +1866,233 @@ function applyMonitorStreamEventUpdate(event) {
   renderMonitorEvents();
 }
 
+function readSocialDeviceToken() {
+  try {
+    return String(window.localStorage.getItem(SOCIAL_DEVICE_TOKEN_STORAGE_KEY) || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+function storeSocialDeviceToken(value) {
+  const token = String(value || '').trim();
+  try {
+    if (token) window.localStorage.setItem(SOCIAL_DEVICE_TOKEN_STORAGE_KEY, token);
+    else window.localStorage.removeItem(SOCIAL_DEVICE_TOKEN_STORAGE_KEY);
+  } catch {
+    throw new Error('当前浏览器无法保存设备配对密钥');
+  }
+  return token;
+}
+
+function requestSocialExtension(method, path, body = null) {
+  const requestId = `social-${Date.now()}-${++state.socialExtensionRequestSequence}`;
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      state.socialExtensionRequests.delete(requestId);
+      reject(new Error('DeBot 桥接器响应超时'));
+    }, 12_000);
+    state.socialExtensionRequests.set(requestId, { resolve, reject, timeout });
+    window.postMessage({
+      source: 'robinhood-radar',
+      type: 'social-command',
+      requestId,
+      command: { method, path, body }
+    }, window.location.origin);
+  });
+}
+
+async function runSocialWrite(method, path, body = null) {
+  if (state.socialExtensionReady) return requestSocialExtension(method, path, body);
+  const token = readSocialDeviceToken();
+  if (!token) throw new Error('请先连接 DeBot 桥接器或保存设备配对密钥');
+  return fetchJson(`${SOCIAL_API_ROOT}${path}`, {
+    method,
+    headers: { authorization: `Bearer ${token}` },
+    ...(body === null ? {} : { body: JSON.stringify(body) })
+  });
+}
+
+function socialLifecycleIsCurrent(sequence) {
+  return sequence === state.socialSequence && state.socialStarted && state.activeTab === 'monitor';
+}
+
+async function loadSocialSnapshot({ quiet = false, expectedSequence = state.socialSequence } = {}) {
+  if (!socialLifecycleIsCurrent(expectedSequence)) return false;
+  state.socialSnapshotAbortController?.abort();
+  const controller = new AbortController();
+  state.socialSnapshotAbortController = controller;
+  if (!quiet) elements.socialRefreshButton.disabled = true;
+  try {
+    const payload = await fetchJson(`${SOCIAL_API_ROOT}?postLimit=100`, { signal: controller.signal });
+    if (!socialLifecycleIsCurrent(expectedSequence) || state.socialSnapshotAbortController !== controller) return false;
+    applySocialSnapshot(payload);
+    return true;
+  } catch (error) {
+    if (error?.name === 'AbortError' || !socialLifecycleIsCurrent(expectedSequence)) return false;
+    state.socialConnected = false;
+    renderSocialBridgeStatus();
+    elements.socialMonitorSummary.textContent = error.message;
+    if (!quiet) showToast(`社媒监控刷新失败：${error.message}`, 'error');
+    return false;
+  } finally {
+    if (state.socialSnapshotAbortController === controller) state.socialSnapshotAbortController = null;
+    if (socialLifecycleIsCurrent(expectedSequence)) elements.socialRefreshButton.disabled = false;
+  }
+}
+
+async function loadSocialStatus(expectedSequence = state.socialSequence) {
+  if (!socialLifecycleIsCurrent(expectedSequence)) return;
+  try {
+    const payload = unwrapRecord(await fetchJson(`${SOCIAL_API_ROOT}/status`));
+    if (!socialLifecycleIsCurrent(expectedSequence)) return;
+    if (payload.bridge && typeof payload.bridge === 'object') {
+      state.socialBridge = { ...state.socialBridge, ...payload.bridge };
+    }
+    if (payload.counts && typeof payload.counts === 'object') state.socialCounts = { ...payload.counts };
+    state.socialConnected = payload.ok !== false;
+    renderSocialBridgeStatus();
+    renderSocialWatchlist();
+  } catch {
+    if (!socialLifecycleIsCurrent(expectedSequence)) return;
+    state.socialConnected = false;
+    renderSocialBridgeStatus();
+  }
+}
+
+function parseSocialStreamEvent(event) {
+  try {
+    return JSON.parse(event.data || '{}');
+  } catch {
+    return null;
+  }
+}
+
+function scheduleSocialReconnect(sequence) {
+  clearTimeout(state.socialReconnectTimer);
+  if (!socialLifecycleIsCurrent(sequence)) return;
+  state.socialReconnectTimer = setTimeout(async () => {
+    state.socialReconnectTimer = null;
+    if (!socialLifecycleIsCurrent(sequence)) return;
+    await loadSocialSnapshot({ quiet: true, expectedSequence: sequence });
+    if (socialLifecycleIsCurrent(sequence)) connectSocialStream(sequence);
+  }, SOCIAL_STREAM_RETRY_MS);
+}
+
+function connectSocialStream(sequence = state.socialSequence) {
+  if (!socialLifecycleIsCurrent(sequence)) return;
+  clearTimeout(state.socialReconnectTimer);
+  state.socialReconnectTimer = null;
+  if (state.socialEventSource) state.socialEventSource.close();
+  state.socialEventSource = null;
+  if (!('EventSource' in window)) {
+    scheduleSocialReconnect(sequence);
+    return;
+  }
+  const source = new EventSource(`${SOCIAL_API_ROOT}/stream?after=${encodeURIComponent(state.socialLatestChangeId)}`);
+  state.socialEventSource = source;
+  const isCurrent = () => state.socialEventSource === source && socialLifecycleIsCurrent(sequence);
+  source.addEventListener('open', () => {
+    if (!isCurrent()) return;
+    state.socialConnected = true;
+    renderSocialBridgeStatus();
+  });
+  source.addEventListener('snapshot', (event) => {
+    if (isCurrent()) applySocialSnapshot(parseSocialStreamEvent(event));
+  });
+  const applyChange = (event) => {
+    if (!isCurrent()) return;
+    state.socialConnected = true;
+    applySocialChange(parseSocialStreamEvent(event));
+  };
+  for (const eventName of ['post.created', 'post.updated', 'post.deleted', 'post.restored', 'watchlist.updated']) {
+    source.addEventListener(eventName, applyChange);
+  }
+  source.addEventListener('error', () => {
+    if (!isCurrent()) return;
+    source.close();
+    state.socialEventSource = null;
+    state.socialConnected = false;
+    renderSocialBridgeStatus();
+    scheduleSocialReconnect(sequence);
+  });
+}
+
+async function startSocialMonitor({ manual = false } = {}) {
+  stopSocialMonitor();
+  state.socialStarted = true;
+  const sequence = state.socialSequence;
+  renderSocialMonitor();
+  await loadSocialSnapshot({ quiet: !manual, expectedSequence: sequence });
+  if (!socialLifecycleIsCurrent(sequence)) return;
+  state.socialStatusTimer = setInterval(() => void loadSocialStatus(sequence), SOCIAL_STATUS_REFRESH_MS);
+  connectSocialStream(sequence);
+}
+
+function stopSocialMonitor() {
+  state.socialSequence += 1;
+  state.socialStarted = false;
+  state.socialConnected = false;
+  state.socialSearchQuery = elements.socialSearch.value;
+  clearTimeout(state.socialSearchTimer);
+  clearTimeout(state.socialReconnectTimer);
+  clearInterval(state.socialStatusTimer);
+  state.socialSearchTimer = null;
+  state.socialReconnectTimer = null;
+  state.socialStatusTimer = null;
+  state.socialSnapshotAbortController?.abort();
+  state.socialSnapshotAbortController = null;
+  if (state.socialEventSource) state.socialEventSource.close();
+  state.socialEventSource = null;
+}
+
+async function addSocialWatchAccounts(event) {
+  event.preventDefault();
+  const lines = elements.socialWatchlistInput.value
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!lines.length) return;
+  const platform = elements.socialWatchlistPlatform.value;
+  state.socialMutationBusy = true;
+  renderSocialWatchlist();
+  try {
+    const payload = await runSocialWrite('POST', '/watchlist/batch', {
+      accounts: lines.map((handle) => ({ handle, platform }))
+    });
+    elements.socialWatchlistInput.value = '';
+    if (Array.isArray(payload.entries)) {
+      for (const entry of payload.entries) applySocialWatchlistEntry(entry);
+    }
+    await loadSocialSnapshot({ quiet: true });
+    showToast(`已提交 ${lines.length} 个社媒账号`);
+  } catch (error) {
+    showToast(`加入社媒监控失败：${error.message}`, 'error');
+  } finally {
+    state.socialMutationBusy = false;
+    renderSocialWatchlist();
+  }
+}
+
+async function deleteSelectedSocialWatchAccounts() {
+  const ids = [...state.socialSelectedWatchlist];
+  if (!ids.length) return;
+  if (!window.confirm(`从 DeBot 监控名单删除选中的 ${ids.length} 个账号？`)) return;
+  state.socialMutationBusy = true;
+  renderSocialWatchlist();
+  try {
+    for (const id of ids) await runSocialWrite('DELETE', `/watchlist/${id}`);
+    state.socialSelectedWatchlist.clear();
+    await loadSocialSnapshot({ quiet: true });
+    showToast(`已提交删除 ${ids.length} 个社媒账号`);
+  } catch (error) {
+    showToast(`删除社媒账号失败：${error.message}`, 'error');
+  } finally {
+    state.socialMutationBusy = false;
+    renderSocialWatchlist();
+  }
+}
+
 function stopMonitorTransport() {
   state.monitorSequence += 1;
   clearTimeout(state.monitorPollTimer);
@@ -1635,6 +2107,7 @@ function stopMonitorTransport() {
   state.monitorStarted = false;
   state.monitorTransport = 'idle';
   state.monitorConnected = false;
+  stopSocialMonitor();
 }
 
 function scheduleMonitorPoll(delay = MONITOR_POLL_INTERVAL_MS) {
@@ -1752,6 +2225,7 @@ async function startMonitorPage({ manual = false } = {}) {
   state.monitorTransport = 'loading';
   state.monitorHealth = manual ? {} : state.monitorHealth;
   renderMonitorPage();
+  void startSocialMonitor({ manual });
   elements.monitorRefreshButton.disabled = true;
   try {
     const payload = await fetchChainJson(context, '/monitor?limit=200');
@@ -1774,7 +2248,6 @@ async function startMonitorPage({ manual = false } = {}) {
     !state.monitorStarted || state.activeTab !== 'monitor') return;
   state.monitorTickTimer = setInterval(() => {
     synchronizeMonitorAlerts();
-    renderMonitorClusters();
   }, 1_000);
   connectMonitorStream(context);
 }
@@ -4509,6 +4982,89 @@ elements.monitorBarkList.addEventListener('click', (event) => {
   const button = event.target.closest('[data-bark-action]');
   if (button) void runBarkAction(button);
 });
+elements.socialRefreshButton.addEventListener('click', () => void loadSocialSnapshot());
+elements.socialManageButton.addEventListener('click', () => {
+  const nextHidden = !elements.socialWatchlistManager.hidden;
+  elements.socialWatchlistManager.hidden = nextHidden;
+  elements.socialManageButton.setAttribute('aria-expanded', String(!nextHidden));
+  if (!nextHidden) renderSocialWatchlist();
+});
+elements.socialManagerClose.addEventListener('click', () => {
+  elements.socialWatchlistManager.hidden = true;
+  elements.socialManageButton.setAttribute('aria-expanded', 'false');
+});
+elements.socialFeedTabs.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-social-feed]');
+  if (!button) return;
+  state.socialFeedFilter = button.dataset.socialFeed;
+  elements.socialFeedTabs.querySelectorAll('[data-social-feed]').forEach((candidate) => {
+    const active = candidate === button;
+    candidate.classList.toggle('is-active', active);
+    candidate.setAttribute('aria-selected', String(active));
+  });
+  renderSocialFeed();
+});
+elements.socialPlatformFilter.addEventListener('change', () => {
+  state.socialPlatformFilter = elements.socialPlatformFilter.value;
+  renderSocialFeed();
+});
+elements.socialChainFilter.addEventListener('change', () => {
+  state.socialChainFilter = elements.socialChainFilter.value;
+  renderSocialFeed();
+});
+elements.socialSearch.addEventListener('input', () => {
+  clearTimeout(state.socialSearchTimer);
+  state.socialSearchTimer = setTimeout(() => {
+    state.socialSearchQuery = elements.socialSearch.value;
+    renderSocialFeed();
+  }, SOCIAL_SEARCH_DEBOUNCE_MS);
+});
+elements.socialWatchlistForm.addEventListener('submit', addSocialWatchAccounts);
+elements.socialPairingSave.addEventListener('click', () => {
+  try {
+    const token = storeSocialDeviceToken(elements.socialPairingToken.value);
+    elements.socialPairingToken.value = '';
+    elements.socialPairingToken.placeholder = token ? '配对密钥已保存在当前浏览器' : '只保存在当前浏览器';
+    showToast(token ? '设备配对密钥已保存' : '设备配对密钥已清除');
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+});
+elements.socialWatchlistSelectAll.addEventListener('change', () => {
+  state.socialSelectedWatchlist.clear();
+  if (elements.socialWatchlistSelectAll.checked) {
+    for (const entry of state.socialWatchlist) state.socialSelectedWatchlist.add(Number(entry.id));
+  }
+  renderSocialWatchlist();
+});
+elements.socialWatchlist.addEventListener('change', (event) => {
+  const checkbox = event.target.closest('[data-social-watchlist-select]');
+  if (!checkbox) return;
+  const id = Number(checkbox.dataset.socialWatchlistSelect);
+  if (!Number.isSafeInteger(id)) return;
+  if (checkbox.checked) state.socialSelectedWatchlist.add(id);
+  else state.socialSelectedWatchlist.delete(id);
+  renderSocialWatchlist();
+});
+elements.socialWatchlistDelete.addEventListener('click', () => void deleteSelectedSocialWatchAccounts());
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window || event.origin !== window.location.origin) return;
+  const message = event.data;
+  if (!message || message.source !== 'robinhood-social-bridge') return;
+  if (message.type === 'ready') {
+    state.socialExtensionReady = true;
+    renderSocialBridgeStatus();
+    return;
+  }
+  if (message.type !== 'response' || !message.requestId) return;
+  const pending = state.socialExtensionRequests.get(message.requestId);
+  if (!pending) return;
+  clearTimeout(pending.timeout);
+  state.socialExtensionRequests.delete(message.requestId);
+  if (message.ok) pending.resolve(message.payload || {});
+  else pending.reject(new Error(message.error || 'DeBot 桥接操作失败'));
+});
 
 elements.results.addEventListener('click', (event) => {
   if (event.target.closest('[data-candidate-select], .debot-link')) return;
@@ -4634,6 +5190,10 @@ elements.detail.addEventListener('error', (event) => {
   event.target.hidden = true;
   const fallback = event.target.nextElementSibling;
   if (fallback) fallback.hidden = false;
+}, true);
+
+elements.socialFeed.addEventListener('error', (event) => {
+  if (event.target instanceof HTMLImageElement) event.target.hidden = true;
 }, true);
 
 window.addEventListener('hashchange', () => {

@@ -102,6 +102,25 @@ export function createRobinhoodConfig(env = process.env) {
     autoScanLimit: boundedNumber(env.ROBINHOOD_AUTO_SCAN_LIMIT, 8, 0, 20),
     discoveryLimit: boundedNumber(env.ROBINHOOD_DISCOVERY_LIMIT, 50, 5, 100),
     requestTimeoutMs: boundedNumber(env.ROBINHOOD_REQUEST_TIMEOUT_MS, 20_000, 1_000, 60_000),
+    marketRequestTimeoutMs: boundedNumber(env.ROBINHOOD_MARKET_REQUEST_TIMEOUT_MS, 5_000, 500, 60_000),
+    marketDebotFallbackTimeoutMs: boundedNumber(
+      env.ROBINHOOD_MARKET_DEBOT_FALLBACK_TIMEOUT_MS,
+      3_000,
+      250,
+      20_000
+    ),
+    monitorMarketDataCacheSeconds: Math.floor(boundedNumber(
+      env.ROBINHOOD_MONITOR_MARKET_DATA_CACHE_SECONDS,
+      60,
+      10,
+      3_600
+    )),
+    monitorMarketDataBatchSize: Math.floor(boundedNumber(
+      env.ROBINHOOD_MONITOR_MARKET_DATA_BATCH_SIZE,
+      30,
+      1,
+      30
+    )),
     rpcMaxRetries: boundedNumber(env.ROBINHOOD_RPC_MAX_RETRIES, 6, 0, 12),
     rpcRetryDelayMs: boundedNumber(env.ROBINHOOD_RPC_RETRY_DELAY_MS, 500, 0, 10_000),
     rpcMaxRetryDelayMs: boundedNumber(env.ROBINHOOD_RPC_MAX_RETRY_DELAY_MS, 15_000, 100, 60_000),

@@ -351,6 +351,22 @@ test('routes Base requests through the same client without changing EVM address 
   assert.equal(requests.length, 1);
 });
 
+test('surfaces a DeBot 403 as non-retryable without repeating the blocked request', async () => {
+  let requests = 0;
+  const client = new RobinhoodDebotClient({
+    fetchImpl: async () => {
+      requests += 1;
+      return new Response('Cloudflare challenge', { status: 403 });
+    }
+  });
+
+  await assert.rejects(
+    client.fetchTokenMetrics(tokenAddress),
+    (error) => error.status === 403 && error.retryable === false
+  );
+  assert.equal(requests, 1);
+});
+
 test('preserves case-sensitive Solana addresses and supports injected address adapters', async () => {
   const solToken = 'So11111111111111111111111111111111111111112';
   const solWallet = 'Vote111111111111111111111111111111111111111';

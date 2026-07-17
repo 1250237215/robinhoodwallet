@@ -13,6 +13,10 @@ Environment=HOST=127.0.0.1
 Environment=PORT=18118
 Environment=ROBINHOOD_PUBLIC_DIR=/opt/robinhood-radar/public
 Environment=ROBINHOOD_DATA_FILE=/var/lib/robinhood-radar/robinhood.sqlite
+Environment=SOCIAL_DATA_FILE=/var/lib/robinhood-radar/social.sqlite
+Environment=SOCIAL_RETENTION_DAYS=7
+Environment=SOCIAL_BRIDGE_OFFLINE_MS=15000
+Environment=SOCIAL_COMMAND_LEASE_MS=30000
 Environment=ROBINHOOD_MIN_ENTRY_USD=500
 Environment=ROBINHOOD_SIGNIFICANT_PROFIT_RATE=0.002
 Environment=ROBINHOOD_SMART_BASE_MULTIPLE=5
@@ -48,6 +52,7 @@ Environment=ROBINHOOD_MONITOR_DEEP_LIVE_BLOCK_SPAN=20
 Environment=ROBINHOOD_MONITOR_DEEP_GAP_BLOCK_SPAN=20
 Environment=ROBINHOOD_MONITOR_DEEP_GAP_POLL_INTERVAL_MS=5000
 Environment=ROBINHOOD_MONITOR_TOKEN_METADATA_BUDGET_MS=1500
+EnvironmentFile=-/etc/robinhood-radar/social.env
 ExecStart=/usr/local/bin/node /opt/robinhood-radar/robinhood-server.mjs
 Restart=on-failure
 RestartSec=5

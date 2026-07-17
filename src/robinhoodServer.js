@@ -7,12 +7,16 @@ import { BARK_SOUNDS, createRobinhoodBarkNotifier } from './robinhood/bark.js';
 import { RobinhoodDebotClient } from './robinhood/debotClient.js';
 import { RobinhoodHolderClient } from './robinhood/holderClient.js';
 import { scanTokenHolders } from './robinhood/holderScanner.js';
+import { RobinhoodDexScreenerClient, RobinhoodMarketDataClient } from './robinhood/marketClient.js';
 import { createRobinhoodWalletMonitor } from './robinhood/monitor.js';
 import { validateWalletMonitorRulesPatch } from './robinhood/monitorRules.js';
 import { RobinhoodRpcClient } from './robinhood/rpcClient.js';
 import { createRobinhoodService, MAX_WALLET_BATCH_LINES } from './robinhood/service.js';
 import { createRobinhoodStore } from './robinhood/store.js';
 import { WALLET_MONITOR_TIERS } from './robinhood/tiering.js';
+import { createSocialConfig } from './social/config.js';
+import { createSocialApiHandler } from './social/http.js';
+import { createSocialService } from './social/service.js';
 
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 const TABS = new Set(['all_round', 'realized', 'unrealized', 'single_hit', 'all']);
@@ -631,6 +635,8 @@ async function serveStatic(req, res, url, publicDir) {
 export function createRobinhoodStandaloneServer({
   service,
   monitor = null,
+  socialService = null,
+  socialBridgeToken = '',
   publicDir = path.resolve('public'),
   apiPrefix = '/api/robinhood',
   addressCodec = DEFAULT_ADDRESS_CODEC,
@@ -638,10 +644,14 @@ export function createRobinhoodStandaloneServer({
   servePublic = true
 }) {
   const normalizedApiPrefix = `/${String(apiPrefix || '/api/robinhood').replace(/^\/+|\/+$/g, '')}`;
+  const socialApiHandler = socialService
+    ? createSocialApiHandler({ service: socialService, bridgeToken: socialBridgeToken })
+    : null;
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
       if (typeof extraApiHandler === 'function' && await extraApiHandler(req, res, url)) return;
+      if (socialApiHandler && await socialApiHandler(req, res, url)) return;
       if (url.pathname === normalizedApiPrefix || url.pathname.startsWith(`${normalizedApiPrefix}/`)) {
         const routedUrl = new URL(url);
         routedUrl.pathname = `/api/robinhood${url.pathname.slice(normalizedApiPrefix.length)}`;
@@ -680,16 +690,37 @@ export function createRobinhoodStandaloneServer({
     }
   });
   if (monitor?.close) server.once('close', () => monitor.close());
+  if (socialService?.close) server.once('close', () => socialService.close());
   return server;
 }
 
 export async function startRobinhoodStandaloneServer(
   env = process.env,
-  { monitorRpcClient = null, debotClient = null } = {}
+  {
+    monitorRpcClient = null,
+    debotClient = null,
+    dexScreenerClient = null,
+    marketDataClient = null,
+    fetchImpl = globalThis.fetch
+  } = {}
 ) {
   const config = createRobinhoodConfig(env);
   const store = createRobinhoodStore(config.dataFile);
-  const activeDebotClient = debotClient || new RobinhoodDebotClient({ timeoutMs: config.requestTimeoutMs });
+  const socialConfig = createSocialConfig(env, { fallbackDirectory: path.dirname(config.dataFile) });
+  const socialService = createSocialService({ config: socialConfig });
+  const activeDebotClient = debotClient || new RobinhoodDebotClient({
+    timeoutMs: config.requestTimeoutMs,
+    fetchImpl
+  });
+  const activeDexScreenerClient = dexScreenerClient || new RobinhoodDexScreenerClient({
+    timeoutMs: config.marketRequestTimeoutMs,
+    fetchImpl
+  });
+  const activeMarketDataClient = marketDataClient || new RobinhoodMarketDataClient({
+    primary: activeDexScreenerClient,
+    fallback: activeDebotClient,
+    fallbackTimeoutMs: config.marketDebotFallbackTimeoutMs
+  });
   const rpcClient = monitorRpcClient || new RobinhoodRpcClient({
     rpcUrl: config.rpcUrl,
     timeoutMs: config.requestTimeoutMs,
@@ -733,13 +764,17 @@ export async function startRobinhoodStandaloneServer(
     deepGapBlockSpan: config.monitorDeepGapBlockSpan,
     deepGapPollIntervalMs: config.monitorDeepGapPollIntervalMs,
     tokenMetadataBudgetMs: config.monitorTokenMetadataBudgetMs,
+    marketDataCacheSeconds: config.monitorMarketDataCacheSeconds,
+    marketDataBatchSize: config.monitorMarketDataBatchSize,
     noxaLaunchFactory: config.noxaLaunchFactory,
     barkNotifier,
-    debotClient: activeDebotClient
+    debotClient: activeMarketDataClient
   });
   const server = createRobinhoodStandaloneServer({
     service,
     monitor,
+    socialService,
+    socialBridgeToken: socialConfig.bridgeToken,
     publicDir: env.ROBINHOOD_PUBLIC_DIR || path.resolve('public')
   });
   const host = env.HOST || '127.0.0.1';
@@ -750,5 +785,17 @@ export async function startRobinhoodStandaloneServer(
   });
   service.start();
   monitor.start();
-  return { server, service, monitor, store, host, port };
+  socialService.start();
+  return {
+    server,
+    service,
+    monitor,
+    store,
+    debotClient: activeDebotClient,
+    dexScreenerClient: activeDexScreenerClient,
+    marketDataClient: activeMarketDataClient,
+    socialService,
+    host,
+    port
+  };
 }

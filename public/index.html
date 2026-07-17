@@ -391,19 +391,113 @@
         </section>
 
         <div class="monitor-workspace">
-          <section class="monitor-cluster-panel" aria-labelledby="monitor-cluster-title">
-            <header class="monitor-panel-head">
+          <section class="social-monitor-panel" id="social-monitor-panel" aria-labelledby="social-monitor-title">
+            <header class="monitor-panel-head social-monitor-head">
               <div>
-                <h3 id="monitor-cluster-title">60 秒同币聚合</h3>
-                <p id="monitor-cluster-summary">滚动统计最近 60 秒的不同地址</p>
+                <div class="social-monitor-title-line">
+                  <h3 id="social-monitor-title">社媒监控</h3>
+                  <span class="social-bridge-badge" id="social-bridge-badge" data-state="loading">
+                    <span aria-hidden="true"></span>
+                    <strong id="social-bridge-label">正在连接</strong>
+                  </span>
+                </div>
+                <p id="social-monitor-summary">正在读取 DeBot 社媒消息</p>
               </div>
-              <span class="monitor-window-chip" id="monitor-window-chip"><i data-lucide="clock-3" aria-hidden="true"></i><span id="monitor-window-chip-label">60 秒</span></span>
+              <div class="social-head-actions">
+                <button class="inline-icon-button" id="social-manage-button" type="button" title="管理社媒监控名单" aria-label="管理社媒监控名单" aria-expanded="false">
+                  <i data-lucide="users" aria-hidden="true"></i>
+                </button>
+                <button class="inline-icon-button" id="social-refresh-button" type="button" title="刷新社媒监控" aria-label="刷新社媒监控">
+                  <i data-lucide="refresh-cw" aria-hidden="true"></i>
+                </button>
+              </div>
             </header>
-            <div class="monitor-cluster-list" id="monitor-cluster-list" aria-live="polite">
+
+            <div class="social-monitor-toolbar">
+              <div class="social-feed-tabs" id="social-feed-tabs" role="tablist" aria-label="社媒消息范围">
+                <button type="button" role="tab" data-social-feed="all" aria-selected="true" class="is-active">全部</button>
+                <button type="button" role="tab" data-social-feed="featured" aria-selected="false">精选</button>
+                <button type="button" role="tab" data-social-feed="my" aria-selected="false">我的</button>
+              </div>
+              <label>
+                <span class="sr-only">社媒来源</span>
+                <select id="social-platform-filter" aria-label="社媒来源">
+                  <option value="all">全部来源</option>
+                  <option value="twitter">推特</option>
+                  <option value="binance">币安广场</option>
+                </select>
+              </label>
+              <label>
+                <span class="sr-only">关联链</span>
+                <select id="social-chain-filter" aria-label="关联链">
+                  <option value="all">全部链</option>
+                  <option value="robinhood">Robinhood</option>
+                  <option value="base">Base</option>
+                  <option value="solana">Solana</option>
+                </select>
+              </label>
+              <label class="social-search-field">
+                <i data-lucide="search" aria-hidden="true"></i>
+                <input id="social-search" type="search" autocomplete="off" placeholder="搜索账号或内容" aria-label="搜索社媒消息" />
+              </label>
+            </div>
+
+            <section class="social-watchlist-manager" id="social-watchlist-manager" aria-labelledby="social-watchlist-title" hidden>
+              <header>
+                <div>
+                  <h4 id="social-watchlist-title">DeBot 监控名单</h4>
+                  <p id="social-watchlist-summary">等待同步</p>
+                </div>
+                <button class="inline-icon-button" id="social-manager-close" type="button" title="关闭名单管理" aria-label="关闭名单管理">
+                  <i data-lucide="x" aria-hidden="true"></i>
+                </button>
+              </header>
+              <form class="social-watchlist-form" id="social-watchlist-form">
+                <label>
+                  <span>账号，一行一个</span>
+                  <textarea id="social-watchlist-input" rows="3" placeholder="@username&#10;https://x.com/username" required></textarea>
+                </label>
+                <label>
+                  <span>平台</span>
+                  <select id="social-watchlist-platform">
+                    <option value="twitter">推特</option>
+                    <option value="binance">币安广场</option>
+                  </select>
+                </label>
+                <button class="social-primary-button" id="social-watchlist-add" type="submit">
+                  <i data-lucide="user-plus" aria-hidden="true"></i>
+                  加入监控
+                </button>
+              </form>
+              <div class="social-pairing-row" id="social-pairing-row">
+                <label>
+                  <span>设备配对密钥</span>
+                  <input id="social-pairing-token" type="password" autocomplete="off" placeholder="只保存在当前浏览器" />
+                </label>
+                <button class="social-secondary-button" id="social-pairing-save" type="button">
+                  <i data-lucide="link" aria-hidden="true"></i>
+                  保存配对
+                </button>
+              </div>
+              <div class="social-watchlist-actions">
+                <label>
+                  <input id="social-watchlist-select-all" type="checkbox" />
+                  <span>全选</span>
+                </label>
+                <span id="social-watchlist-selected-count">已选 0 个</span>
+                <button class="social-danger-button" id="social-watchlist-delete" type="button" disabled>
+                  <i data-lucide="trash-2" aria-hidden="true"></i>
+                  批量删除
+                </button>
+              </div>
+              <div class="social-watchlist" id="social-watchlist" aria-live="polite"></div>
+            </section>
+
+            <div class="social-feed" id="social-feed" aria-live="polite">
               <div class="monitor-empty-state">
-                <i data-lucide="activity" aria-hidden="true"></i>
-                <strong>暂时没有同币聚合买入</strong>
-                <span>有已确认地址买入后会立即出现。</span>
+                <i data-lucide="messages-square" aria-hidden="true"></i>
+                <strong>等待 DeBot 社媒消息</strong>
+                <span>桥接器收到新内容后会立即显示。</span>
               </div>
             </div>
           </section>
