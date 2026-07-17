@@ -32,6 +32,15 @@ const MARKET_DATA_RETRY_BASE_MS = 30_000;
 const MARKET_DATA_RETRY_MAX_MS = 5 * 60_000;
 const MARKET_DATA_MAX_FAILURES = 6;
 const DEBOT_TOKEN_ROOT = 'https://debot.ai/token/robinhood/308574_';
+const DEFAULT_CHAIN_PROFILE = Object.freeze({
+  id: 'robinhood',
+  explorerUrl: ROBINHOOD_CHAIN.explorerUrl,
+  debotAddressRoot: 'https://debot.ai/address/robinhood',
+  debotTokenRoot: DEBOT_TOKEN_ROOT,
+  nativeSymbol: 'ETH',
+  nativeName: 'Ether',
+  nativeDecimals: 18
+});
 const DECIMALS_SELECTOR = '0x313ce567';
 const SYMBOL_SELECTOR = '0x95d89b41';
 const NAME_SELECTOR = '0x06fdde03';
@@ -189,23 +198,26 @@ function emptyInput(value) {
   return value === undefined || value === null || /^(?:0x0*)?$/i.test(String(value));
 }
 
-function eventLinks(event) {
+function eventLinks(event, chainProfile = DEFAULT_CHAIN_PROFILE) {
   return {
     ...event,
-    debotAddressUrl: `https://debot.ai/address/robinhood/${event.walletAddress}`,
-    debotTokenUrl: ADDRESS_PATTERN.test(event.tokenAddress) ? `${DEBOT_TOKEN_ROOT}${event.tokenAddress}` : '',
-    explorerTxUrl: `${ROBINHOOD_CHAIN.explorerUrl}/tx/${event.txHash}`
+    chain: chainProfile.id,
+    debotAddressUrl: `${chainProfile.debotAddressRoot}/${event.walletAddress}`,
+    debotTokenUrl: ADDRESS_PATTERN.test(event.tokenAddress)
+      ? `${chainProfile.debotTokenRoot}${event.tokenAddress}`
+      : '',
+    explorerTxUrl: `${chainProfile.explorerUrl}/tx/${event.txHash}`
   };
 }
 
-function publicEvent(event) {
+function publicEvent(event, chainProfile = DEFAULT_CHAIN_PROFILE) {
   return eventLinks({
     ...event,
     blockTimestampUnix: Number(event.blockTimestamp),
     blockTimestamp: isoFromSeconds(event.blockTimestamp),
     detectedAtUnix: Number(event.detectedAt),
     detectedAt: isoFromSeconds(event.detectedAt)
-  });
+  }, chainProfile);
 }
 
 function eventKey(log) {
@@ -309,7 +321,8 @@ export class RobinhoodWalletMonitor {
     marketDataRetryBaseMs = MARKET_DATA_RETRY_BASE_MS,
     marketDataRetryMaxMs = MARKET_DATA_RETRY_MAX_MS,
     quoteTokenAddresses = [ROBINHOOD_CHAIN.weth, ROBINHOOD_CHAIN.usdg],
-    noxaLaunchFactory = NOXA_LAUNCH_FACTORY
+    noxaLaunchFactory = NOXA_LAUNCH_FACTORY,
+    chainProfile = DEFAULT_CHAIN_PROFILE
   } = {}) {
     if (!store?.getMeta || !store?.setMeta || !store?.insertMonitorEvent) {
       throw new TypeError('A Robinhood monitor store is required');
@@ -369,9 +382,13 @@ export class RobinhoodWalletMonitor {
     this.marketDataFailures = new Map();
     this.marketDataPendingEventIds = new Map();
     this.marketDataActive = 0;
+    this.chainProfile = {
+      ...DEFAULT_CHAIN_PROFILE,
+      ...(chainProfile || {})
+    };
     this.quoteTokenAddresses = new Set(quoteTokenAddresses.map(normalizeAddress).filter((value) => ADDRESS_PATTERN.test(value)));
-    this.noxaLaunchFactory = normalizeAddress(noxaLaunchFactory);
-    if (!ADDRESS_PATTERN.test(this.noxaLaunchFactory)) {
+    this.noxaLaunchFactory = noxaLaunchFactory ? normalizeAddress(noxaLaunchFactory) : '';
+    if (this.noxaLaunchFactory && !ADDRESS_PATTERN.test(this.noxaLaunchFactory)) {
       throw new TypeError('A valid Noxa launch factory address is required');
     }
     this.settings = {
@@ -573,7 +590,8 @@ export class RobinhoodWalletMonitor {
   }
 
   getEvents({ after = 0, limit = 100 } = {}) {
-    return this.store.listMonitorEvents({ after, limit }).map(publicEvent);
+    return this.store.listMonitorEvents({ after, limit })
+      .map((event) => publicEvent(event, this.chainProfile));
   }
 
   listBarkTargets() {
@@ -645,7 +663,8 @@ export class RobinhoodWalletMonitor {
           threshold: this.settings.threshold,
           windowSeconds: this.settings.windowSeconds,
           triggered: wallets.length >= this.settings.threshold,
-          debotTokenUrl: `${DEBOT_TOKEN_ROOT}${cluster.tokenAddress}`
+          chain: this.chainProfile.id,
+          debotTokenUrl: `${this.chainProfile.debotTokenRoot}${cluster.tokenAddress}`
         };
       })
       .sort((a, b) => Number(b.triggered) - Number(a.triggered) || b.distinctWallets - a.distinctWallets ||
@@ -667,6 +686,7 @@ export class RobinhoodWalletMonitor {
               : 'live';
     return {
       ok: this.health.consecutiveErrors === 0,
+      chain: this.chainProfile.id,
       status,
       settings: { ...this.settings },
       barkTargets: this.listBarkTargets(),
@@ -1408,7 +1428,12 @@ export class RobinhoodWalletMonitor {
       const rule = ruleFor(annotation, candidate.eventType);
       if (!rule.enabled) continue;
       const metadata = candidate.assetType === 'native'
-        ? { symbol: 'ETH', name: 'Ether', decimals: 18, complete: true }
+        ? {
+            symbol: this.chainProfile.nativeSymbol,
+            name: this.chainProfile.nativeName,
+            decimals: this.chainProfile.nativeDecimals,
+            complete: true
+          }
         : metadataByAddress.get(candidate.tokenAddress);
       if (!metadata || candidate.requireCompleteMetadata && !metadata.complete) {
         if (lane === 'deep' && candidate.requireCompleteMetadata && metadata?.timedOut) {
@@ -1433,7 +1458,7 @@ export class RobinhoodWalletMonitor {
         ...marketData
       });
       if (!result.inserted) continue;
-      const event = publicEvent(result.event);
+      const event = publicEvent(result.event, this.chainProfile);
       detected.push(event);
       this.health.eventsDetected += 1;
       if (lane === 'deep') this.health.deepEventsDetected += 1;
@@ -1456,7 +1481,7 @@ export class RobinhoodWalletMonitor {
         tasks.push({ kind, wallets: addresses.slice(index, index + this.walletTopicChunkSize) });
       }
     }
-    if (watchNoxa) tasks.push({ kind: 'noxa', wallets: [] });
+    if (watchNoxa && this.noxaLaunchFactory) tasks.push({ kind: 'noxa', wallets: [] });
     const taskRows = new Array(tasks.length);
     let nextIndex = 0;
     let firstError = null;

@@ -1,15 +1,19 @@
-# Robinhood Wallet Radar
+# Multi-chain Wallet Radar
 
-Robinhood Wallet Radar is a smart-money research and real-time wallet monitor for
-Robinhood Chain. It supports manual token analysis, holder-based wallet review,
-confirmed-wallet curation, on-chain buy detection, browser alerts, and Bark
-notifications.
+This project is a smart-money research and real-time wallet monitor for
+Robinhood Chain, Base, and Solana. A segmented control switches the active chain,
+while every chain keeps its own SQLite database, address library, token queue,
+scan jobs, monitor events, alert threshold, deduplication state, and Bark targets.
+No wallet, token, event, setting, or notification destination is copied between
+chains.
 
 ## Requirements
 
 - Node.js 22 or newer
 - npm
-- A Robinhood Chain JSON-RPC endpoint (the public RPC is used by default)
+- Robinhood and Base JSON-RPC endpoints (public RPCs are used by default)
+- A Solana JSON-RPC endpoint for manual Holder scans
+- A Helius Enhanced Webhook for production Solana real-time monitoring
 
 ## Install and test
 
@@ -24,14 +28,17 @@ Run the development server:
 npm start
 ```
 
-Build and run the standalone Robinhood service:
+Build all three standalone services:
 
 ```bash
-npm run build:robinhood
+npm run build:all
 HOST=127.0.0.1 PORT=18118 node dist/robinhood-server.mjs
+BASE_HOST=127.0.0.1 BASE_PORT=18119 node dist/base-server.mjs
+SOLANA_HOST=127.0.0.1 SOLANA_PORT=18120 node dist/solana-server.mjs
 ```
 
-The UI is then available at `http://127.0.0.1:18118/`.
+The Robinhood process serves the UI. A reverse proxy routes `/api/robinhood`,
+`/api/base`, and `/api/solana` to ports `18118`, `18119`, and `18120`.
 
 ## Main configuration
 
@@ -60,6 +67,28 @@ Configuration is supplied through environment variables. Common settings are:
 
 See `src/robinhood/config.js` for all bounded settings and defaults.
 
+Base uses the same bounded tuning names with a `BASE_` prefix. Its database is
+configured with `BASE_DATA_FILE`, and its real-time market enrichment falls back
+to DexScreener when DeBot is blocked or incomplete.
+
+Solana settings use the `SOLANA_` prefix. The important production settings are:
+
+| Variable | Purpose |
+| --- | --- |
+| `SOLANA_DATA_FILE` | Independent Solana SQLite database |
+| `SOLANA_RPC_URL` | Manual Holder scans and token-account reads |
+| `HELIUS_API_KEY` | Enables the production webhook provider |
+| `SOLANA_HELIUS_WEBHOOK_URL` | Public HTTPS callback URL registered with Helius |
+| `SOLANA_HELIUS_AUTH_HEADER` | Secret authorization value required by the callback |
+
+The official public Solana RPC is suitable for user-triggered Holder scans but
+not for sub-five-second monitoring of hundreds of wallets. The Solana monitor
+therefore reports `degraded` until a Helius webhook, HTTPS callback, auth value,
+and durable signature deduplication are all ready. It never claims a public-RPC
+polling fallback is real-time. Start from `deploy/solana.env.example`, install
+the populated file as `/etc/robinhood-radar/solana.env` with mode `0600`, and do
+not commit the populated file.
+
 ## Public database snapshot
 
 The `database/` directory contains a compressed production snapshot for public
@@ -83,14 +112,39 @@ Events are deduplicated by transaction hash and log index. The existing same-CA
 cluster alert counts only distinct-wallet buy events within the configured
 window.
 
+Base reuses the verified EVM receipt and swap-log model with Base-specific RPC,
+quote tokens, explorer links, and no Noxa listener. Solana consumes Helius
+Enhanced Transactions, derives buy and sell events from signed wallet token
+balance changes, handles SPL/native transfers, and recognizes SPL
+`InitializeMint`/`InitializeMint2` creation. Solana signatures are preserved as
+case-sensitive Base58 values and are durably deduplicated before event storage.
+
+Manual Solana Holder scans query legacy SPL Token and Token-2022 accounts,
+aggregate balances by owner, and verify top owners are ordinary System Program
+accounts. Oversized scans fall back to the RPC's largest-account result and are
+marked partial.
+
 ## Deployment
 
-- `deploy/robinhood-radar.service` is the systemd unit used by the standalone
-  service.
+- `deploy/robinhood-radar.service`, `deploy/base-radar.service`, and
+  `deploy/solana-radar.service` are the isolated systemd units.
 - `deploy/install-remote.sh` installs a prepared release with backup and rollback
-  checks.
-- `deploy/Caddyfile.example` contains a prefix-based reverse-proxy example. Set
-  `ROBINHOOD_SITE_ADDRESS` to the public site address before using it.
+  checks for all three binaries, databases, and units.
+- `deploy/Caddyfile.example` contains an HTTPS prefix-based reverse proxy. Set
+  `ROBINHOOD_SITE_ADDRESS` and a Caddy-compatible bcrypt
+  `RADAR_BASIC_AUTH_HASH` before using it. The dashboard and management APIs are
+  protected by HTTP Basic authentication. The exact Solana webhook route is
+  exempt from browser authentication and remains protected by the independent
+  `SOLANA_HELIUS_AUTH_HEADER` secret.
+- If a complete `Caddyfile` is included in the deployment staging directory,
+  `deploy/install-remote.sh` backs up, validates, installs, reloads, publicly
+  verifies, and rolls it back with the rest of the release. External `.LEGAL.txt`
+  bundle files are installed when generated but are not required when esbuild
+  emits none.
+- Production installation rejects a Solana monitor whose Helius subscription is
+  not ready. A deployment that intentionally provides only Solana Holder scans
+  must set `ALLOW_SOLANA_DEGRADED=1`; the installer then prints the exact degraded
+  reasons instead of presenting the monitor as real-time.
 
 Runtime databases, environment files, cookies, browser artifacts, logs, and
 build output are intentionally ignored and must not be committed.

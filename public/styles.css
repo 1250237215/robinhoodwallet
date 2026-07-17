@@ -94,12 +94,70 @@ svg {
 
 .app-header {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(650px, auto) auto;
+  grid-template-columns: minmax(250px, 1fr) auto minmax(560px, auto) auto;
   gap: 24px;
   min-height: 64px;
   align-items: center;
   padding-bottom: 14px;
   border-bottom: 1px solid var(--line-strong);
+}
+
+.chain-switcher {
+  display: inline-grid;
+  grid-template-columns: repeat(3, minmax(82px, auto));
+  align-items: center;
+  padding: 3px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: #eef1ef;
+}
+
+.chain-switcher button {
+  min-width: 0;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 720;
+  white-space: nowrap;
+}
+
+.chain-switcher button:hover {
+  color: var(--ink);
+}
+
+.chain-switcher button.is-active {
+  background: #ffffff;
+  color: var(--ink);
+  box-shadow: 0 1px 3px rgb(18 28 23 / 12%);
+}
+
+.chain-switch-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: #66706b;
+}
+
+.chain-switch-dot.robinhood {
+  background: #149653;
+}
+
+.chain-switch-dot.base {
+  background: #175cd3;
+}
+
+.chain-switch-dot.solana {
+  background: #8b35b5;
+  box-shadow: inset 0 -3px #20a76f;
 }
 
 .brand-block {
@@ -3347,6 +3405,26 @@ select:hover {
   background: #18a05e;
 }
 
+body[data-chain="base"] .chain-mark {
+  border-color: #174ea6;
+  background: #175cd3;
+  box-shadow: inset 0 0 0 4px #2f6fd1;
+}
+
+body[data-chain="base"] .chain-mark::after {
+  background: #ffffff;
+}
+
+body[data-chain="solana"] .chain-mark {
+  border-color: #3f214d;
+  background: #6c2b86;
+  box-shadow: inset 0 0 0 4px #7d3998;
+}
+
+body[data-chain="solana"] .chain-mark::after {
+  background: #20a76f;
+}
+
 .research-table tbody tr.is-selected {
   background: #edf4f0;
   box-shadow: inset 3px 0 #0b7a43;
@@ -3362,7 +3440,20 @@ select:hover {
 
 @media (max-width: 1420px) {
   .app-header {
-    grid-template-columns: minmax(260px, 1fr) auto auto;
+    grid-template-columns: minmax(250px, 1fr) auto auto;
+  }
+
+  .chain-switcher {
+    grid-column: 2;
+  }
+
+  .header-stats {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    grid-template-columns: repeat(5, 1fr);
+    width: 100%;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
   }
 
   .filter-form {
@@ -3387,9 +3478,15 @@ select:hover {
     grid-template-columns: minmax(250px, 1fr) auto;
   }
 
-  .header-stats {
+  .chain-switcher {
     grid-column: 1 / -1;
     grid-row: 2;
+    width: max-content;
+  }
+
+  .header-stats {
+    grid-column: 1 / -1;
+    grid-row: 3;
     grid-template-columns: repeat(5, 1fr);
     width: 100%;
     padding-top: 10px;
@@ -3536,6 +3633,15 @@ select:hover {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 12px;
     padding: 3px 2px 11px;
+  }
+
+  .chain-switcher {
+    width: 100%;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .chain-switcher button {
+    padding: 0 6px;
   }
 
   .chain-mark {

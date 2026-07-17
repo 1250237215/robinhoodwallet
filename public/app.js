@@ -1,19 +1,110 @@
 const APP_BASE = window.location.pathname.startsWith('/robinhood-radar/') ? '/robinhood-radar' : '';
-const API_ROOT = `${APP_BASE}/api/robinhood`;
-const EXPLORER_ROOT = 'https://robinhoodchain.blockscout.com';
-const DEBOT_ADDRESS_ROOT = 'https://debot.ai/address/robinhood';
-const DEBOT_TOKEN_ROOT = 'https://debot.ai/token/robinhood/308574_';
-const DEBOT_WALLET_MANAGER_URL = 'https://debot.ai/track?chain=robinhood&tab=manager';
-const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
-const HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
+const CHAIN_CONFIGS = Object.freeze({
+  robinhood: Object.freeze({
+    id: 'robinhood',
+    label: 'Robinhood',
+    mark: 'R',
+    family: 'evm',
+    nativeSymbol: 'ETH',
+    apiPath: 'robinhood',
+    explorerRoot: 'https://robinhoodchain.blockscout.com',
+    explorerAddressPath: 'address',
+    explorerTokenPath: 'token',
+    explorerTxPath: 'tx',
+    debotAddressRoot: 'https://debot.ai/address/robinhood',
+    debotTokenRoot: 'https://debot.ai/token/robinhood/308574_',
+    debotWalletManagerUrl: 'https://debot.ai/track?chain=robinhood&tab=manager',
+    addressPattern: /^0x[0-9a-fA-F]{40}$/,
+    hashPattern: /^0x[0-9a-fA-F]{64}$/,
+    tokenPlaceholder: '0x...',
+    walletPlaceholder: '0x...\n0x...,备注'
+  }),
+  base: Object.freeze({
+    id: 'base',
+    label: 'Base',
+    mark: 'B',
+    family: 'evm',
+    nativeSymbol: 'ETH',
+    apiPath: 'base',
+    explorerRoot: 'https://base.blockscout.com',
+    explorerAddressPath: 'address',
+    explorerTokenPath: 'token',
+    explorerTxPath: 'tx',
+    debotAddressRoot: 'https://debot.ai/address/base',
+    debotTokenRoot: 'https://debot.ai/token/base/',
+    debotWalletManagerUrl: 'https://debot.ai/track?chain=base&tab=manager',
+    addressPattern: /^0x[0-9a-fA-F]{40}$/,
+    hashPattern: /^0x[0-9a-fA-F]{64}$/,
+    tokenPlaceholder: '0x...',
+    walletPlaceholder: '0x...\n0x...,备注'
+  }),
+  solana: Object.freeze({
+    id: 'solana',
+    label: 'Solana',
+    mark: 'S',
+    family: 'solana',
+    nativeSymbol: 'SOL',
+    apiPath: 'solana',
+    explorerRoot: 'https://solscan.io',
+    explorerAddressPath: 'account',
+    explorerTokenPath: 'token',
+    explorerTxPath: 'tx',
+    debotAddressRoot: 'https://debot.ai/address/solana',
+    debotTokenRoot: 'https://debot.ai/token/solana/',
+    debotWalletManagerUrl: 'https://debot.ai/track?chain=solana&tab=manager',
+    addressPattern: /^[1-9A-HJ-NP-Za-km-z]{32,44}$/,
+    hashPattern: /^[1-9A-HJ-NP-Za-km-z]{64,88}$/,
+    tokenPlaceholder: 'Solana Mint 地址',
+    walletPlaceholder: 'Solana 地址\nSolana 地址,备注'
+  })
+});
+const requestedChain = new URLSearchParams(window.location.search).get('chain');
+let activeChainId = Object.hasOwn(CHAIN_CONFIGS, requestedChain) ? requestedChain : 'robinhood';
+let API_ROOT = '';
+let EXPLORER_ROOT = '';
+let DEBOT_ADDRESS_ROOT = '';
+let DEBOT_TOKEN_ROOT = '';
+let DEBOT_WALLET_MANAGER_URL = '';
+let ADDRESS_PATTERN = CHAIN_CONFIGS.robinhood.addressPattern;
+let HASH_PATTERN = CHAIN_CONFIGS.robinhood.hashPattern;
 const ACTIVE_JOB_STATES = new Set(['queued', 'pending', 'running', 'scanning', 'refreshing', 'fetching', 'analyzing']);
 const REVIEW_SCAN_BATCH_GAP_MS = 5 * 60 * 1000;
 const BUY_FREQUENCY_REFRESH_MS = 30_000;
 const MONITOR_POLL_INTERVAL_MS = 2_000;
 const MONITOR_RECENT_REFRESH_MS = 10_000;
-const MONITOR_THRESHOLD_STORAGE_KEY = 'robinhood-monitor-threshold';
+let MONITOR_THRESHOLD_STORAGE_KEY = 'robinhood-monitor-threshold';
 const MONITOR_SOUNDS = new Set(['alarm', 'bell', 'electronic', 'glass']);
 const MONITOR_EVENT_TYPES = Object.freeze(['buy', 'sell', 'transfer', 'token_create']);
+
+function activeChain() {
+  return CHAIN_CONFIGS[activeChainId] || CHAIN_CONFIGS.robinhood;
+}
+
+function syncChainRuntimeVariables() {
+  const chain = activeChain();
+  API_ROOT = `${APP_BASE}/api/${chain.apiPath}`;
+  EXPLORER_ROOT = chain.explorerRoot;
+  DEBOT_ADDRESS_ROOT = chain.debotAddressRoot;
+  DEBOT_TOKEN_ROOT = chain.debotTokenRoot;
+  DEBOT_WALLET_MANAGER_URL = chain.debotWalletManagerUrl;
+  ADDRESS_PATTERN = chain.addressPattern;
+  HASH_PATTERN = chain.hashPattern;
+  MONITOR_THRESHOLD_STORAGE_KEY = `${chain.id}-monitor-threshold`;
+}
+
+function explorerUrl(kind, value) {
+  const normalized = kind === 'tx' ? normalizeTransactionHash(value) : normalizeAddress(value);
+  if (!normalized) return '';
+  const chain = activeChain();
+  const path = kind === 'token'
+    ? chain.explorerTokenPath
+    : kind === 'tx'
+      ? chain.explorerTxPath
+      : chain.explorerAddressPath;
+  return `${chain.explorerRoot}/${path}/${normalized}`;
+}
+
+syncChainRuntimeVariables();
 
 const MONITOR_EVENT_LABELS = Object.freeze({
   buy: '买入',
@@ -73,6 +164,10 @@ const SORT_LABELS = Object.freeze({
 });
 
 const elements = {
+  chainSwitcher: document.querySelector('#chain-switcher'),
+  chainMark: document.querySelector('#chain-mark'),
+  brandTitle: document.querySelector('#brand-title'),
+  brandSubtitle: document.querySelector('#brand-subtitle'),
   candidateCount: document.querySelector('#candidate-count'),
   minHits: document.querySelector('#min-hits'),
   walletCount: document.querySelector('#wallet-count'),
@@ -183,6 +278,8 @@ const elements = {
 };
 
 const state = {
+  chainEpoch: 0,
+  chainAbortController: new AbortController(),
   activeTab: 'candidates',
   strategy: 'smart',
   multiple: 10,
@@ -286,7 +383,8 @@ function firstValue(source, keys, fallback = null) {
 
 function normalizeAddress(value) {
   const address = String(value || '').trim();
-  return ADDRESS_PATTERN.test(address) ? address.toLowerCase() : '';
+  if (!ADDRESS_PATTERN.test(address)) return '';
+  return activeChain().family === 'evm' ? address.toLowerCase() : address;
 }
 
 function shortAddress(value) {
@@ -505,6 +603,38 @@ async function fetchJson(path, options = {}) {
   return payload ?? {};
 }
 
+function captureChainRequestContext() {
+  return Object.freeze({
+    chainId: activeChainId,
+    apiRoot: API_ROOT,
+    chainEpoch: state.chainEpoch,
+    signal: state.chainAbortController.signal,
+    chainLabel: activeChain().label,
+    debotWalletManagerUrl: DEBOT_WALLET_MANAGER_URL
+  });
+}
+
+function chainRequestIsCurrent(context) {
+  return context?.chainId === activeChainId
+    && context.chainEpoch === state.chainEpoch
+    && context.signal === state.chainAbortController.signal
+    && !context.signal.aborted;
+}
+
+function requireCurrentChainRequest(context) {
+  if (chainRequestIsCurrent(context)) return;
+  const error = new Error('请求已因切换链而取消');
+  error.name = 'AbortError';
+  throw error;
+}
+
+function fetchChainJson(context, path, options = {}) {
+  return fetchJson(`${context.apiRoot}${path}`, {
+    ...options,
+    signal: context.signal
+  });
+}
+
 function clampMonitorThreshold(value, fallback = 3) {
   const number = finiteNumber(value);
   if (number === null) return fallback;
@@ -590,7 +720,8 @@ function formatMonitorAge(value) {
 
 function normalizeTransactionHash(value) {
   const hash = String(value || '').trim();
-  return HASH_PATTERN.test(hash) ? hash.toLowerCase() : '';
+  if (!HASH_PATTERN.test(hash)) return '';
+  return activeChain().family === 'evm' ? hash.toLowerCase() : hash;
 }
 
 function normalizeMonitorEvent(raw, current = null) {
@@ -880,8 +1011,20 @@ function monitorHealthValues() {
     deepGapBlocks: finiteNumber(health.deepGapBlocks, health.deep_gap_blocks),
     deepStatus: String(firstValue(health, ['deepStatus', 'deep_status'], '') || '').trim(),
     lastBlockAt: firstValue(health, ['lastBlockAt', 'last_block_at', 'updatedAt', 'updated_at', 'lastPollAt'], null),
-    error: String(firstValue(health, ['error', 'lastError', 'message'], '') || '')
+    error: String(firstValue(health, ['error', 'lastError', 'message'], '') || ''),
+    realtimeReady: typeof health.realtimeReady === 'boolean' ? health.realtimeReady : null,
+    reasons: Array.isArray(health.reasons) ? health.reasons.map(String) : []
   };
+}
+
+function monitorReadinessDetail(health) {
+  if (health.realtimeReady !== false) return '';
+  if (health.reasons.includes('helius_api_key_missing')) return '缺少 Helius API Key，当前仅 Holder 分析可用';
+  if (health.reasons.includes('https_webhook_url_missing')) return '缺少 HTTPS webhook，当前仅 Holder 分析可用';
+  if (health.reasons.includes('webhook_auth_header_missing')) return '缺少 webhook 授权，当前仅 Holder 分析可用';
+  if (health.reasons.includes('helius_webhook_sync_error')) return 'Helius webhook 同步失败';
+  if (health.reasons.includes('helius_wallet_addresses_pending_sync')) return 'Helius 正在同步监控地址';
+  return '实时监控提供方尚未就绪';
 }
 
 function renderMonitorSoundStatus() {
@@ -975,6 +1118,7 @@ function renderMonitorBarkTargets() {
 function monitorConnectionState() {
   const health = monitorHealthValues();
   if (!state.monitorEnabled) return { state: 'disabled', label: '监控已暂停' };
+  if (health.realtimeReady === false) return { state: 'warning', label: '实时未配置' };
   if (health.error && !state.monitorConnected) return { state: 'error', label: '连接异常' };
   if (!state.monitorConnected) return { state: 'loading', label: '正在连接' };
   if (health.walletCount === 0) return { state: 'warning', label: '等待确认地址' };
@@ -986,12 +1130,13 @@ function renderMonitorHealth() {
   const health = monitorHealthValues();
   const connection = monitorConnectionState();
   const waitingForWallets = state.monitorEnabled && health.walletCount === 0;
+  const readinessDetail = monitorReadinessDetail(health);
   elements.monitorConnectionBadge.dataset.state = connection.state;
   elements.monitorConnectionText.textContent = connection.label;
   elements.monitorHealthStatus.textContent = state.monitorEnabled
-    ? health.error ? '需要检查' : waitingForWallets ? '等待地址' : '运行中'
+    ? readinessDetail ? '配置未完成' : health.error ? '需要检查' : waitingForWallets ? '等待地址' : '运行中'
     : '已暂停';
-  elements.monitorHealthDetail.textContent = health.error || (state.monitorEnabled
+  elements.monitorHealthDetail.textContent = readinessDetail || health.error || (state.monitorEnabled
     ? waitingForWallets ? '确认地址入库后自动开始' : '按钱包规则记录链上事件'
     : '保存设置可重新开启');
   elements.monitorWalletCount.textContent = formatInteger(health.walletCount);
@@ -1085,13 +1230,13 @@ function renderMonitorEvents() {
     const isFresh = state.monitorFreshEventKeys.delete(eventKey);
     const walletLabel = event.walletAlias || shortAddress(event.walletAddress);
     const eventType = MONITOR_EVENT_TYPES.includes(event.eventType) ? event.eventType : 'buy';
-    const symbol = event.tokenSymbol || (event.assetType === 'native' ? 'ETH' : 'TOKEN');
+    const symbol = event.tokenSymbol || (event.assetType === 'native' ? activeChain().nativeSymbol : 'TOKEN');
     const eventTime = event.blockTimestamp || event.detectedAt;
     const walletUrl = safeHttpUrl(event.debotAddressUrl) || `${DEBOT_ADDRESS_ROOT}/${event.walletAddress}`;
     const tokenUrl = event.tokenAddress
       ? safeHttpUrl(event.debotTokenUrl) || `${DEBOT_TOKEN_ROOT}${event.tokenAddress}`
       : '';
-    const transactionUrl = safeHttpUrl(event.explorerTxUrl) || (event.txHash ? `${EXPLORER_ROOT}/tx/${event.txHash}` : '');
+    const transactionUrl = safeHttpUrl(event.explorerTxUrl) || explorerUrl('tx', event.txHash);
     const recipientLabel = event.recipient ? shortAddress(event.recipient) : '';
     const hasTokenMetrics = Boolean(event.tokenAddress) && event.assetType !== 'native';
     const hasMarketCap = event.marketCapUsd !== null;
@@ -1165,6 +1310,7 @@ function renderMonitorPage() {
 
 function applyMonitorPayload(payload, { initial = false } = {}) {
   const record = unwrapRecord(payload || {});
+  if (record.chain && String(record.chain) !== activeChainId) return;
   const settings = record.settings && typeof record.settings === 'object' ? record.settings : {};
   const serverThreshold = finiteNumber(settings.threshold, record.threshold);
   if (serverThreshold !== null) {
@@ -1215,7 +1361,9 @@ function synchronizeMonitorAlerts({ playNew = false } = {}) {
     if (!state.monitorAlertedTokens.has(cluster.key)) {
       state.monitorAlertedTokens.add(cluster.key);
       if (playNew && state.monitorSoundEnabled) {
-        void playMonitorAlertSound().catch((error) => {
+        const requestContext = captureChainRequestContext();
+        void playMonitorAlertSound(requestContext).catch((error) => {
+          if (!chainRequestIsCurrent(requestContext)) return;
           state.monitorSoundEnabled = false;
           renderMonitorSoundStatus();
           showToast(`声音提醒播放失败：${error.message}`, 'error');
@@ -1228,21 +1376,26 @@ function synchronizeMonitorAlerts({ playNew = false } = {}) {
 function playMonitorEventSounds(events) {
   if (!state.monitorSoundEnabled) return;
   if (!events.some((event) => event.soundAlert === true)) return;
-  void playMonitorAlertSound().catch((error) => {
+  const requestContext = captureChainRequestContext();
+  void playMonitorAlertSound(requestContext).catch((error) => {
+    if (!chainRequestIsCurrent(requestContext)) return;
     state.monitorSoundEnabled = false;
     renderMonitorSoundStatus();
     showToast(`声音提醒播放失败：${error.message}`, 'error');
   });
 }
 
-async function playMonitorAlertSound() {
+async function playMonitorAlertSound(requestContext = captureChainRequestContext()) {
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   if (!AudioContextClass) throw new Error('当前浏览器不支持声音提醒');
-  if (state.monitorVolume <= 0) return;
+  const sound = state.monitorSound;
+  const volume = state.monitorVolume;
+  if (volume <= 0) return;
   const context = state.monitorAudioContext || new AudioContextClass();
   state.monitorAudioContext = context;
   if (context.state === 'suspended') await context.resume();
-  if (state.monitorVolume === 0) return;
+  requireCurrentChainRequest(requestContext);
+  if (volume === 0) return;
   const startAt = context.currentTime;
   const patterns = {
     alarm: [
@@ -1263,8 +1416,8 @@ async function playMonitorAlertSound() {
       { offset: 0.08, duration: 0.46, frequency: 1760, type: 'sine' }
     ]
   };
-  const peakGain = (state.monitorVolume / 100) * 0.2;
-  patterns[state.monitorSound].forEach(({ offset, duration, frequency, type }) => {
+  const peakGain = (volume / 100) * 0.2;
+  patterns[sound].forEach(({ offset, duration, frequency, type }) => {
     const oscillator = context.createOscillator();
     const gain = context.createGain();
     oscillator.type = type;
@@ -1280,12 +1433,15 @@ async function playMonitorAlertSound() {
 }
 
 async function enableAndPreviewMonitorSound() {
+  const context = captureChainRequestContext();
   try {
     state.monitorSoundEnabled = true;
-    await playMonitorAlertSound();
+    await playMonitorAlertSound(context);
+    if (!chainRequestIsCurrent(context)) return;
     renderMonitorSoundStatus();
     showToast('声音提醒已开启');
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     state.monitorSoundEnabled = false;
     renderMonitorSoundStatus();
     showToast(`无法播放提醒：${error.message}`, 'error');
@@ -1300,6 +1456,7 @@ function muteMonitorSound() {
 
 async function saveMonitorSoundSettings(event) {
   event.preventDefault();
+  const context = captureChainRequestContext();
   const sound = normalizeMonitorSound(elements.monitorSoundSelect.value);
   const volume = clampMonitorVolume(elements.monitorVolume.value, state.monitorVolume);
   state.monitorSound = sound;
@@ -1307,21 +1464,24 @@ async function saveMonitorSoundSettings(event) {
   elements.monitorVolumeOutput.textContent = `${volume}%`;
   elements.monitorSoundSaveButton.disabled = true;
   try {
-    const payload = await fetchJson(`${API_ROOT}/monitor/settings`, {
+    const payload = await fetchChainJson(context, '/monitor/settings', {
       method: 'PATCH',
       body: JSON.stringify({ sound, volume })
     });
+    if (!chainRequestIsCurrent(context)) return;
     applyMonitorPayload(payload, { initial: true });
     showToast('声音设置已保存');
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     showToast(`声音设置保存失败：${error.message}`, 'error');
   } finally {
-    elements.monitorSoundSaveButton.disabled = false;
+    if (chainRequestIsCurrent(context)) elements.monitorSoundSaveButton.disabled = false;
   }
 }
 
 async function saveBarkSoundSettings(event) {
   event.preventDefault();
+  const context = captureChainRequestContext();
   const barkSound = elements.monitorBarkSoundSelect.value;
   const barkVolume = clampBarkVolume(elements.monitorBarkVolume.value, state.monitorBarkVolume);
   state.monitorBarkSound = barkSound;
@@ -1329,43 +1489,49 @@ async function saveBarkSoundSettings(event) {
   elements.monitorBarkVolumeOutput.textContent = `${barkVolume} / 10`;
   elements.monitorBarkSettingsSaveButton.disabled = true;
   try {
-    const payload = await fetchJson(`${API_ROOT}/monitor/settings`, {
+    const payload = await fetchChainJson(context, '/monitor/settings', {
       method: 'PATCH',
       body: JSON.stringify({ barkSound, barkVolume })
     });
+    if (!chainRequestIsCurrent(context)) return;
     applyMonitorPayload(payload, { initial: true });
     showToast('Bark 声音设置已保存');
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     showToast(`Bark 声音设置保存失败：${error.message}`, 'error');
   } finally {
-    elements.monitorBarkSettingsSaveButton.disabled = false;
+    if (chainRequestIsCurrent(context)) elements.monitorBarkSettingsSaveButton.disabled = false;
   }
 }
 
 async function createBarkTarget(event) {
   event.preventDefault();
+  const context = captureChainRequestContext();
   const endpoint = elements.monitorBarkEndpoint.value.trim();
   const label = elements.monitorBarkLabel.value.trim();
   if (!endpoint) return;
   elements.monitorBarkAddButton.disabled = true;
   try {
-    const payload = await fetchJson(`${API_ROOT}/monitor/bark`, {
+    const payload = await fetchChainJson(context, '/monitor/bark', {
       method: 'POST',
       body: JSON.stringify({ endpoint, label, enabled: true })
     });
+    if (!chainRequestIsCurrent(context)) return;
     applyBarkTargets(payload);
     elements.monitorBarkEndpoint.value = '';
     elements.monitorBarkLabel.value = '';
     renderMonitorBarkTargets();
     showToast('Bark API 已添加');
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     showToast(`Bark API 添加失败：${error.message}`, 'error');
   } finally {
-    elements.monitorBarkAddButton.disabled = false;
+    if (chainRequestIsCurrent(context)) elements.monitorBarkAddButton.disabled = false;
   }
 }
 
 async function runBarkAction(button) {
+  const context = captureChainRequestContext();
   const item = button.closest('[data-bark-id]');
   const id = Number(item?.dataset.barkId);
   const action = button.dataset.barkAction;
@@ -1377,37 +1543,48 @@ async function runBarkAction(button) {
   try {
     let payload;
     if (action === 'test') {
-      payload = await fetchJson(`${API_ROOT}/monitor/bark/${id}/test`, { method: 'POST' });
+      payload = await fetchChainJson(context, `/monitor/bark/${id}/test`, { method: 'POST' });
+      if (!chainRequestIsCurrent(context)) return;
       showToast(`测试推送已发送至 ${target.label}`);
     } else if (action === 'toggle') {
-      payload = await fetchJson(`${API_ROOT}/monitor/bark/${id}`, {
+      payload = await fetchChainJson(context, `/monitor/bark/${id}`, {
         method: 'PATCH',
         body: JSON.stringify({ enabled: !target.enabled })
       });
+      if (!chainRequestIsCurrent(context)) return;
       showToast(target.enabled ? 'Bark API 已暂停' : 'Bark API 已恢复');
     } else if (action === 'delete') {
-      payload = await fetchJson(`${API_ROOT}/monitor/bark/${id}`, { method: 'DELETE' });
+      payload = await fetchChainJson(context, `/monitor/bark/${id}`, { method: 'DELETE' });
+      if (!chainRequestIsCurrent(context)) return;
       showToast('Bark API 已删除');
     } else {
       return;
     }
     applyBarkTargets(payload);
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     try {
-      applyBarkTargets(await fetchJson(`${API_ROOT}/monitor/bark`));
+      const payload = await fetchChainJson(context, '/monitor/bark');
+      if (!chainRequestIsCurrent(context)) return;
+      applyBarkTargets(payload);
     } catch {
       // Keep the current list when the follow-up status request is also unavailable.
     }
+    if (!chainRequestIsCurrent(context)) return;
     showToast(`Bark 操作失败：${error.message}`, 'error');
   } finally {
-    state.monitorBarkBusy.delete(id);
-    renderMonitorBarkTargets();
+    if (chainRequestIsCurrent(context)) {
+      state.monitorBarkBusy.delete(id);
+      renderMonitorBarkTargets();
+    }
   }
 }
 
-async function refreshBarkTargets() {
+async function refreshBarkTargets(context = captureChainRequestContext()) {
   try {
-    applyBarkTargets(await fetchJson(`${API_ROOT}/monitor/bark`));
+    const payload = await fetchChainJson(context, '/monitor/bark');
+    if (!chainRequestIsCurrent(context)) return;
+    applyBarkTargets(payload);
     renderMonitorBarkTargets();
   } catch {
     // The next monitor snapshot or manual refresh will retry status loading.
@@ -1425,6 +1602,7 @@ function parseMonitorStreamPayload(event) {
 function applyMonitorStreamEvent(event) {
   const payload = parseMonitorStreamPayload(event);
   const rawEvent = payload.event || payload.buy || payload.sell || payload.transfer || payload.token_create || payload;
+  if (rawEvent.chain && String(rawEvent.chain) !== activeChainId) return;
   const added = mergeMonitorEvents([rawEvent]);
   markMonitorEventsFresh(added);
   state.monitorConnected = true;
@@ -1435,7 +1613,9 @@ function applyMonitorStreamEvent(event) {
 }
 
 function applyMonitorStreamEventUpdate(event) {
-  applyMonitorEventUpdatePayload(parseMonitorStreamPayload(event));
+  const payload = parseMonitorStreamPayload(event);
+  if (payload.chain && String(payload.chain) !== activeChainId) return;
+  applyMonitorEventUpdatePayload(payload);
   state.monitorConnected = true;
   state.monitorTransport = 'sse';
   renderMonitorEvents();
@@ -1463,79 +1643,96 @@ function scheduleMonitorPoll(delay = MONITOR_POLL_INTERVAL_MS) {
   state.monitorPollTimer = setTimeout(() => void pollMonitorEvents(), delay);
 }
 
-async function fetchIncrementalMonitorEvents() {
+async function fetchIncrementalMonitorEvents(context) {
   const refreshRecent = Date.now() - state.monitorRecentRefreshAt >= MONITOR_RECENT_REFRESH_MS;
   const after = encodeURIComponent(refreshRecent ? '0' : state.monitorLastEventId || '0');
   try {
-    const payload = await fetchJson(`${API_ROOT}/monitor/events?after=${after}&limit=200`);
-    if (refreshRecent) state.monitorRecentRefreshAt = Date.now();
+    const payload = await fetchChainJson(context, `/monitor/events?after=${after}&limit=200`);
+    if (refreshRecent && chainRequestIsCurrent(context)) state.monitorRecentRefreshAt = Date.now();
     return payload;
   } catch (error) {
     if (![404, 405].includes(error.status)) throw error;
-    const payload = await fetchJson(`${API_ROOT}/monitor?since=${after}&limit=200`);
-    if (refreshRecent) state.monitorRecentRefreshAt = Date.now();
+    const payload = await fetchChainJson(context, `/monitor?since=${after}&limit=200`);
+    if (refreshRecent && chainRequestIsCurrent(context)) state.monitorRecentRefreshAt = Date.now();
     return payload;
   }
 }
 
 async function pollMonitorEvents() {
   if (!state.monitorStarted || state.activeTab !== 'monitor' || state.monitorPollBusy) return;
+  const context = captureChainRequestContext();
+  const sequence = state.monitorSequence;
   state.monitorPollBusy = true;
   state.monitorTransport = 'polling';
   try {
-    const payload = await fetchIncrementalMonitorEvents();
-    if (!state.monitorStarted || state.activeTab !== 'monitor') return;
+    const payload = await fetchIncrementalMonitorEvents(context);
+    if (!chainRequestIsCurrent(context) || sequence !== state.monitorSequence ||
+      !state.monitorStarted || state.activeTab !== 'monitor') return;
     applyMonitorPayload(payload);
   } catch (error) {
+    if (!chainRequestIsCurrent(context) || sequence !== state.monitorSequence) return;
     state.monitorConnected = false;
     state.monitorHealth = { ...state.monitorHealth, lastError: error.message };
     renderMonitorHealth();
   } finally {
-    state.monitorPollBusy = false;
-    scheduleMonitorPoll();
+    if (chainRequestIsCurrent(context) && sequence === state.monitorSequence) {
+      state.monitorPollBusy = false;
+      scheduleMonitorPoll();
+    }
   }
 }
 
-function connectMonitorStream() {
+function connectMonitorStream(context = captureChainRequestContext()) {
   if (!state.monitorStarted || state.activeTab !== 'monitor') return;
   if (!('EventSource' in window)) {
     state.monitorTransport = 'polling';
     scheduleMonitorPoll(0);
     return;
   }
-  const source = new EventSource(`${API_ROOT}/monitor/stream`);
+  const source = new EventSource(`${context.apiRoot}/monitor/stream`);
   state.monitorEventSource = source;
+  const isCurrentSource = () => state.monitorEventSource === source && chainRequestIsCurrent(context);
   source.addEventListener('open', () => {
-    if (state.monitorEventSource !== source) return;
+    if (!isCurrentSource()) return;
     state.monitorConnected = true;
     state.monitorTransport = 'sse';
     renderMonitorHealth();
   });
   source.addEventListener('snapshot', (event) => {
+    if (!isCurrentSource()) return;
     const initial = !state.monitorStreamSnapshotReceived;
     state.monitorStreamSnapshotReceived = true;
     applyMonitorPayload(parseMonitorStreamPayload(event), { initial });
   });
-  source.addEventListener('event', applyMonitorStreamEvent);
-  source.addEventListener('buy', applyMonitorStreamEvent);
-  source.addEventListener('sell', applyMonitorStreamEvent);
-  source.addEventListener('transfer', applyMonitorStreamEvent);
-  source.addEventListener('token_create', applyMonitorStreamEvent);
-  source.addEventListener('event_update', applyMonitorStreamEventUpdate);
+  const applyCurrentEvent = (event) => {
+    if (isCurrentSource()) applyMonitorStreamEvent(event);
+  };
+  source.addEventListener('event', applyCurrentEvent);
+  source.addEventListener('buy', applyCurrentEvent);
+  source.addEventListener('sell', applyCurrentEvent);
+  source.addEventListener('transfer', applyCurrentEvent);
+  source.addEventListener('token_create', applyCurrentEvent);
+  source.addEventListener('event_update', (event) => {
+    if (isCurrentSource()) applyMonitorStreamEventUpdate(event);
+  });
   source.addEventListener('health', (event) => {
+    if (!isCurrentSource()) return;
     const payload = parseMonitorStreamPayload(event);
     state.monitorHealth = { ...state.monitorHealth, ...(payload.health || payload) };
     state.monitorConnected = true;
     renderMonitorHealth();
   });
-  source.addEventListener('bark', () => void refreshBarkTargets());
+  source.addEventListener('bark', () => {
+    if (isCurrentSource()) void refreshBarkTargets(context);
+  });
   source.addEventListener('message', (event) => {
+    if (!isCurrentSource()) return;
     const payload = parseMonitorStreamPayload(event);
     if (payload.event || payload.buy || payload.sell || payload.transfer || payload.token_create || payload.walletAddress) applyMonitorStreamEvent(event);
     else applyMonitorPayload(payload);
   });
   source.addEventListener('error', () => {
-    if (state.monitorEventSource !== source || state.activeTab !== 'monitor') return;
+    if (!isCurrentSource() || state.activeTab !== 'monitor') return;
     source.close();
     state.monitorEventSource = null;
     state.monitorConnected = false;
@@ -1548,6 +1745,7 @@ function connectMonitorStream() {
 
 async function startMonitorPage({ manual = false } = {}) {
   stopMonitorTransport();
+  const context = captureChainRequestContext();
   const sequence = state.monitorSequence;
   state.monitorStarted = true;
   state.monitorThreshold = readStoredMonitorThreshold();
@@ -1556,28 +1754,34 @@ async function startMonitorPage({ manual = false } = {}) {
   renderMonitorPage();
   elements.monitorRefreshButton.disabled = true;
   try {
-    const payload = await fetchJson(`${API_ROOT}/monitor?limit=200`);
-    if (sequence !== state.monitorSequence || !state.monitorStarted || state.activeTab !== 'monitor') return;
+    const payload = await fetchChainJson(context, '/monitor?limit=200');
+    if (!chainRequestIsCurrent(context) || sequence !== state.monitorSequence ||
+      !state.monitorStarted || state.activeTab !== 'monitor') return;
     applyMonitorPayload(payload, { initial: true });
     if (manual) showToast('实时监控已刷新');
   } catch (error) {
+    if (!chainRequestIsCurrent(context) || sequence !== state.monitorSequence) return;
     state.monitorConnected = false;
     state.monitorHealth = { ...state.monitorHealth, lastError: error.message };
     renderMonitorHealth();
     if (manual) showToast(`刷新失败：${error.message}`, 'error');
   } finally {
-    elements.monitorRefreshButton.disabled = false;
+    if (chainRequestIsCurrent(context) && sequence === state.monitorSequence) {
+      elements.monitorRefreshButton.disabled = false;
+    }
   }
-  if (sequence !== state.monitorSequence || !state.monitorStarted || state.activeTab !== 'monitor') return;
+  if (!chainRequestIsCurrent(context) || sequence !== state.monitorSequence ||
+    !state.monitorStarted || state.activeTab !== 'monitor') return;
   state.monitorTickTimer = setInterval(() => {
     synchronizeMonitorAlerts();
     renderMonitorClusters();
   }, 1_000);
-  connectMonitorStream();
+  connectMonitorStream(context);
 }
 
 async function saveMonitorSettings(event) {
   event.preventDefault();
+  const context = captureChainRequestContext();
   const threshold = clampMonitorThreshold(elements.monitorThreshold.value, state.monitorThreshold);
   const windowSeconds = clampMonitorWindowSeconds(elements.monitorWindowSeconds.value, state.monitorWindowSeconds);
   const enabled = elements.monitorEnabled.checked;
@@ -1591,16 +1795,18 @@ async function saveMonitorSettings(event) {
   renderMonitorPage();
   elements.monitorSaveButton.disabled = true;
   try {
-    const payload = await fetchJson(`${API_ROOT}/monitor/settings`, {
+    const payload = await fetchChainJson(context, '/monitor/settings', {
       method: 'PATCH',
       body: JSON.stringify({ threshold, windowSeconds, enabled })
     });
+    if (!chainRequestIsCurrent(context)) return;
     applyMonitorPayload(payload, { initial: true });
     showToast(`提醒设置已保存：${formatMonitorWindowDuration(windowSeconds)}内 ${threshold} 个地址`);
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     showToast(`服务端保存失败，已保存在本机：${error.message}`, 'error');
   } finally {
-    elements.monitorSaveButton.disabled = false;
+    if (chainRequestIsCurrent(context)) elements.monitorSaveButton.disabled = false;
   }
 }
 
@@ -1764,20 +1970,24 @@ function latestReviewBatch(wallets, jobs, winners = [], minimumEntryUsd = 500) {
   return { wallets: scopedWallets, tokenAddresses };
 }
 
-async function loadCurationWallets(filters) {
+async function loadCurationWallets(context, filters) {
   try {
-    const payload = await fetchJson(`${API_ROOT}/wallets?${buildCurationQuery(filters)}`);
+    const payload = await fetchChainJson(context, `/wallets?${buildCurationQuery(filters)}`);
+    requireCurrentChainRequest(context);
     return getCollection(payload, ['wallets', 'items', 'addresses']) || [];
-  } catch {
+  } catch (error) {
+    if (!chainRequestIsCurrent(context)) throw error;
     return [];
   }
 }
 
-async function loadPendingWallets(filters) {
+async function loadPendingWallets(context, filters) {
   try {
-    const payload = await fetchJson(`${API_ROOT}/wallets?${buildPendingReviewQuery(filters)}`);
+    const payload = await fetchChainJson(context, `/wallets?${buildPendingReviewQuery(filters)}`);
+    requireCurrentChainRequest(context);
     return getCollection(payload, ['wallets', 'items', 'addresses']) || [];
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) throw error;
     if (![404, 405].includes(error.status)) throw error;
     return [];
   }
@@ -1803,12 +2013,12 @@ function debotImportText(wallets) {
   return [...rows.values()].sort((left, right) => left.localeCompare(right)).join('\n');
 }
 
-function downloadDebotImport(text) {
+function downloadDebotImport(text, chainId) {
   const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = 'robinhood-debot-wallets.txt';
+  link.download = `${chainId}-debot-wallets.txt`;
   document.body.append(link);
   link.click();
   link.remove();
@@ -1816,8 +2026,9 @@ function downloadDebotImport(text) {
 }
 
 async function exportConfirmedWalletsToDebot() {
+  const context = captureChainRequestContext();
   const managerLink = document.createElement('a');
-  managerLink.href = DEBOT_WALLET_MANAGER_URL;
+  managerLink.href = context.debotWalletManagerUrl;
   managerLink.target = '_blank';
   managerLink.rel = 'noopener noreferrer';
   document.body.append(managerLink);
@@ -1832,42 +2043,54 @@ async function exportConfirmedWalletsToDebot() {
       review: 'confirmed',
       status: 'all'
     });
-    const payload = await fetchJson(`${API_ROOT}/wallets?${params}`);
+    const payload = await fetchChainJson(context, `/wallets?${params}`);
+    requireCurrentChainRequest(context);
     const wallets = getCollection(payload, ['wallets', 'items', 'addresses']) || [];
     const text = debotImportText(wallets);
     if (!text) throw new Error('地址库还没有已确认钱包');
     const copied = await copyText(text);
-    if (!copied) downloadDebotImport(text);
+    if (!chainRequestIsCurrent(context)) return;
+    if (!copied) downloadDebotImport(text, context.chainId);
     const count = text.split('\n').length;
     showToast(copied
       ? `已复制 ${count} 个地址，粘贴到 DeBot 的“导入钱包”`
       : `已导出 ${count} 个地址，请在 DeBot 导入钱包`);
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     showToast(`导出失败：${error.message}`, 'error');
   } finally {
-    elements.debotExportButton.disabled = false;
+    if (chainRequestIsCurrent(context)) elements.debotExportButton.disabled = false;
   }
 }
 
-async function loadApiData(filters) {
+async function loadApiData(context, filters) {
   const query = buildQuery(filters);
   try {
-    const dashboard = await fetchJson(`${API_ROOT}/dashboard?${query}`, { acceptStatuses: [503] });
+    const dashboard = await fetchChainJson(context, `/dashboard?${query}`, { acceptStatuses: [503] });
+    requireCurrentChainRequest(context);
     const record = unwrapRecord(dashboard);
-    const curationWalletsPromise = loadCurationWallets(filters);
-    const pendingWalletsPromise = loadPendingWallets(filters);
+    const curationWalletsPromise = loadCurationWallets(context, filters);
+    const pendingWalletsPromise = loadPendingWallets(context, filters);
     let walletPayload = null;
     try {
-      walletPayload = await fetchJson(`${API_ROOT}/wallets?${query}`);
+      walletPayload = await fetchChainJson(context, `/wallets?${query}`);
+      requireCurrentChainRequest(context);
     } catch (error) {
-      if (![404, 405].includes(error.status)) throw error;
+      if (![404, 405].includes(error.status)) {
+        await Promise.allSettled([curationWalletsPromise, pendingWalletsPromise]);
+        throw error;
+      }
     }
-    const curationWallets = await curationWalletsPromise;
-    const pendingWallets = await pendingWalletsPromise;
+    const [curationWallets, pendingWallets] = await Promise.all([
+      curationWalletsPromise,
+      pendingWalletsPromise
+    ]);
+    requireCurrentChainRequest(context);
     const jobs = getCollection(record, ['jobs', 'scans', 'items']) || [];
     const winners = getCollection(record, ['winners', 'tokens', 'items']) || [];
     const reviewBatch = latestReviewBatch(pendingWallets, jobs, winners, filters.minEntryUsd);
     return {
+      chain: String(record.chain || context.chainId),
       overview: record,
       wallets: mergeWalletCollections(
         walletLibraryRecords(getCollection(record, ['wallets', 'items', 'addresses']) || []),
@@ -1885,22 +2108,27 @@ async function loadApiData(filters) {
   }
 
   const paths = [
-    `${API_ROOT}/overview?${query}`,
-    `${API_ROOT}/wallets?${query}`,
-    `${API_ROOT}/winners?${query}`,
-    `${API_ROOT}/jobs`
+    `/overview?${query}`,
+    `/wallets?${query}`,
+    `/winners?${query}`,
+    '/jobs'
   ];
-  const settled = await Promise.allSettled(paths.map((path) => fetchJson(path)));
+  const settled = await Promise.allSettled(paths.map((path) => fetchChainJson(context, path)));
+  requireCurrentChainRequest(context);
   const values = settled.map((result) => result.status === 'fulfilled' ? result.value : null);
   const splitEndpointAvailable = settled.some((result) => result.status === 'fulfilled');
-  if (!splitEndpointAvailable) throw settled.find((result) => result.status === 'rejected')?.reason || new Error('Robinhood API 不可用');
+  if (!splitEndpointAvailable) {
+    throw settled.find((result) => result.status === 'rejected')?.reason ||
+      new Error(`${context.chainLabel} API 不可用`);
+  }
 
   const [overviewPayload, walletsPayload, winnersPayload, jobsPayload] = values;
   const overview = unwrapRecord(overviewPayload || {});
   const [curationWallets, pendingWallets] = await Promise.all([
-    loadCurationWallets(filters),
-    loadPendingWallets(filters)
+    loadCurationWallets(context, filters),
+    loadPendingWallets(context, filters)
   ]);
+  requireCurrentChainRequest(context);
   const jobs = getCollection(jobsPayload, ['jobs', 'scans', 'items'])
     || getCollection(overview, ['jobs', 'scans'])
     || [];
@@ -1914,6 +2142,7 @@ async function loadApiData(filters) {
     .filter(Boolean);
 
   return {
+    chain: String(overview.chain || context.chainId),
     overview,
     wallets: mergeWalletCollections(
       walletLibraryRecords(getCollection(overview, ['wallets', 'addresses']) || []),
@@ -3219,7 +3448,7 @@ function renderPosition(position) {
             <span>${escapeHtml(shortAddress(address))}</span>
           </div>
         </div>
-        ${address ? `<a class="inline-icon-button" href="${escapeHtml(`${EXPLORER_ROOT}/token/${address}`)}" target="_blank" rel="noopener noreferrer" title="在浏览器查看代币" aria-label="在浏览器查看代币"><i data-lucide="external-link" aria-hidden="true"></i></a>` : ''}
+        ${address ? `<a class="inline-icon-button" href="${escapeHtml(explorerUrl('token', address))}" target="_blank" rel="noopener noreferrer" title="在浏览器查看代币" aria-label="在浏览器查看代币"><i data-lucide="external-link" aria-hidden="true"></i></a>` : ''}
       </div>
       <dl class="position-metrics">
         <div><dt>当前持仓</dt><dd>${formatMoney(holdingValue)}</dd><small>${formatCompact(holdingAmount)} ${escapeHtml(symbol)} · ${escapeHtml(holderRankLabel(holderRank))} · ${escapeHtml(formatHoldingShare(holdingShare))}</small></div>
@@ -3273,7 +3502,7 @@ function renderWalletDetail(summary, payload = null) {
   const { wallet, positions } = normalizeWalletDetail(payload, summary);
   const address = normalizeAddress(wallet.address || summary.address) || String(wallet.address || summary.address || '');
   state.detailAddress = normalizeAddress(address);
-  const explorerUrl = normalizeAddress(address) ? `${EXPLORER_ROOT}/address/${normalizeAddress(address)}` : '';
+  const addressExplorerUrl = explorerUrl('address', address);
   const confidence = walletConfidence(wallet);
   const hasPerformance = walletHasPerformance(wallet);
   const confirmed = walletIsConfirmed(wallet);
@@ -3342,7 +3571,7 @@ function renderWalletDetail(summary, payload = null) {
         ` : ''}
         <a class="icon-button debot-link" href="${escapeHtml(`${DEBOT_ADDRESS_ROOT}/${address}`)}" target="_blank" rel="noopener noreferrer" title="在 DeBot 查看持仓" aria-label="在 DeBot 查看持仓"><i data-lucide="external-link" aria-hidden="true"></i></a>
         <button class="icon-button" type="button" data-copy="${escapeHtml(address)}" title="复制完整地址" aria-label="复制完整地址"><i data-lucide="copy" aria-hidden="true"></i></button>
-        ${explorerUrl ? `<a class="icon-button" href="${escapeHtml(explorerUrl)}" target="_blank" rel="noopener noreferrer" title="在 Blockscout 查看" aria-label="在 Blockscout 查看"><i data-lucide="external-link" aria-hidden="true"></i></a>` : ''}
+        ${addressExplorerUrl ? `<a class="icon-button" href="${escapeHtml(addressExplorerUrl)}" target="_blank" rel="noopener noreferrer" title="在链上浏览器查看" aria-label="在链上浏览器查看"><i data-lucide="external-link" aria-hidden="true"></i></a>` : ''}
       </div>
     </div>
 
@@ -3408,7 +3637,7 @@ function renderWinnerDetail(winner) {
     currentMinimumEntryUsd()
   ) ?? 500;
   const rescanning = winnerRescanActive(winner);
-  const explorerUrl = normalizeAddress(address) ? `${EXPLORER_ROOT}/token/${normalizeAddress(address)}` : '';
+  const tokenExplorerUrl = explorerUrl('token', address);
   elements.detail.innerHTML = `
     <div class="detail-header token-detail-header">
       <div class="detail-token-title">
@@ -3422,7 +3651,7 @@ function renderWinnerDetail(winner) {
       <div class="detail-actions">
         <button class="icon-button rescan-winner-button${rescanning ? ' is-spinning' : ''}" type="button" data-rescan-winner="${escapeHtml(address)}" title="${rescanning ? 'Holder 正在重新分析' : '重新分析 Holder'}" aria-label="${rescanning ? 'Holder 正在重新分析' : '重新分析这个 CA 的 Holder'}"${rescanning ? ' disabled' : ''}><i data-lucide="refresh-cw" aria-hidden="true"></i></button>
         <button class="icon-button" type="button" data-copy="${escapeHtml(address)}" title="复制 CA" aria-label="复制代币 CA"><i data-lucide="copy" aria-hidden="true"></i></button>
-        ${explorerUrl ? `<a class="icon-button" href="${escapeHtml(explorerUrl)}" target="_blank" rel="noopener noreferrer" title="在 Blockscout 查看" aria-label="在 Blockscout 查看"><i data-lucide="external-link" aria-hidden="true"></i></a>` : ''}
+        ${tokenExplorerUrl ? `<a class="icon-button" href="${escapeHtml(tokenExplorerUrl)}" target="_blank" rel="noopener noreferrer" title="在链上浏览器查看" aria-label="在链上浏览器查看"><i data-lucide="external-link" aria-hidden="true"></i></a>` : ''}
       </div>
     </div>
 
@@ -3449,16 +3678,17 @@ function renderWinnerDetail(winner) {
   refreshIcons(elements.detail);
 }
 
-async function fetchWalletDetail(address) {
+async function fetchWalletDetail(context, address) {
   try {
-    return await fetchJson(`${API_ROOT}/wallets/${encodeURIComponent(address)}`);
+    return await fetchChainJson(context, `/wallets/${encodeURIComponent(address)}`);
   } catch (error) {
     if (![404, 405].includes(error.status)) throw error;
-    return fetchJson(`${API_ROOT}/wallet/${encodeURIComponent(address)}`);
+    return fetchChainJson(context, `/wallet/${encodeURIComponent(address)}`);
   }
 }
 
 async function loadWalletDetail(summary, { preservePanel = false } = {}) {
+  const context = captureChainRequestContext();
   const address = normalizeAddress(summary?.address);
   if (!address) {
     renderWalletDetail(summary || {});
@@ -3473,12 +3703,12 @@ async function loadWalletDetail(summary, { preservePanel = false } = {}) {
   if (!preservePanel) renderDetailLoading(address);
   const sequence = ++state.detailSequence;
   try {
-    const payload = await fetchWalletDetail(address);
-    if (sequence !== state.detailSequence || state.selectedAddress !== address) return;
+    const payload = await fetchWalletDetail(context, address);
+    if (!chainRequestIsCurrent(context) || sequence !== state.detailSequence || state.selectedAddress !== address) return;
     state.detailCache.set(address, payload);
     renderWalletDetail(summary, payload);
   } catch (error) {
-    if (sequence !== state.detailSequence || state.selectedAddress !== address) return;
+    if (!chainRequestIsCurrent(context) || sequence !== state.detailSequence || state.selectedAddress !== address) return;
     if (error.status === 404) {
       renderWalletDetail(summary);
       return;
@@ -3535,21 +3765,24 @@ function schedulePoll(data) {
 }
 
 async function loadData({ quiet = false } = {}) {
+  const context = captureChainRequestContext();
   const sequence = ++state.requestSequence;
   state.loading = true;
   if (!quiet && !state.data) renderLoading();
   if (!quiet) setSystemStatus('loading', '正在读取 Holder 地址库', '正在加载持仓快照、盈利排名与分析任务。');
   elements.refreshButton.disabled = true;
   try {
-    const data = await loadApiData(readFilters());
-    if (sequence !== state.requestSequence) return;
+    const filters = readFilters();
+    const data = await loadApiData(context, filters);
+    if (!chainRequestIsCurrent(context) || sequence !== state.requestSequence) return;
+    if (data.chain && data.chain !== context.chainId) return;
     state.data = data;
     renderHeader(data);
     renderStatus(data);
     renderResults();
     schedulePoll(data);
   } catch (error) {
-    if (sequence !== state.requestSequence) return;
+    if (!chainRequestIsCurrent(context) || sequence !== state.requestSequence) return;
     const message = error instanceof Error ? error.message : String(error);
     if (state.data) {
       setSystemStatus('stale', '刷新失败，保留现有数据', message);
@@ -3566,7 +3799,7 @@ async function loadData({ quiet = false } = {}) {
       refreshIcons(elements.results);
     }
   } finally {
-    if (sequence === state.requestSequence) {
+    if (chainRequestIsCurrent(context) && sequence === state.requestSequence) {
       state.loading = false;
       elements.refreshButton.disabled = false;
       elements.scanButton.disabled = statusFromData(state.data) === 'scanning';
@@ -3575,6 +3808,7 @@ async function loadData({ quiet = false } = {}) {
 }
 
 async function startScan() {
+  const context = captureChainRequestContext();
   elements.minHits.value = '1';
   syncMinimumEntryDisplay({ normalizeInput: true });
   const filters = readFilters();
@@ -3582,20 +3816,25 @@ async function startScan() {
   setSystemStatus('scanning', 'Holder-first 重扫已提交', '正在抓取手工金狗的持仓候选，并核算逐地址收益。');
   try {
     try {
-      await fetchJson(`${API_ROOT}/jobs/scan`, { method: 'POST', body });
+      await fetchChainJson(context, '/jobs/scan', { method: 'POST', body });
     } catch (error) {
       if (![404, 405].includes(error.status)) throw error;
-      await fetchJson(`${API_ROOT}/refresh`, { method: 'POST', body });
+      await fetchChainJson(context, '/refresh', { method: 'POST', body });
     }
+    requireCurrentChainRequest(context);
     showToast('手工金狗重扫已进入队列');
-    window.setTimeout(() => void loadData({ quiet: true }), 350);
+    window.setTimeout(() => {
+      if (chainRequestIsCurrent(context)) void loadData({ quiet: true });
+    }, 350);
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     setSystemStatus('error', '扫描任务提交失败', error.message);
     showToast(`扫描失败：${error.message}`, 'error');
   }
 }
 
 async function rescanWinner(address) {
+  const context = captureChainRequestContext();
   const normalized = normalizeAddress(address);
   if (!normalized || state.rescanningWinnerAddresses.has(normalized)) return;
   elements.minHits.value = '1';
@@ -3603,22 +3842,27 @@ async function rescanWinner(address) {
   syncWinnerRescanButtonsByAddress(normalized);
   try {
     const minEntryUsd = syncMinimumEntryDisplay({ normalizeInput: true });
-    const result = await fetchJson(`${API_ROOT}/winners/${encodeURIComponent(normalized)}/rescan`, {
+    const result = await fetchChainJson(context, `/winners/${encodeURIComponent(normalized)}/rescan`, {
       method: 'POST',
       body: JSON.stringify({ minEntryUsd })
     });
+    requireCurrentChainRequest(context);
     showToast(result.alreadyRunning ? '这个 CA 正在分析中' : 'Holder 重新分析已进入队列');
     await loadData({ quiet: true });
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     showToast(`重新分析失败：${error.message}`, 'error');
   } finally {
-    state.rescanningWinnerAddresses.delete(normalized);
-    syncWinnerRescanButtonsByAddress(normalized);
+    if (chainRequestIsCurrent(context)) {
+      state.rescanningWinnerAddresses.delete(normalized);
+      syncWinnerRescanButtonsByAddress(normalized);
+    }
   }
 }
 
 async function addManualWinner(event) {
   event.preventDefault();
+  const context = captureChainRequestContext();
   const parts = elements.manualInput.value.split(/[\s,;，；]+/).map((value) => value.trim()).filter(Boolean);
   const addresses = [...new Set(parts.map(normalizeAddress).filter(Boolean))];
   const invalid = parts.filter((value) => !normalizeAddress(value));
@@ -3626,7 +3870,9 @@ async function addManualWinner(event) {
   if (!addresses.length || invalid.length) {
     elements.manualFeedback.textContent = invalid.length
       ? `${invalid.length} 个 CA 格式不正确。`
-      : '请输入完整的 0x 开头、40 位十六进制 CA。';
+      : activeChain().family === 'solana'
+        ? '请输入完整的 Solana Base58 Mint 地址。'
+        : '请输入完整的 0x 开头、40 位十六进制 CA。';
     elements.manualFeedback.classList.add('error');
     elements.manualInput.focus();
     return;
@@ -3642,22 +3888,26 @@ async function addManualWinner(event) {
   submit.disabled = true;
   elements.manualFeedback.textContent = `正在提交 ${addresses.length} 个 CA...`;
   try {
-    const settled = await Promise.allSettled(addresses.map((address) => fetchJson(`${API_ROOT}/winners`, {
+    const settled = await Promise.allSettled(addresses.map((address) => fetchChainJson(context, '/winners', {
       method: 'POST',
       body: JSON.stringify({ address, minEntryUsd })
     })));
+    requireCurrentChainRequest(context);
     const accepted = settled.filter((result) => result.status === 'fulfilled' && !result.value.duplicate).length;
     const duplicates = settled.filter((result) => result.status === 'fulfilled' && result.value.duplicate).length;
     const failed = settled.length - accepted - duplicates;
     elements.manualFeedback.textContent = `${accepted} 个已加入 · ${duplicates} 个已存在${failed ? ` · ${failed} 个失败` : ''}`;
     elements.manualFeedback.classList.add('success');
     elements.manualInput.value = '';
-    window.setTimeout(() => void loadData({ quiet: true }), 350);
+    window.setTimeout(() => {
+      if (chainRequestIsCurrent(context)) void loadData({ quiet: true });
+    }, 350);
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     elements.manualFeedback.textContent = `加入失败：${error.message}`;
     elements.manualFeedback.classList.add('error');
   } finally {
-    submit.disabled = false;
+    if (chainRequestIsCurrent(context)) submit.disabled = false;
   }
 }
 
@@ -3698,10 +3948,10 @@ function walletSuggestedAlias(wallet) {
   return `${bestSymbol} ${profitRank}`;
 }
 
-async function requestCandidateConfirmation(wallet) {
+async function requestCandidateConfirmation(context, wallet) {
   const address = normalizeAddress(wallet?.address);
   if (!address) throw new Error('候选地址无效');
-  return fetchJson(`${API_ROOT}/wallets/${encodeURIComponent(address)}`, {
+  return fetchChainJson(context, `/wallets/${encodeURIComponent(address)}`, {
     method: 'PATCH',
     body: JSON.stringify({
       status: 'active',
@@ -3711,21 +3961,25 @@ async function requestCandidateConfirmation(wallet) {
 }
 
 async function confirmCandidate(address) {
+  const context = captureChainRequestContext();
   const wallet = walletForAddress(address);
   const normalized = normalizeAddress(address);
   if (!wallet || !normalized) return;
   if (!window.confirm(`确认将 ${shortAddress(normalized)} 加入已确认地址库？`)) return;
   try {
-    await requestCandidateConfirmation(wallet);
+    await requestCandidateConfirmation(context, wallet);
+    requireCurrentChainRequest(context);
     state.selectedCandidates.delete(normalized);
     showToast(`已确认入库：${walletSuggestedAlias(wallet)}`);
     await loadData({ quiet: true });
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     showToast(`确认失败：${error.message}`, 'error');
   }
 }
 
 async function confirmSelectedCandidates() {
+  const context = captureChainRequestContext();
   const selected = state.visibleWallets.filter((wallet) => (
     walletIsSelectable(wallet) && state.selectedCandidates.has(normalizeAddress(wallet.address))
   ));
@@ -3733,7 +3987,8 @@ async function confirmSelectedCandidates() {
   if (!window.confirm(`二次确认：将选中的 ${selected.length} 个候选加入已确认地址库？`)) return;
   elements.confirmSelectedButton.disabled = true;
   try {
-    const settled = await Promise.allSettled(selected.map(requestCandidateConfirmation));
+    const settled = await Promise.allSettled(selected.map((wallet) => requestCandidateConfirmation(context, wallet)));
+    requireCurrentChainRequest(context);
     const confirmed = [];
     settled.forEach((result, index) => {
       if (result.status === 'fulfilled') {
@@ -3746,13 +4001,15 @@ async function confirmSelectedCandidates() {
     showToast(`${confirmed.length} 个候选已确认${failed ? ` · ${failed} 个失败` : ''}`, failed ? 'error' : 'success');
     await loadData({ quiet: true });
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     showToast(`批量确认失败：${error.message}`, 'error');
   } finally {
-    syncCandidateActions();
+    if (chainRequestIsCurrent(context)) syncCandidateActions();
   }
 }
 
 async function deleteSelectedWallets() {
+  const context = captureChainRequestContext();
   const selected = state.visibleWallets.filter((wallet) => (
     walletIsSelectable(wallet) && state.selectedCandidates.has(normalizeAddress(wallet.address))
   ));
@@ -3766,8 +4023,9 @@ async function deleteSelectedWallets() {
   try {
     const settled = await Promise.allSettled(selected.map((wallet) => {
       const address = normalizeAddress(wallet.address);
-      return fetchJson(`${API_ROOT}/wallets/${encodeURIComponent(address)}`, { method: 'DELETE' });
+      return fetchChainJson(context, `/wallets/${encodeURIComponent(address)}`, { method: 'DELETE' });
     }));
+    requireCurrentChainRequest(context);
     const deleted = [];
     settled.forEach((result, index) => {
       if (result.status !== 'fulfilled') return;
@@ -3780,22 +4038,26 @@ async function deleteSelectedWallets() {
     showToast(`${deleted.length} 个${candidateMode ? '候选' : '地址'}已删除${failed ? ` · ${failed} 个失败` : ''}`, failed ? 'error' : 'success');
     await loadData({ quiet: true });
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     showToast(`批量删除失败：${error.message}`, 'error');
   } finally {
-    syncCandidateActions();
+    if (chainRequestIsCurrent(context)) syncCandidateActions();
   }
 }
 
 async function excludeCandidate(address) {
+  const context = captureChainRequestContext();
   const normalized = normalizeAddress(address);
   if (!normalized || !window.confirm(`确认剔除候选 ${shortAddress(normalized)}？之后不会再出现在默认候选中。`)) return;
   try {
-    await fetchJson(`${API_ROOT}/wallets/${encodeURIComponent(normalized)}`, { method: 'DELETE' });
+    await fetchChainJson(context, `/wallets/${encodeURIComponent(normalized)}`, { method: 'DELETE' });
+    requireCurrentChainRequest(context);
     state.selectedCandidates.delete(normalized);
     state.detailCache.delete(normalized);
     showToast('候选已剔除');
     await loadData({ quiet: true });
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     showToast(`剔除失败：${error.message}`, 'error');
   }
 }
@@ -3845,6 +4107,7 @@ function renderWalletBatchFeedback(record) {
 
 async function addManualWalletBatch(event) {
   event.preventDefault();
+  const context = captureChainRequestContext();
   const lines = elements.manualWalletLines.value;
   if (!lines.trim()) {
     elements.manualWalletLines.setCustomValidity('请至少输入一个钱包地址');
@@ -3856,10 +4119,11 @@ async function addManualWalletBatch(event) {
   elements.manualWalletLines.setCustomValidity('');
   elements.manualWalletAddButton.disabled = true;
   try {
-    const payload = await fetchJson(`${API_ROOT}/wallets/batch`, {
+    const payload = await fetchChainJson(context, '/wallets/batch', {
       method: 'POST',
       body: JSON.stringify({ lines })
     });
+    requireCurrentChainRequest(context);
     const record = unwrapRecord(payload);
     renderWalletBatchFeedback(record);
     elements.manualWalletLines.value = '';
@@ -3872,12 +4136,13 @@ async function addManualWalletBatch(event) {
     showToast(`批量处理完成：${processed} 个地址已写入`);
     await loadData({ quiet: true });
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     elements.manualWalletFeedback.dataset.tone = 'error';
     elements.manualWalletFeedback.textContent = `批量添加失败：${error.message}`;
     elements.manualWalletFeedback.hidden = false;
     showToast(`批量添加失败：${error.message}`, 'error');
   } finally {
-    elements.manualWalletAddButton.disabled = false;
+    if (chainRequestIsCurrent(context)) elements.manualWalletAddButton.disabled = false;
   }
 }
 
@@ -3900,12 +4165,13 @@ function openWalletEditor(wallet) {
 
 async function saveWalletEditor(event) {
   event.preventDefault();
+  const context = captureChainRequestContext();
   const address = normalizeAddress(elements.walletEditorAddress.value);
   if (!address) return;
   const submit = elements.walletEditorForm.querySelector('button[type="submit"]');
   submit.disabled = true;
   try {
-    const payload = await fetchJson(`${API_ROOT}/wallets/${encodeURIComponent(address)}`, {
+    const payload = await fetchChainJson(context, `/wallets/${encodeURIComponent(address)}`, {
       method: 'PATCH',
       body: JSON.stringify({
         alias: elements.walletEditorAlias.value.trim(),
@@ -3917,20 +4183,24 @@ async function saveWalletEditor(event) {
         note: elements.walletEditorNote.value.trim()
       })
     });
+    requireCurrentChainRequest(context);
     state.detailCache.set(address, payload);
     elements.walletEditor.close();
     showToast('地址库已更新');
     await loadData({ quiet: true });
+    if (!chainRequestIsCurrent(context)) return;
     const updatedWallet = walletForAddress(address);
     if (updatedWallet && state.selectedAddress === address) renderWalletDetail(updatedWallet, payload);
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     showToast(`保存失败：${error.message}`, 'error');
   } finally {
-    submit.disabled = false;
+    if (chainRequestIsCurrent(context)) submit.disabled = false;
   }
 }
 
 async function disableConfirmedWallet(address, { fromEditor = false } = {}) {
+  const context = captureChainRequestContext();
   const normalized = normalizeAddress(address);
   if (!normalized) return;
   const wallet = walletForAddress(normalized);
@@ -3938,15 +4208,17 @@ async function disableConfirmedWallet(address, { fromEditor = false } = {}) {
   if (!window.confirm(`确认从已确认地址库删除并禁用“${label}”？该地址会立即停止实时监控，可在“已排除”筛选中恢复。`)) return;
   if (fromEditor) elements.walletEditorExclude.disabled = true;
   try {
-    await fetchJson(`${API_ROOT}/wallets/${encodeURIComponent(normalized)}`, { method: 'DELETE' });
+    await fetchChainJson(context, `/wallets/${encodeURIComponent(normalized)}`, { method: 'DELETE' });
+    requireCurrentChainRequest(context);
     state.detailCache.delete(normalized);
     if (fromEditor) elements.walletEditor.close();
     showToast('地址已删除并停止监控');
     await loadData({ quiet: true });
   } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
     showToast(`删除失败：${error.message}`, 'error');
   } finally {
-    if (fromEditor) elements.walletEditorExclude.disabled = false;
+    if (fromEditor && chainRequestIsCurrent(context)) elements.walletEditorExclude.disabled = false;
   }
 }
 
@@ -3989,6 +4261,122 @@ function showToast(message, tone = 'success') {
     elements.toast.hidden = true;
   }, 2600);
 }
+
+function syncChainUi() {
+  const chain = activeChain();
+  document.title = `${chain.label} 聪明钱雷达`;
+  document.body.dataset.chain = chain.id;
+  elements.chainMark.textContent = chain.mark;
+  elements.brandTitle.textContent = `${chain.label} 聪明钱雷达`;
+  elements.brandSubtitle.textContent = `${chain.label} 手工金狗、最近重扫候选与已确认地址库`;
+  elements.manualInput.placeholder = chain.tokenPlaceholder;
+  elements.manualWalletLines.placeholder = chain.walletPlaceholder;
+  elements.chainSwitcher.querySelectorAll('[data-chain]').forEach((button) => {
+    const active = button.dataset.chain === chain.id;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+
+function resetChainState() {
+  stopMonitorTransport();
+  clearTimeout(state.pollTimer);
+  clearTimeout(state.librarySearchTimer);
+  state.pollTimer = null;
+  state.librarySearchTimer = null;
+  state.requestSequence += 1;
+  state.detailSequence += 1;
+  state.data = null;
+  state.visibleWallets = [];
+  state.selectedAddress = '';
+  state.selectedWinnerAddress = '';
+  state.selectedCandidates.clear();
+  state.rescanningWinnerAddresses.clear();
+  state.detailCache.clear();
+  state.monitorThreshold = readStoredMonitorThreshold();
+  state.monitorWindowSeconds = 60;
+  state.monitorHealth = {};
+  state.monitorEvents = [];
+  state.monitorServerClusters = [];
+  state.monitorEventKeys.clear();
+  state.monitorFreshEventKeys.clear();
+  state.monitorLastEventId = '';
+  state.monitorRecentRefreshAt = 0;
+  state.monitorAlertedTokens.clear();
+  state.monitorBarkTargets = [];
+  state.monitorBarkBusy.clear();
+  state.detailView = 'placeholder';
+  state.detailAddress = '';
+  state.loading = false;
+  if (elements.walletEditor.open) elements.walletEditor.close();
+  elements.refreshButton.disabled = false;
+  elements.scanButton.disabled = false;
+  elements.debotExportButton.disabled = false;
+  elements.manualForm.querySelector('button[type="submit"]').disabled = false;
+  elements.manualWalletAddButton.disabled = false;
+  elements.confirmSelectedButton.disabled = true;
+  elements.deleteSelectedButton.disabled = true;
+  elements.walletEditorForm.querySelector('button[type="submit"]').disabled = false;
+  elements.walletEditorExclude.disabled = false;
+  elements.monitorRefreshButton.disabled = false;
+  elements.monitorSaveButton.disabled = false;
+  elements.monitorSoundSaveButton.disabled = false;
+  elements.monitorBarkSettingsSaveButton.disabled = false;
+  elements.monitorBarkAddButton.disabled = false;
+  elements.manualInput.value = '';
+  elements.manualFeedback.textContent = '';
+  elements.manualFeedback.className = 'field-feedback';
+  elements.manualWalletLines.value = '';
+  elements.manualWalletFeedback.textContent = '';
+  elements.manualWalletFeedback.hidden = true;
+  elements.monitorBarkEndpoint.value = '';
+  elements.monitorBarkLabel.value = '';
+  elements.candidateCount.textContent = '--';
+  elements.walletCount.textContent = '--';
+  elements.winnerCount.textContent = '--';
+  elements.updatedAt.textContent = '--';
+  elements.results.innerHTML = `
+    <div class="loading-state" role="status">
+      <span class="loading-bar"></span>
+      <span class="loading-bar short"></span>
+      <span class="loading-bar"></span>
+      <p>正在读取 ${escapeHtml(activeChain().label)} 独立数据...</p>
+    </div>
+  `;
+  elements.detail.innerHTML = `
+    <div class="detail-placeholder">
+      <i data-lucide="mouse-pointer-2" aria-hidden="true"></i>
+      <strong>选择一个地址</strong>
+      <span>查看逐币收益、入场时间线和退出流动性。</span>
+    </div>
+  `;
+  refreshIcons(elements.detail);
+}
+
+function switchChain(nextChainId) {
+  if (!Object.hasOwn(CHAIN_CONFIGS, nextChainId) || nextChainId === activeChainId) return;
+  state.chainAbortController.abort();
+  state.chainEpoch += 1;
+  activeChainId = nextChainId;
+  syncChainRuntimeVariables();
+  state.chainAbortController = new AbortController();
+  const url = new URL(window.location.href);
+  if (nextChainId === 'robinhood') url.searchParams.delete('chain');
+  else url.searchParams.set('chain', nextChainId);
+  url.hash = '';
+  window.history.replaceState(null, '', `${url.pathname}${url.search}`);
+  resetChainState();
+  syncChainUi();
+  syncToolbarVisibility();
+  showToast(`已切换到 ${activeChain().label}，数据与提醒独立加载`);
+  if (state.activeTab === 'monitor') void startMonitorPage();
+  else void loadData();
+}
+
+elements.chainSwitcher.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-chain]');
+  if (button) switchChain(button.dataset.chain);
+});
 
 elements.tabs.addEventListener('click', (event) => {
   const button = event.target.closest('[data-tab]');
@@ -4260,6 +4648,7 @@ window.addEventListener('pagehide', stopMonitorTransport);
 const initialAddress = normalizeAddress(window.location.hash.slice(1));
 if (initialAddress) state.selectedAddress = initialAddress;
 state.monitorThreshold = readStoredMonitorThreshold();
+syncChainUi();
 syncToolbarVisibility();
 refreshIcons();
 void loadData();

@@ -20,20 +20,37 @@ function round(value, digits = 4) {
   return Math.round(Number(value) * scale) / scale;
 }
 
-function knownInfrastructure(tokenAddress, tokenDetail) {
+function addressAdapter(chainProfile, addressNormalizer, addressValidator) {
+  const normalize = addressNormalizer || chainProfile?.addressNormalizer || normalizeAddress;
+  const validate = addressValidator || chainProfile?.addressValidator || ((value) => ADDRESS_PATTERN.test(value));
+  if (typeof normalize !== 'function') throw new TypeError('addressNormalizer must be a function');
+  if (typeof validate !== 'function') throw new TypeError('addressValidator must be a function');
+  return {
+    normalize: (value) => String(normalize(value) || ''),
+    validate: (value) => validate(value) === true
+  };
+}
+
+function knownInfrastructure(tokenAddress, tokenDetail, chainProfile, adapter) {
+  const profileAddresses = [
+    chainProfile?.weth,
+    chainProfile?.usdg,
+    chainProfile?.usdc,
+    chainProfile?.v2Factory,
+    chainProfile?.v2Router,
+    chainProfile?.v3Factory,
+    chainProfile?.v3Router,
+    ...(Array.isArray(chainProfile?.quoteTokens) ? chainProfile.quoteTokens : []),
+    ...(Array.isArray(chainProfile?.infrastructureAddresses) ? chainProfile.infrastructureAddresses : [])
+  ];
   return new Set([
     '0x0000000000000000000000000000000000000000',
     '0x000000000000000000000000000000000000dead',
-    ROBINHOOD_CHAIN.weth,
-    ROBINHOOD_CHAIN.usdg,
-    ROBINHOOD_CHAIN.v2Factory,
-    ROBINHOOD_CHAIN.v2Router,
-    ROBINHOOD_CHAIN.v3Factory,
-    ROBINHOOD_CHAIN.v3Router,
-    normalizeAddress(tokenAddress),
-    normalizeAddress(tokenDetail?.creatorAddress),
-    ...(Array.isArray(tokenDetail?.pools) ? tokenDetail.pools.map((pool) => normalizeAddress(pool.address)) : [])
-  ].filter((address) => ADDRESS_PATTERN.test(address)));
+    ...profileAddresses,
+    tokenAddress,
+    tokenDetail?.creatorAddress,
+    ...(Array.isArray(tokenDetail?.pools) ? tokenDetail.pools.map((pool) => pool.address) : [])
+  ].map(adapter.normalize).filter(adapter.validate));
 }
 
 async function mapLimit(items, concurrency, mapper) {
@@ -50,7 +67,7 @@ async function mapLimit(items, concurrency, mapper) {
   return results;
 }
 
-function mergeCandidate(holder, profit, tokenDetail, minimumEntryUsd, minimumHitMultiple) {
+function mergeCandidate(holder, profit, tokenDetail, minimumEntryUsd, minimumHitMultiple, normalize = normalizeAddress) {
   const currentPriceUsd = number(profit.currentPriceUsd ?? tokenDetail?.priceUsd);
   const holdingTokenAmount = number(holder.holdingTokenAmount ?? profit.holdingTokenAmount);
   const holdingValueUsd = number(profit.holdingValueUsd) ??
@@ -70,7 +87,7 @@ function mergeCandidate(holder, profit, tokenDetail, minimumEntryUsd, minimumHit
   return {
     ...holder,
     ...profit,
-    address: normalizeAddress(holder.address || profit.address),
+    address: normalize(holder.address || profit.address),
     holderRank: number(holder.holderRank),
     holdingTokenAmount,
     holdingValueUsd: round(holdingValueUsd, 2),
@@ -103,14 +120,20 @@ export async function scanTokenHolders({
   holderClient,
   debotClient,
   config: providedConfig,
+  chainProfile = ROBINHOOD_CHAIN,
+  holderSource: providedHolderSource,
+  addressNormalizer,
+  addressValidator,
   signal,
   onProgress = () => {}
 }) {
   const config = { ...createRobinhoodConfig({}), ...(providedConfig || {}) };
+  const adapter = addressAdapter(chainProfile, addressNormalizer, addressValidator);
+  const chainName = String(chainProfile?.name || 'Robinhood');
   const minimumEntryUsd = Math.max(0, number(config.minEntryUsd) ?? 500);
-  const tokenAddress = normalizeAddress(token?.address);
-  if (!ADDRESS_PATTERN.test(tokenAddress)) throw new TypeError('Invalid Robinhood token address');
-  if (!holderClient?.fetchTopHolders) throw new Error('Robinhood holder client is unavailable');
+  const tokenAddress = adapter.normalize(token?.address);
+  if (!adapter.validate(tokenAddress)) throw new TypeError(`Invalid ${chainName} token address`);
+  if (!holderClient?.fetchTopHolders) throw new Error(`${chainName} holder client is unavailable`);
   if (!debotClient?.fetchTokenDetail || !debotClient?.fetchWalletTokenProfit) {
     throw new Error('DeBot wallet profit client is unavailable');
   }
@@ -123,6 +146,10 @@ export async function scanTokenHolders({
       signal
     })
   ]);
+  const holderSource = String(
+    providedHolderSource || holderSnapshot?.source || chainProfile?.holderSource || 'blockscout'
+  ).trim() || 'blockscout';
+  const holderSourceKey = holderSource.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'holder';
   const peakMarketCapPromise = typeof debotClient.fetchTokenPeakMarketCap === 'function'
     ? debotClient.fetchTokenPeakMarketCap(tokenAddress, tokenDetail, { signal })
         .then((value) => ({ value, error: null }))
@@ -131,12 +158,15 @@ export async function scanTokenHolders({
           error: error instanceof Error ? error.message : String(error)
         }))
     : Promise.resolve({ value: null, error: 'peak_market_cap_client_unavailable' });
-  const infrastructure = knownInfrastructure(tokenAddress, tokenDetail);
+  const infrastructure = knownInfrastructure(tokenAddress, tokenDetail, chainProfile, adapter);
   const candidates = [];
   for (const holder of holderSnapshot.holders) {
-    const address = normalizeAddress(holder.address);
+    const address = adapter.normalize(holder.address);
     const reasons = [...(holder.exclusionReasons || [])];
-    if (infrastructure.has(address)) reasons.push(address === normalizeAddress(tokenDetail.creatorAddress) ? 'developer' : 'known_infrastructure');
+    if (!adapter.validate(address)) reasons.push('invalid_address');
+    if (infrastructure.has(address)) {
+      reasons.push(address === adapter.normalize(tokenDetail.creatorAddress) ? 'developer' : 'known_infrastructure');
+    }
     if (reasons.length) continue;
     candidates.push({ ...holder, address });
     if (candidates.length >= config.holderCandidateLimit) break;
@@ -154,7 +184,14 @@ export async function scanTokenHolders({
   const analyzed = await mapLimit(candidates, config.holderProfitConcurrency, async (holder) => {
     try {
       const profit = await debotClient.fetchWalletTokenProfit(tokenAddress, holder.address, { signal });
-      return mergeCandidate(holder, profit, tokenDetail, minimumEntryUsd, config.defaultWinnerMultiple);
+      return mergeCandidate(
+        holder,
+        profit,
+        tokenDetail,
+        minimumEntryUsd,
+        config.defaultWinnerMultiple,
+        adapter.normalize
+      );
     } catch (error) {
       if (error?.name === 'AbortError') throw error;
       failures.push({
@@ -234,7 +271,7 @@ export async function scanTokenHolders({
     confidence: complete ? 'high' : 'medium',
     priceSource: 'debot_current_snapshot',
     liquiditySource: 'debot_token_detail',
-    walletCountSource: 'blockscout_holder_index',
+    walletCountSource: `${holderSourceKey}_holder_index`,
     peakMultiple: null,
     peakLiquidityUsd: highestLiquidity || null,
     effectiveWallets: number(tokenDetail.holders ?? holderSnapshot.token?.holders),
@@ -248,7 +285,7 @@ export async function scanTokenHolders({
   };
   const holderAnalysis = {
     strategy: 'holder_first',
-    holderSource: 'blockscout',
+    holderSource,
     profitSource: 'debot_wallet_token_analysis',
     holderLimit: config.holderCandidateLimit,
     fetchedHolders: holderSnapshot.holders.length,
@@ -292,7 +329,7 @@ export async function scanTokenHolders({
       complete,
       partial: !complete,
       strategy: 'holder_first',
-      holderSource: 'blockscout',
+      holderSource,
       profitSource: 'debot_wallet_token_analysis',
       holderLimit: config.holderCandidateLimit,
       fetchedHolders: holderSnapshot.holders.length,

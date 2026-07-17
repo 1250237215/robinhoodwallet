@@ -1,7 +1,6 @@
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 
 import { createRobinhoodConfig } from './robinhood/config.js';
 import { BARK_SOUNDS, createRobinhoodBarkNotifier } from './robinhood/bark.js';
@@ -325,10 +324,21 @@ function openMonitorStream(req, res, monitor) {
   res.on('error', cleanup);
 }
 
-function address(value, kind) {
-  const normalized = typeof value === 'string' ? value.toLowerCase() : '';
-  if (!ADDRESS_PATTERN.test(normalized)) {
-    throw new HttpError(400, `Invalid Robinhood ${kind} address`, 'INVALID_ADDRESS');
+const DEFAULT_ADDRESS_CODEC = Object.freeze({
+  chainId: 'robinhood',
+  label: 'Robinhood',
+  normalize(value) {
+    return typeof value === 'string' ? value.toLowerCase() : '';
+  },
+  validate(value) {
+    return ADDRESS_PATTERN.test(value);
+  }
+});
+
+function address(value, kind, codec = DEFAULT_ADDRESS_CODEC) {
+  const normalized = codec.normalize(value);
+  if (!codec.validate(normalized, kind)) {
+    throw new HttpError(400, `Invalid ${codec.label || 'chain'} ${kind} address`, 'INVALID_ADDRESS');
   }
   return normalized;
 }
@@ -339,8 +349,9 @@ function dashboardStatus(dashboard, rows = 0) {
   return 503;
 }
 
-async function handleApi(req, res, url, service, monitor) {
+async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT_ADDRESS_CODEC) {
   if (!url.pathname.startsWith('/api/robinhood/')) return false;
+  const chain = String(addressCodec.chainId || service?.chainId || 'robinhood');
 
   if (url.pathname === '/api/robinhood/monitor') {
     if (req.method !== 'GET') methodNotAllowed(['GET']);
@@ -462,6 +473,7 @@ async function handleApi(req, res, url, service, monitor) {
     const winnerCount = result.winners?.length || 0;
     sendJson(res, dashboardStatus(result, result.winners?.length || 0), {
       ok: result.ok,
+      chain: result.chain || chain,
       status: result.status,
       mode: result.mode,
       discoveryEnabled: result.discoveryEnabled,
@@ -481,6 +493,7 @@ async function handleApi(req, res, url, service, monitor) {
     const result = service.getDashboard(parseWalletFilters(url.searchParams));
     sendJson(res, dashboardStatus(result, result.wallets?.length || 0), {
       ok: result.ok,
+      chain: result.chain || chain,
       wallets: result.wallets || [],
       filters: result.filters,
       updatedAt: result.updatedAt,
@@ -494,6 +507,7 @@ async function handleApi(req, res, url, service, monitor) {
       const result = service.getDashboard({ ...parseDashboardFilters(url.searchParams), tab: 'all' });
       sendJson(res, dashboardStatus(result, result.winners?.length || 0), {
         ok: result.ok,
+        chain: result.chain || chain,
         winners: result.winners || [],
         filters: result.filters,
         updatedAt: result.updatedAt,
@@ -503,7 +517,7 @@ async function handleApi(req, res, url, service, monitor) {
     }
     if (req.method !== 'POST') methodNotAllowed(['GET', 'POST']);
     const body = await readJson(req);
-    const result = service.addManualWinner(address(body.address, 'token'), scanOptions(body));
+    const result = service.addManualWinner(address(body.address, 'token', addressCodec), scanOptions(body));
     sendJson(res, result.duplicate ? 200 : 202, result);
     return true;
   }
@@ -520,7 +534,7 @@ async function handleApi(req, res, url, service, monitor) {
     const body = req.headers['content-length'] || req.headers['transfer-encoding']
       ? await readJson(req)
       : {};
-    const result = service.rescanManualWinner(address(value, 'token'), scanOptions(body));
+    const result = service.rescanManualWinner(address(value, 'token', addressCodec), scanOptions(body));
     if (!result) throw new HttpError(404, 'Manual token has not been submitted', 'WINNER_NOT_FOUND');
     sendJson(res, result.accepted ? 202 : 200, result);
     return true;
@@ -529,7 +543,12 @@ async function handleApi(req, res, url, service, monitor) {
   if (url.pathname === '/api/robinhood/jobs') {
     if (req.method !== 'GET') methodNotAllowed(['GET']);
     const result = service.getDashboard({ tab: 'all' });
-    sendJson(res, 200, { ok: true, jobs: result.jobs || [], updatedAt: result.updatedAt });
+    sendJson(res, 200, {
+      ok: true,
+      chain: result.chain || chain,
+      jobs: result.jobs || [],
+      updatedAt: result.updatedAt
+    });
     return true;
   }
 
@@ -565,7 +584,7 @@ async function handleApi(req, res, url, service, monitor) {
     } catch {
       throw new HttpError(400, 'Invalid encoded wallet address', 'INVALID_ADDRESS');
     }
-    const normalized = address(value, 'wallet');
+    const normalized = address(value, 'wallet', addressCodec);
     if (req.method === 'GET') {
       const result = service.getWallet(normalized);
       if (!result) throw new HttpError(404, 'Wallet has not been analyzed', 'WALLET_NOT_FOUND');
@@ -609,11 +628,35 @@ async function serveStatic(req, res, url, publicDir) {
   }
 }
 
-export function createRobinhoodStandaloneServer({ service, monitor = null, publicDir = path.resolve('public') }) {
+export function createRobinhoodStandaloneServer({
+  service,
+  monitor = null,
+  publicDir = path.resolve('public'),
+  apiPrefix = '/api/robinhood',
+  addressCodec = DEFAULT_ADDRESS_CODEC,
+  extraApiHandler = null,
+  servePublic = true
+}) {
+  const normalizedApiPrefix = `/${String(apiPrefix || '/api/robinhood').replace(/^\/+|\/+$/g, '')}`;
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
-      if (await handleApi(req, res, url, service, monitor)) return;
+      if (typeof extraApiHandler === 'function' && await extraApiHandler(req, res, url)) return;
+      if (url.pathname === normalizedApiPrefix || url.pathname.startsWith(`${normalizedApiPrefix}/`)) {
+        const routedUrl = new URL(url);
+        routedUrl.pathname = `/api/robinhood${url.pathname.slice(normalizedApiPrefix.length)}`;
+        if (await handleApi(req, res, routedUrl, service, monitor, addressCodec)) return;
+      }
+      if (!servePublic) {
+        sendJson(res, 404, {
+          ok: false,
+          error: 'API route not found',
+          code: 'NOT_FOUND',
+          retryable: false,
+          staleDataAvailable: false
+        });
+        return;
+      }
       await serveStatic(req, res, url, path.resolve(publicDir));
     } catch (error) {
       if (error instanceof HttpError) {
@@ -708,26 +751,4 @@ export async function startRobinhoodStandaloneServer(
   service.start();
   monitor.start();
   return { server, service, monitor, store, host, port };
-}
-
-async function main() {
-  const running = await startRobinhoodStandaloneServer();
-  console.log(`Robinhood smart money radar: http://${running.host}:${running.port}/`);
-  const shutdown = () => {
-    running.service.close();
-    running.monitor.close();
-    running.server.close(() => {
-      running.store.close();
-      process.exit(0);
-    });
-  };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
-}
-
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch((error) => {
-    console.error(error);
-    process.exit(1);
-  });
 }

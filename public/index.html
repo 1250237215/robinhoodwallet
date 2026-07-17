@@ -12,11 +12,26 @@
     <main class="app-shell">
       <header class="app-header">
         <div class="brand-block">
-          <div class="chain-mark" aria-hidden="true">R</div>
+          <div class="chain-mark" id="chain-mark" aria-hidden="true">R</div>
           <div class="brand-copy">
-            <h1>Robinhood 聪明钱雷达</h1>
-            <p>手工金狗、最近重扫候选与已确认地址库</p>
+            <h1 id="brand-title">Robinhood 聪明钱雷达</h1>
+            <p id="brand-subtitle">手工金狗、最近重扫候选与已确认地址库</p>
           </div>
+        </div>
+
+        <div class="chain-switcher" id="chain-switcher" role="group" aria-label="切换区块链">
+          <button class="is-active" type="button" data-chain="robinhood" aria-pressed="true">
+            <span class="chain-switch-dot robinhood" aria-hidden="true"></span>
+            Robinhood
+          </button>
+          <button type="button" data-chain="base" aria-pressed="false">
+            <span class="chain-switch-dot base" aria-hidden="true"></span>
+            Base
+          </button>
+          <button type="button" data-chain="solana" aria-pressed="false">
+            <span class="chain-switch-dot solana" aria-hidden="true"></span>
+            Solana
+          </button>
         </div>
 
         <dl class="header-stats" aria-label="数据概览">

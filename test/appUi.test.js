@@ -8,7 +8,7 @@ const stylesCss = fs.readFileSync(new URL('../public/styles.css', import.meta.ur
 
 test('home is the manual Robinhood smart-money workspace', () => {
   assert.match(indexHtml, /<title>Robinhood 聪明钱雷达<\/title>/);
-  assert.match(indexHtml, /<h1>Robinhood 聪明钱雷达<\/h1>/);
+  assert.match(indexHtml, /<h1 id="brand-title">Robinhood 聪明钱雷达<\/h1>/);
   assert.match(indexHtml, /手工金狗、最近重扫候选与已确认地址库/);
   assert.match(indexHtml, /<dt>手工金狗<\/dt>/);
   assert.match(indexHtml, /id="results-container"/);
@@ -55,7 +55,7 @@ test('smart strategy is the default while every request keeps the 10x compatibil
   assert.match(appJs, /strategy: state\.strategy,\s+multiple: state\.multiple/);
   assert.match(appJs, /strategy: filters\.strategy,\s+multiple: String\(filters\.multiple\)/);
   assert.match(appJs, /const body = JSON\.stringify\(\{ \.\.\.filters, classification:/);
-  assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/refresh`, \{ method: 'POST', body \}\)/);
+  assert.match(appJs, /fetchChainJson\(context, '\/refresh', \{ method: 'POST', body \}\)/);
   assert.match(appJs, /if \(button\.dataset\.strategy === 'smart'\) \{\s+state\.strategy = 'smart';\s+state\.multiple = 10/);
   assert.match(appJs, /else \{\s+state\.strategy = 'multiple';\s+state\.multiple = Number\(button\.dataset\.multiple\)/);
   assert.match(appJs, /closest\('\[data-strategy\], \[data-multiple\]'\)/);
@@ -68,7 +68,8 @@ test('manual CA dock is always visible and supports validated batches of up to 2
   assert.ok(formTag);
   assert.doesNotMatch(formTag, /\bhidden\b/);
   assert.match(indexHtml, /<textarea[\s\S]*id="manual-token-address"/);
-  assert.match(appJs, /ADDRESS_PATTERN = \/\^0x\[0-9a-fA-F\]\{40\}\$\//);
+  assert.match(appJs, /addressPattern: \/\^0x\[0-9a-fA-F\]\{40\}\$\//);
+  assert.match(appJs, /ADDRESS_PATTERN = chain\.addressPattern/);
   assert.match(appJs, /manualInput\.value\.split\(\/\[\\s,;，；\]\+\//);
   assert.match(appJs, /new Set\(parts\.map\(normalizeAddress\)\.filter\(Boolean\)\)/);
   assert.match(appJs, /addresses\.length > 20/);
@@ -161,7 +162,7 @@ test('confirmed address library accepts batch wallet lines with optional notes',
   assert.match(indexHtml, /id="manual-wallet-add-button"[^>]*type="submit"[\s\S]*data-lucide="list-plus"[\s\S]*批量添加/);
   assert.match(appJs, /elements\.manualWalletForm\.hidden = !showingConfirmedLibrary/);
   assert.match(appJs, /const lines = elements\.manualWalletLines\.value/);
-  assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/wallets\/batch`, \{[\s\S]*method: 'POST',[\s\S]*body: JSON\.stringify\(\{ lines \}\)/);
+  assert.match(appJs, /fetchChainJson\(context, '\/wallets\/batch', \{[\s\S]*method: 'POST',[\s\S]*body: JSON\.stringify\(\{ lines \}\)/);
   assert.match(appJs, /\['created', 'restored', 'updated', 'duplicate', 'invalid'\]\.map/);
   assert.match(appJs, /record\.results\.filter\(\(item\)[\s\S]*=== 'invalid'/);
   assert.match(appJs, /class="manual-wallet-invalid-list"/);
@@ -173,7 +174,8 @@ test('confirmed address library accepts batch wallet lines with optional notes',
 
 test('confirmed address library exports the exact DeBot wallet-import format', () => {
   assert.match(indexHtml, /id="debot-export-button"[^>]*hidden[\s\S]*导出到 DeBot/);
-  assert.match(appJs, /DEBOT_WALLET_MANAGER_URL = 'https:\/\/debot\.ai\/track\?chain=robinhood&tab=manager'/);
+  assert.match(appJs, /debotWalletManagerUrl: 'https:\/\/debot\.ai\/track\?chain=robinhood&tab=manager'/);
+  assert.match(appJs, /DEBOT_WALLET_MANAGER_URL = chain\.debotWalletManagerUrl/);
   assert.match(appJs, /review: 'confirmed',[\s\S]*status: 'all'/);
   assert.match(appJs, /if \(!walletIsConfirmed\(wallet\)\) continue/);
   assert.match(appJs, /alias \? `\$\{address\} \$\{alias\}` : address/);
@@ -181,7 +183,7 @@ test('confirmed address library exports the exact DeBot wallet-import format', (
   assert.match(appJs, /copyText\(text\)/);
   assert.match(appJs, /if \(typeof document\.execCommand !== 'function'\) return false/);
   assert.match(appJs, /catch \{\s+return false;\s+\} finally \{\s+input\?\.remove\(\)/);
-  assert.match(appJs, /robinhood-debot-wallets\.txt/);
+  assert.match(appJs, /link\.download = `\$\{chainId\}-debot-wallets\.txt`/);
   assert.match(appJs, /elements\.debotExportButton\.hidden = state\.activeTab !== 'all_round'/);
 });
 
@@ -200,7 +202,7 @@ test('smart-eligible summaries require explicit review before entering the confi
   assert.match(appJs, /data-candidate-select="\$\{escapeHtml\(address\)\}"/);
   assert.match(indexHtml, /全选当前页/);
   assert.match(appJs, /二次确认：将选中的 \$\{selected\.length\} 个候选加入已确认地址库/);
-  assert.match(appJs, /Promise\.allSettled\(selected\.map\(requestCandidateConfirmation\)\)/);
+  assert.match(appJs, /Promise\.allSettled\(selected\.map\(\(wallet\) => requestCandidateConfirmation\(context, wallet\)\)\)/);
 });
 
 test('candidate and confirmed wallet lists support checkbox batch deletion', () => {
@@ -220,14 +222,15 @@ test('candidate and confirmed wallet lists support checkbox batch deletion', () 
 });
 
 test('candidate rows support DeBot inspection, confirmation, exclusion and deterministic aliases', () => {
-  assert.match(appJs, /const DEBOT_ADDRESS_ROOT = 'https:\/\/debot\.ai\/address\/robinhood'/);
+  assert.match(appJs, /debotAddressRoot: 'https:\/\/debot\.ai\/address\/robinhood'/);
+  assert.match(appJs, /DEBOT_ADDRESS_ROOT = chain\.debotAddressRoot/);
   assert.match(appJs, /href="\$\{escapeHtml\(`\$\{DEBOT_ADDRESS_ROOT\}\/\$\{address\}`\)\}" target="_blank" rel="noopener noreferrer"/);
   assert.match(appJs, /data-confirm-candidate="\$\{escapeHtml\(address\)\}"/);
   assert.match(appJs, /data-exclude-candidate="\$\{escapeHtml\(address\)\}"/);
   assert.match(appJs, /method: 'PATCH',[\s\S]*status: 'active',[\s\S]*alias: walletSuggestedAlias\(wallet\)/);
   assert.match(appJs, /firstValue\(wallet, \['suggestedAlias', 'suggested_alias'\]/);
   assert.match(appJs, /return `\$\{bestSymbol\} \$\{profitRank\}`/);
-  assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/wallets\/\$\{encodeURIComponent\(normalized\)\}`, \{ method: 'DELETE' \}\)/);
+  assert.match(appJs, /fetchChainJson\(context, `\/wallets\/\$\{encodeURIComponent\(normalized\)\}`, \{ method: 'DELETE' \}\)/);
   assert.match(appJs, /之后不会再出现在默认候选中/);
   assert.match(appJs, /reviewMode \? `[\s\S]*data-confirm-candidate[\s\S]*` : `[\s\S]*data-edit-wallet/);
 });
@@ -236,7 +239,7 @@ test('a separate review-aware wallet request preserves confirmed annotations alo
   assert.match(appJs, /function buildCurationQuery\(filters\)/);
   assert.match(appJs, /params\.set\('review', filters\.status === 'excluded' \? 'excluded' : filters\.status === 'all' \? 'all' : 'confirmed'\)/);
   assert.match(appJs, /function mergeWalletCollections\(\.\.\.collections\)/);
-  assert.match(appJs, /loadCurationWallets\(filters\)/);
+  assert.match(appJs, /loadCurationWallets\(context, filters\)/);
 });
 
 test('pending review wallets load independently and only the latest completed scan batch is shown', () => {
@@ -267,7 +270,7 @@ test('pending review wallets load independently and only the latest completed sc
     appJs.indexOf('async function loadApiData'),
     appJs.indexOf('function activeJobs')
   );
-  assert.match(apiLoaderSource, /pendingWalletsPromise = loadPendingWallets\(filters\)/);
+  assert.match(apiLoaderSource, /pendingWalletsPromise = loadPendingWallets\(context, filters\)/);
   assert.equal((apiLoaderSource.match(/latestReviewBatch\(pendingWallets, jobs, winners, filters\.minEntryUsd\)/g) || []).length, 2);
   assert.equal((apiLoaderSource.match(/walletLibraryRecords\(curationWallets\),\s*reviewBatch\.wallets/g) || []).length, 2);
   assert.equal((apiLoaderSource.match(/reviewBatchTokenAddresses: reviewBatch\.tokenAddresses/g) || []).length, 2);
@@ -356,11 +359,11 @@ test('annotation-only and holder-only wallets render without fake action history
 
 test('dashboard consumes wallet library, winner, scan, patch and delete APIs', () => {
   for (const endpoint of ['/dashboard?', '/wallets?', '/winners?', '/jobs', '/jobs/scan']) {
-    assert.equal(appJs.includes(`${'${API_ROOT}'}${endpoint}`), true, `missing endpoint ${endpoint}`);
+    assert.equal(appJs.includes(endpoint), true, `missing endpoint ${endpoint}`);
   }
-  assert.match(appJs, /\$\{API_ROOT\}\/wallets\/\$\{encodeURIComponent\(address\)\}/);
-  assert.match(appJs, /\$\{API_ROOT\}\/refresh/);
-  assert.match(appJs, /\$\{API_ROOT\}\/wallet\/\$\{encodeURIComponent\(address\)\}/);
+  assert.match(appJs, /fetchChainJson\(context, `\/wallets\/\$\{encodeURIComponent\(address\)\}`/);
+  assert.match(appJs, /fetchChainJson\(context, '\/refresh'/);
+  assert.match(appJs, /fetchChainJson\(context, `\/wallet\/\$\{encodeURIComponent\(address\)\}`/);
   assert.match(appJs, /getCollection\(walletsPayload, \['wallets', 'items', 'addresses'\]\)/);
 });
 
@@ -598,7 +601,268 @@ test('relative static assets and a scoped API root support VPS prefix deployment
   assert.match(indexHtml, /href="styles\.css"/);
   assert.match(indexHtml, /src="app\.js"/);
   assert.match(appJs, /window\.location\.pathname\.startsWith\('\/robinhood-radar\/'\)/);
-  assert.match(appJs, /const API_ROOT = `\$\{APP_BASE\}\/api\/robinhood`/);
+  assert.match(appJs, /API_ROOT = `\$\{APP_BASE\}\/api\/\$\{chain\.apiPath\}`/);
+});
+
+test('a three-chain segmented switcher selects Robinhood, Base, and Solana independently', () => {
+  const switcher = indexHtml.match(
+    /<div class="chain-switcher" id="chain-switcher"[\s\S]*?<\/div>/
+  )?.[0] || '';
+  assert.equal((switcher.match(/data-chain=/g) || []).length, 3);
+  for (const [chain, label, pressed] of [
+    ['robinhood', 'Robinhood', 'true'],
+    ['base', 'Base', 'false'],
+    ['solana', 'Solana', 'false']
+  ]) {
+    assert.match(
+      switcher,
+      new RegExp(`data-chain="${chain}"[^>]*aria-pressed="${pressed}"[\\s\\S]*?${label}`)
+    );
+    assert.match(appJs, new RegExp(`${chain}: Object\\.freeze\\(\\{[\\s\\S]*?id: '${chain}'`));
+  }
+  assert.match(appJs, /new URLSearchParams\(window\.location\.search\)\.get\('chain'\)/);
+  assert.match(appJs, /Object\.hasOwn\(CHAIN_CONFIGS, requestedChain\) \? requestedChain : 'robinhood'/);
+  assert.match(appJs, /elements\.chainSwitcher\.addEventListener\('click'/);
+  assert.match(appJs, /switchChain\(button\.dataset\.chain\)/);
+  assert.match(stylesCss, /\.chain-switcher \{[\s\S]*grid-template-columns: repeat\(3/);
+  assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.chain-switcher \{[\s\S]*repeat\(3, minmax\(0, 1fr\)\)/);
+});
+
+test('active-chain configuration drives API roots and browser settings keys', () => {
+  const syncSource = appJs.slice(
+    appJs.indexOf('function syncChainRuntimeVariables'),
+    appJs.indexOf('function explorerUrl')
+  );
+  assert.match(syncSource, /API_ROOT = `\$\{APP_BASE\}\/api\/\$\{chain\.apiPath\}`/);
+  assert.match(syncSource, /EXPLORER_ROOT = chain\.explorerRoot/);
+  assert.match(syncSource, /DEBOT_ADDRESS_ROOT = chain\.debotAddressRoot/);
+  assert.match(syncSource, /DEBOT_TOKEN_ROOT = chain\.debotTokenRoot/);
+  assert.match(syncSource, /DEBOT_WALLET_MANAGER_URL = chain\.debotWalletManagerUrl/);
+  assert.match(syncSource, /MONITOR_THRESHOLD_STORAGE_KEY = `\$\{chain\.id\}-monitor-threshold`/);
+
+  for (const [chain, apiPath] of [['robinhood', 'robinhood'], ['base', 'base'], ['solana', 'solana']]) {
+    const configStart = appJs.indexOf(`${chain}: Object.freeze({`);
+    const configEnd = appJs.indexOf('\n  })', configStart);
+    const config = appJs.slice(configStart, configEnd);
+    assert.match(config, new RegExp(`apiPath: '${apiPath}'`));
+  }
+
+  const storageSource = appJs.slice(
+    appJs.indexOf('function readStoredMonitorThreshold'),
+    appJs.indexOf('function monitorTimestampMs')
+  );
+  assert.match(storageSource, /localStorage\.getItem\(MONITOR_THRESHOLD_STORAGE_KEY\)/);
+  assert.match(storageSource, /localStorage\.setItem\(MONITOR_THRESHOLD_STORAGE_KEY/);
+  assert.doesNotMatch(storageSource, /localStorage\.(?:getItem|setItem)\('robinhood-monitor-threshold'/);
+});
+
+test('Solana addresses and signatures retain case while EVM identities normalize to lowercase', () => {
+  const addressSource = appJs.slice(
+    appJs.indexOf('function normalizeAddress'),
+    appJs.indexOf('function shortAddress')
+  );
+  assert.match(addressSource, /if \(!ADDRESS_PATTERN\.test\(address\)\) return ''/);
+  assert.match(addressSource, /activeChain\(\)\.family === 'evm' \? address\.toLowerCase\(\) : address/);
+
+  const transactionSource = appJs.slice(
+    appJs.indexOf('function normalizeTransactionHash'),
+    appJs.indexOf('function normalizeMonitorEvent')
+  );
+  assert.match(transactionSource, /if \(!HASH_PATTERN\.test\(hash\)\) return ''/);
+  assert.match(transactionSource, /activeChain\(\)\.family === 'evm' \? hash\.toLowerCase\(\) : hash/);
+
+  const solanaConfig = appJs.slice(
+    appJs.indexOf('solana: Object.freeze({'),
+    appJs.indexOf('\n  })', appJs.indexOf('solana: Object.freeze({'))
+  );
+  assert.match(solanaConfig, /family: 'solana'/);
+  assert.match(solanaConfig, /nativeSymbol: 'SOL'/);
+  assert.match(solanaConfig, /addressPattern: \/\^\[1-9A-HJ-NP-Za-km-z\]\{32,44\}\$\//);
+  assert.match(solanaConfig, /hashPattern: \/\^\[1-9A-HJ-NP-Za-km-z\]\{64,88\}\$\//);
+  assert.match(appJs, /activeChain\(\)\.family === 'solana'[\s\S]*Solana Base58 Mint 地址/);
+  assert.match(appJs, /event\.assetType === 'native' \? activeChain\(\)\.nativeSymbol : 'TOKEN'/);
+});
+
+test('switching chains closes live transport, clears chain data, and invalidates stale requests', () => {
+  const stopSource = appJs.slice(
+    appJs.indexOf('function stopMonitorTransport'),
+    appJs.indexOf('function scheduleMonitorPoll')
+  );
+  assert.match(stopSource, /state\.monitorSequence \+= 1/);
+  assert.match(stopSource, /state\.monitorEventSource\.close\(\)/);
+  assert.match(stopSource, /state\.monitorEventSource = null/);
+
+  const resetSource = appJs.slice(
+    appJs.indexOf('function resetChainState'),
+    appJs.indexOf('function switchChain')
+  );
+  for (const operation of [
+    'stopMonitorTransport();',
+    'state.requestSequence += 1;',
+    'state.detailSequence += 1;',
+    'state.data = null;',
+    'state.visibleWallets = [];',
+    'state.selectedCandidates.clear();',
+    'state.rescanningWinnerAddresses.clear();',
+    'state.detailCache.clear();',
+    'state.monitorEvents = [];',
+    'state.monitorServerClusters = [];',
+    'state.monitorEventKeys.clear();',
+    'state.monitorAlertedTokens.clear();',
+    'state.monitorBarkTargets = [];'
+  ]) {
+    assert.equal(resetSource.includes(operation), true, `missing chain reset: ${operation}`);
+  }
+
+  const switchSource = appJs.slice(
+    appJs.indexOf('function switchChain'),
+    appJs.indexOf("elements.chainSwitcher.addEventListener")
+  );
+  assert.match(switchSource, /state\.chainAbortController\.abort\(\)/);
+  assert.match(switchSource, /state\.chainEpoch \+= 1/);
+  assert.match(switchSource, /activeChainId = nextChainId/);
+  assert.match(switchSource, /syncChainRuntimeVariables\(\)/);
+  assert.match(switchSource, /state\.chainAbortController = new AbortController\(\)/);
+  assert.match(switchSource, /url\.hash = ''/);
+  assert.match(switchSource, /resetChainState\(\)/);
+  assert.ok(
+    switchSource.indexOf('state.chainAbortController.abort();') < switchSource.indexOf('activeChainId = nextChainId'),
+    'old-chain fetches must abort before the active chain changes'
+  );
+  assert.ok(
+    switchSource.indexOf('state.chainAbortController = new AbortController();') < switchSource.indexOf('resetChainState();'),
+    'new-chain operations must receive a fresh signal before loading starts'
+  );
+
+  const pollSource = appJs.slice(
+    appJs.indexOf('async function pollMonitorEvents'),
+    appJs.indexOf('function connectMonitorStream')
+  );
+  assert.match(pollSource, /const context = captureChainRequestContext\(\)/);
+  assert.match(pollSource, /const sequence = state\.monitorSequence/);
+  assert.match(pollSource, /!chainRequestIsCurrent\(context\) \|\| sequence !== state\.monitorSequence/);
+
+  const streamSource = appJs.slice(
+    appJs.indexOf('function connectMonitorStream'),
+    appJs.indexOf('async function startMonitorPage')
+  );
+  assert.match(streamSource, /new EventSource\(`\$\{context\.apiRoot\}\/monitor\/stream`\)/);
+  assert.match(streamSource, /const isCurrentSource = \(\) => state\.monitorEventSource === source && chainRequestIsCurrent\(context\)/);
+  assert.match(streamSource, /if \(!isCurrentSource\(\)\) return/);
+
+  const loadSource = appJs.slice(
+    appJs.indexOf('async function loadData'),
+    appJs.indexOf('async function startScan')
+  );
+  assert.match(loadSource, /const context = captureChainRequestContext\(\)/);
+  assert.match(loadSource, /const sequence = \+\+state\.requestSequence/);
+  assert.match(loadSource, /if \(!chainRequestIsCurrent\(context\) \|\| sequence !== state\.requestSequence\) return/);
+  assert.match(loadSource, /if \(data\.chain && data\.chain !== context\.chainId\) return/);
+  assert.match(appJs, /if \(record\.chain && String\(record\.chain\) !== activeChainId\) return/);
+  assert.match(appJs, /if \(rawEvent\.chain && String\(rawEvent\.chain\) !== activeChainId\) return/);
+});
+
+test('all API reads and writes use an immutable abortable chain context', () => {
+  const requestHelpers = appJs.slice(
+    appJs.indexOf('function captureChainRequestContext'),
+    appJs.indexOf('function clampMonitorThreshold')
+  );
+  for (const field of [
+    'chainId: activeChainId',
+    'apiRoot: API_ROOT',
+    'chainEpoch: state.chainEpoch',
+    'signal: state.chainAbortController.signal'
+  ]) {
+    assert.equal(requestHelpers.includes(field), true, `missing captured chain field: ${field}`);
+  }
+  assert.match(requestHelpers, /return Object\.freeze\(\{/);
+  assert.match(requestHelpers, /context\?\.chainId === activeChainId/);
+  assert.match(requestHelpers, /context\.chainEpoch === state\.chainEpoch/);
+  assert.match(requestHelpers, /context\.signal === state\.chainAbortController\.signal/);
+  assert.match(requestHelpers, /fetchJson\(`\$\{context\.apiRoot\}\$\{path\}`/);
+  assert.match(requestHelpers, /signal: context\.signal/);
+
+  assert.equal((appJs.match(/\bfetchJson\(/g) || []).length, 2, 'API calls must go through fetchChainJson');
+  assert.doesNotMatch(appJs, /\$\{API_ROOT\}\//, 'async paths must not interpolate the mutable API root');
+
+  const guardedOperations = [
+    ['saveMonitorSoundSettings', 'saveBarkSoundSettings'],
+    ['createBarkTarget', 'runBarkAction'],
+    ['runBarkAction', 'refreshBarkTargets'],
+    ['startMonitorPage', 'saveMonitorSettings'],
+    ['saveMonitorSettings', 'currentMinimumEntryUsd'],
+    ['exportConfirmedWalletsToDebot', 'loadApiData'],
+    ['loadWalletDetail', 'renderResultsSelection'],
+    ['loadData', 'startScan'],
+    ['startScan', 'rescanWinner'],
+    ['rescanWinner', 'addManualWinner'],
+    ['addManualWinner', 'walletForAddress'],
+    ['confirmCandidate', 'confirmSelectedCandidates'],
+    ['confirmSelectedCandidates', 'deleteSelectedWallets'],
+    ['deleteSelectedWallets', 'excludeCandidate'],
+    ['excludeCandidate', 'walletBatchCount'],
+    ['addManualWalletBatch', 'openWalletEditor'],
+    ['saveWalletEditor', 'disableConfirmedWallet'],
+    ['disableConfirmedWallet', 'excludeEditedWallet']
+  ];
+  for (const [name, nextName] of guardedOperations) {
+    const source = appJs.slice(
+      appJs.indexOf(`async function ${name}`),
+      appJs.indexOf(`function ${nextName}`, appJs.indexOf(`async function ${name}`) + 1)
+    );
+    assert.match(source, /const context = captureChainRequestContext\(\)/, `${name} must capture its chain before awaiting`);
+    assert.match(source, /(?:chainRequestIsCurrent|requireCurrentChainRequest)\(context\)/, `${name} must reject stale completion`);
+  }
+
+  const resetSource = appJs.slice(
+    appJs.indexOf('function resetChainState'),
+    appJs.indexOf('function switchChain')
+  );
+  for (const control of [
+    'elements.refreshButton.disabled = false;',
+    'elements.manualWalletAddButton.disabled = false;',
+    'elements.monitorRefreshButton.disabled = false;',
+    'elements.monitorBarkAddButton.disabled = false;'
+  ]) {
+    assert.equal(resetSource.includes(control), true, `chain reset must release control: ${control}`);
+  }
+});
+
+test('DeBot and explorer links are generated from the active chain only', () => {
+  for (const [chain, debotAddress, explorer] of [
+    ['robinhood', 'https://debot.ai/address/robinhood', 'https://robinhoodchain.blockscout.com'],
+    ['base', 'https://debot.ai/address/base', 'https://base.blockscout.com'],
+    ['solana', 'https://debot.ai/address/solana', 'https://solscan.io']
+  ]) {
+    const configStart = appJs.indexOf(`${chain}: Object.freeze({`);
+    const configEnd = appJs.indexOf('\n  })', configStart);
+    const config = appJs.slice(configStart, configEnd);
+    assert.ok(configStart >= 0 && configEnd > configStart);
+    assert.equal(config.includes(`debotAddressRoot: '${debotAddress}'`), true);
+    assert.equal(config.includes(`explorerRoot: '${explorer}'`), true);
+  }
+
+  const explorerSource = appJs.slice(
+    appJs.indexOf('function explorerUrl'),
+    appJs.indexOf('syncChainRuntimeVariables();')
+  );
+  assert.match(explorerSource, /const chain = activeChain\(\)/);
+  assert.match(explorerSource, /chain\.explorerTokenPath/);
+  assert.match(explorerSource, /chain\.explorerTxPath/);
+  assert.match(explorerSource, /chain\.explorerAddressPath/);
+  assert.match(explorerSource, /return `\$\{chain\.explorerRoot\}\/\$\{path\}\/\$\{normalized\}`/);
+
+  const monitorRender = appJs.slice(
+    appJs.indexOf('function renderMonitorEvents'),
+    appJs.indexOf('function renderMonitorPage')
+  );
+  assert.match(monitorRender, /`\$\{DEBOT_ADDRESS_ROOT\}\/\$\{event\.walletAddress\}`/);
+  assert.match(monitorRender, /`\$\{DEBOT_TOKEN_ROOT\}\$\{event\.tokenAddress\}`/);
+  assert.match(monitorRender, /explorerUrl\('tx', event\.txHash\)/);
+  assert.doesNotMatch(monitorRender, /robinhoodchain|basescan|solscan/i);
+  assert.match(appJs, /managerLink\.href = context\.debotWalletManagerUrl/);
+  assert.match(appJs, /explorerUrl\('address', address\)/);
+  assert.match(appJs, /explorerUrl\('token', address\)/);
 });
 
 test('responsive layout keeps controls, wallet metadata and dialog inside the viewport', () => {
@@ -700,6 +964,25 @@ test('monitor health exposes compact fast and deep lane diagnostics', () => {
   assert.match(stylesCss, /\.monitor-health-grid \.monitor-health-details \{[\s\S]*flex-wrap: wrap/);
 });
 
+test('Solana monitor readiness is explicit when Helius is not configured', () => {
+  const healthSource = appJs.slice(
+    appJs.indexOf('function monitorHealthValues'),
+    appJs.indexOf('function renderMonitorSoundStatus')
+  );
+  assert.match(healthSource, /realtimeReady: typeof health\.realtimeReady === 'boolean'/);
+  assert.match(healthSource, /Array\.isArray\(health\.reasons\)/);
+  assert.match(healthSource, /helius_api_key_missing/);
+  assert.match(healthSource, /当前仅 Holder 分析可用/);
+
+  const renderSource = appJs.slice(
+    appJs.indexOf('function monitorConnectionState'),
+    appJs.indexOf('function renderMonitorClusters')
+  );
+  assert.match(renderSource, /health\.realtimeReady === false/);
+  assert.match(renderSource, /label: '实时未配置'/);
+  assert.match(renderSource, /readinessDetail \? '配置未完成'/);
+});
+
 test('monitor settings persist a bounded threshold and customizable alert window', () => {
   assert.match(indexHtml, /id="monitor-threshold"[^>]*min="1"[^>]*max="1000"/);
   assert.match(indexHtml, /id="monitor-window-seconds"[^>]*name="windowSeconds"[^>]*min="5"[^>]*max="3600"[^>]*value="60"/);
@@ -710,12 +993,12 @@ test('monitor settings persist a bounded threshold and customizable alert window
   assert.match(appJs, /window\.localStorage\.setItem\(MONITOR_THRESHOLD_STORAGE_KEY/);
   assert.match(appJs, /state\.monitorWindowSeconds = clampMonitorWindowSeconds\(serverWindowSeconds, state\.monitorWindowSeconds\)/);
   assert.match(appJs, /elements\.monitorWindowSeconds\.value = String\(state\.monitorWindowSeconds\)/);
-  assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/monitor\/settings`, \{[\s\S]*method: 'PATCH'[\s\S]*JSON\.stringify\(\{ threshold, windowSeconds, enabled \}\)/);
+  assert.match(appJs, /fetchChainJson\(context, '\/monitor\/settings', \{[\s\S]*method: 'PATCH'[\s\S]*JSON\.stringify\(\{ threshold, windowSeconds, enabled \}\)/);
   assert.match(appJs, /服务端保存失败，已保存在本机/);
 });
 
 test('monitoring prefers SSE event delivery and falls back to two-second incremental polling', () => {
-  assert.match(appJs, /new EventSource\(`\$\{API_ROOT\}\/monitor\/stream`\)/);
+  assert.match(appJs, /new EventSource\(`\$\{context\.apiRoot\}\/monitor\/stream`\)/);
   for (const eventType of ['snapshot', 'event', 'buy', 'sell', 'transfer', 'token_create', 'health']) {
     assert.match(appJs, new RegExp(`source\\.addEventListener\\('${eventType}'`));
   }
@@ -781,7 +1064,7 @@ test('real-time token events upsert asynchronous market cap and token-age enrich
   assert.match(mergeSource, /indexesByKey\.get\(key\)/);
   assert.match(mergeSource, /normalizeMonitorEvent\(rawEvent, state\.monitorEvents\[existingIndex\]\)/);
   assert.doesNotMatch(mergeSource, /state\.monitorEventKeys\.has\(key\)[^\n]+continue/);
-  assert.match(appJs, /source\.addEventListener\('event_update', applyMonitorStreamEventUpdate\)/);
+  assert.match(appJs, /source\.addEventListener\('event_update', \(event\) => \{[\s\S]*if \(isCurrentSource\(\)\) applyMonitorStreamEventUpdate\(event\)/);
   assert.match(appJs, /eventIds\.map\(\(id\) => \(\{ \.\.\.source, id \}\)\)/);
   assert.match(appJs, /formatMonitorMarketCap\(event\.marketCapUsd\)/);
   assert.match(appJs, /monitorTimestampMs\(event\?\.blockTimestamp\)[\s\S]*monitorTimestampMs\(event\?\.tokenCreationTimestamp\)/);
@@ -819,7 +1102,7 @@ test('single-wallet browser sound is gesture-driven and strictly gated by soundA
   assert.match(appJs, /if \(!initial\) playMonitorEventSounds\(added\)/);
   assert.match(appJs, /playMonitorEventSounds\(added\);[\s\S]*synchronizeMonitorAlerts/);
   assert.match(appJs, /const walletUrl = safeHttpUrl\(event\.debotAddressUrl\) \|\| `\$\{DEBOT_ADDRESS_ROOT\}\/\$\{event\.walletAddress\}`/);
-  assert.match(appJs, /const transactionUrl = safeHttpUrl\(event\.explorerTxUrl\) \|\| \(event\.txHash \? `\$\{EXPLORER_ROOT\}\/tx\/\$\{event\.txHash\}`/);
+  assert.match(appJs, /const transactionUrl = safeHttpUrl\(event\.explorerTxUrl\) \|\| explorerUrl\('tx', event\.txHash\)/);
   assert.match(appJs, /金额不限/);
 });
 
@@ -829,9 +1112,11 @@ test('monitor alert settings provide persistent sound choices and bounded volume
   assert.match(appJs, /MONITOR_SOUNDS = new Set\(\['alarm', 'bell', 'electronic', 'glass'\]\)/);
   assert.match(appJs, /Math\.min\(100, Math\.max\(0, Math\.round\(number\)\)\)/);
   assert.match(appJs, /JSON\.stringify\(\{ sound, volume \}\)/);
-  assert.match(appJs, /patterns\[state\.monitorSound\]/);
-  assert.match(appJs, /state\.monitorVolume \/ 100/);
-  assert.match(appJs, /if \(state\.monitorVolume <= 0\) return/);
+  assert.match(appJs, /const sound = state\.monitorSound/);
+  assert.match(appJs, /const volume = state\.monitorVolume/);
+  assert.match(appJs, /patterns\[sound\]/);
+  assert.match(appJs, /volume \/ 100/);
+  assert.match(appJs, /if \(volume <= 0\) return/);
 });
 
 test('Bark alert sound and critical volume are independent from browser sound', () => {
@@ -849,11 +1134,11 @@ test('Bark targets can be added, tested, paused, resumed, and deleted without ex
   assert.match(indexHtml, /id="monitor-bark-endpoint"[^>]*type="password"/);
   assert.match(appJs, /endpointMasked: String\(source\.endpointMasked \|\| ''\)/);
   assert.doesNotMatch(appJs, /endpoint: String\(source\.endpoint/);
-  assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/monitor\/bark`, \{[\s\S]*method: 'POST'[\s\S]*JSON\.stringify\(\{ endpoint, label, enabled: true \}\)/);
-  assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/monitor\/bark\/\$\{id\}\/test`, \{ method: 'POST' \}\)/);
+  assert.match(appJs, /fetchChainJson\(context, '\/monitor\/bark', \{[\s\S]*method: 'POST'[\s\S]*JSON\.stringify\(\{ endpoint, label, enabled: true \}\)/);
+  assert.match(appJs, /fetchChainJson\(context, `\/monitor\/bark\/\$\{id\}\/test`, \{ method: 'POST' \}\)/);
   assert.match(appJs, /JSON\.stringify\(\{ enabled: !target\.enabled \}\)/);
-  assert.match(appJs, /fetchJson\(`\$\{API_ROOT\}\/monitor\/bark\/\$\{id\}`, \{ method: 'DELETE' \}\)/);
-  assert.match(appJs, /source\.addEventListener\('bark', \(\) => void refreshBarkTargets\(\)\)/);
+  assert.match(appJs, /fetchChainJson\(context, `\/monitor\/bark\/\$\{id\}`, \{ method: 'DELETE' \}\)/);
+  assert.match(appJs, /source\.addEventListener\('bark', \(\) => \{[\s\S]*if \(isCurrentSource\(\)\) void refreshBarkTargets\(context\)/);
   for (const action of ['test', 'toggle', 'delete']) {
     assert.match(appJs, new RegExp(`data-bark-action="${action}"`));
   }

@@ -12,10 +12,13 @@ import { WALLET_MONITOR_TIERS } from './tiering.js';
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 const MONITOR_EVENT_TYPE_SET = new Set(WALLET_MONITOR_EVENT_TYPES);
 const DEFAULT_MONITOR_RULES_JSON = JSON.stringify(defaultWalletMonitorRules());
-const COMPACT_PROFIT_RANK_ALIAS_MIGRATION = 'robinhood:compact_profit_rank_aliases_v1';
 const LEGACY_PROFIT_RANK_ALIAS_PATTERN = /^(.+?) 盈利榜第 ([1-9][0-9]*|待定) 名$/;
 const BUY_FREQUENCY_TIMEZONE = 'Asia/Shanghai';
 const BUY_FREQUENCY_UTC_OFFSET_SECONDS = 8 * 60 * 60;
+
+const defaultAddressNormalizer = (value) => String(value || '').toLowerCase();
+const defaultAddressValidator = (value) => ADDRESS_PATTERN.test(defaultAddressNormalizer(value));
+const defaultTransactionNormalizer = (value) => String(value || '').toLowerCase();
 
 function json(value) {
   return JSON.stringify(value ?? null);
@@ -36,8 +39,8 @@ function compactLegacyProfitRankAlias(value) {
   return match ? `${match[1]} ${match[2]}` : alias;
 }
 
-function migrateLegacyProfitRankAliases(db) {
-  const migrated = db.prepare('SELECT 1 FROM metadata WHERE key = ?').get(COMPACT_PROFIT_RANK_ALIAS_MIGRATION);
+function migrateLegacyProfitRankAliases(db, migrationKey) {
+  const migrated = db.prepare('SELECT 1 FROM metadata WHERE key = ?').get(migrationKey);
   if (migrated) return;
 
   const updateAnnotation = db.prepare('UPDATE wallet_annotations SET alias = ? WHERE address = ?');
@@ -60,7 +63,7 @@ function migrateLegacyProfitRankAliases(db) {
       const alias = compactLegacyProfitRankAlias(row.wallet_alias);
       if (alias !== row.wallet_alias) updateMonitorEvent.run(alias, row.id);
     }
-    db.prepare('INSERT INTO metadata(key, value) VALUES (?, ?)').run(COMPACT_PROFIT_RANK_ALIAS_MIGRATION, '1');
+    db.prepare('INSERT INTO metadata(key, value) VALUES (?, ?)').run(migrationKey, '1');
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
@@ -68,7 +71,22 @@ function migrateLegacyProfitRankAliases(db) {
   }
 }
 
-export function createRobinhoodStore(filename) {
+export function createRobinhoodStore(filename, {
+  chainId = 'robinhood',
+  chainLabel = 'Robinhood',
+  addressNormalizer = defaultAddressNormalizer,
+  addressValidator = defaultAddressValidator,
+  transactionNormalizer = defaultTransactionNormalizer
+} = {}) {
+  if (typeof addressNormalizer !== 'function') throw new TypeError('addressNormalizer must be a function');
+  if (typeof addressValidator !== 'function') throw new TypeError('addressValidator must be a function');
+  if (typeof transactionNormalizer !== 'function') throw new TypeError('transactionNormalizer must be a function');
+  const normalizedChainId = String(chainId || 'robinhood').trim().toLowerCase() || 'robinhood';
+  const normalizedChainLabel = String(chainLabel || normalizedChainId).trim() || normalizedChainId;
+  const normalizeAddress = (value) => String(addressNormalizer(value) ?? '');
+  const isValidAddress = (value) => addressValidator(normalizeAddress(value)) === true;
+  const normalizeTransaction = (value) => String(transactionNormalizer(value) ?? '');
+  const compactProfitRankAliasMigration = `${normalizedChainId}:compact_profit_rank_aliases_v1`;
   if (filename !== ':memory:') fs.mkdirSync(path.dirname(filename), { recursive: true });
   const db = new DatabaseSync(filename);
   db.exec(`
@@ -258,7 +276,7 @@ export function createRobinhoodStore(filename) {
     CREATE INDEX IF NOT EXISTS monitor_events_wallet_buy_frequency_idx
       ON monitor_events(event_type, wallet_address, block_timestamp, token_address);
   `);
-  migrateLegacyProfitRankAliases(db);
+  migrateLegacyProfitRankAliases(db, compactProfitRankAliasMigration);
   const upsertTokenStatement = db.prepare(`
     INSERT INTO tokens(address, symbol, name, logo, payload, updated_at)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -372,6 +390,11 @@ export function createRobinhoodStore(filename) {
 
   return {
     db,
+    chainId: normalizedChainId,
+    chainLabel: normalizedChainLabel,
+    normalizeAddress,
+    isValidAddress,
+    normalizeTransaction,
     setMeta(key, value) {
       db.prepare('INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)').run(key, String(value));
     },
@@ -379,8 +402,8 @@ export function createRobinhoodStore(filename) {
       return db.prepare('SELECT value FROM metadata WHERE key = ?').get(key)?.value ?? null;
     },
     recordMonitorTokenAlert(tokenAddress, alertedAt = Math.floor(Date.now() / 1000)) {
-      const address = String(tokenAddress || '').toLowerCase();
-      if (!ADDRESS_PATTERN.test(address)) throw new TypeError('Invalid monitor token address');
+      const address = normalizeAddress(tokenAddress);
+      if (!isValidAddress(address)) throw new TypeError('Invalid monitor token address');
       const timestamp = Math.max(0, Math.floor(Number(alertedAt) || 0));
       const result = db.prepare(`
         INSERT OR IGNORE INTO monitor_token_alerts(token_address, alerted_at)
@@ -411,8 +434,8 @@ export function createRobinhoodStore(filename) {
       }
       const normalizedAddress = address === null || address === undefined || address === ''
         ? null
-        : String(address).toLowerCase();
-      if (normalizedAddress !== null && !ADDRESS_PATTERN.test(normalizedAddress)) {
+        : normalizeAddress(address);
+      if (normalizedAddress !== null && !isValidAddress(normalizedAddress)) {
         throw new TypeError('Invalid wallet address');
       }
       const rows = db.prepare(`
@@ -514,7 +537,7 @@ export function createRobinhoodStore(filename) {
       });
     },
     upsertToken(token) {
-      const address = String(token.address).toLowerCase();
+      const address = normalizeAddress(token.address);
       upsertTokenStatement.run(
         address,
         String(token.symbol || 'UNKNOWN'),
@@ -528,27 +551,27 @@ export function createRobinhoodStore(filename) {
       return db.prepare('SELECT payload FROM tokens ORDER BY updated_at DESC').all().map((row) => parseJson(row.payload, {}));
     },
     getToken(address) {
-      const row = db.prepare('SELECT payload FROM tokens WHERE address = ?').get(String(address).toLowerCase());
+      const row = db.prepare('SELECT payload FROM tokens WHERE address = ?').get(normalizeAddress(address));
       return row ? parseJson(row.payload, null) : null;
     },
     replaceTokenActions(tokenAddress, actions) {
-      const normalized = String(tokenAddress).toLowerCase();
+      const normalized = normalizeAddress(tokenAddress);
       db.exec('BEGIN');
       try {
         db.prepare('DELETE FROM actions WHERE token_address = ?').run(normalized);
         for (const action of actions) {
           insertActionStatement.run(
             normalized,
-            action.txHash,
+            normalizeTransaction(action.txHash),
             Number(action.logIndex),
-            String(action.wallet).toLowerCase(),
+            normalizeAddress(action.wallet),
             action.side,
             Number(action.tokenAmount),
             Number(action.quoteAmount),
             Number(action.priceNative),
             Number(action.blockNumber),
             action.blockTimestamp === null || action.blockTimestamp === undefined ? null : Number(action.blockTimestamp),
-            String(action.poolAddress).toLowerCase(),
+            normalizeAddress(action.poolAddress),
             json(action)
           );
         }
@@ -561,7 +584,7 @@ export function createRobinhoodStore(filename) {
     listActionsForToken(tokenAddress) {
       return db
         .prepare('SELECT payload FROM actions WHERE token_address = ? ORDER BY block_number, log_index')
-        .all(String(tokenAddress).toLowerCase())
+        .all(normalizeAddress(tokenAddress))
         .map((row) => parseJson(row.payload, {}));
     },
     replaceWalletSummaries(summaries) {
@@ -573,7 +596,7 @@ export function createRobinhoodStore(filename) {
         );
         const updatedAt = Math.floor(Date.now() / 1000);
         for (const summary of summaries) {
-          statement.run(String(summary.address).toLowerCase(), json(summary), Number(summary.score || 0), updatedAt);
+          statement.run(normalizeAddress(summary.address), json(summary), Number(summary.score || 0), updatedAt);
         }
         db.exec('COMMIT');
       } catch (error) {
@@ -585,7 +608,7 @@ export function createRobinhoodStore(filename) {
       return db.prepare('SELECT payload FROM wallet_summaries ORDER BY score DESC, address').all().map((row) => parseJson(row.payload, {}));
     },
     upsertWalletAnnotation(annotation) {
-      const address = String(annotation.address).toLowerCase();
+      const address = normalizeAddress(annotation.address);
       const existing = db.prepare('SELECT * FROM wallet_annotations WHERE address = ?').get(address);
       const createdAt = Number(annotation.createdAt ?? existing?.created_at ?? Math.floor(Date.now() / 1000));
       const updatedAt = Number(annotation.updatedAt ?? Math.floor(Date.now() / 1000));
@@ -616,7 +639,7 @@ export function createRobinhoodStore(filename) {
     },
     getWalletAnnotation(address) {
       return walletAnnotationFromRow(
-        db.prepare('SELECT * FROM wallet_annotations WHERE address = ?').get(String(address).toLowerCase())
+        db.prepare('SELECT * FROM wallet_annotations WHERE address = ?').get(normalizeAddress(address))
       );
     },
     listWalletAnnotations() {
@@ -632,10 +655,10 @@ export function createRobinhoodStore(filename) {
         .map(walletAnnotationFromRow);
     },
     deleteWalletAnnotation(address) {
-      return db.prepare('DELETE FROM wallet_annotations WHERE address = ?').run(String(address).toLowerCase()).changes > 0;
+      return db.prepare('DELETE FROM wallet_annotations WHERE address = ?').run(normalizeAddress(address)).changes > 0;
     },
     upsertMonitorTokenMetadata(metadata) {
-      const address = String(metadata.address || '').toLowerCase();
+      const address = normalizeAddress(metadata.address);
       db.prepare(`
         INSERT INTO monitor_token_metadata(address, symbol, name, decimals, complete, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -659,12 +682,12 @@ export function createRobinhoodStore(filename) {
     },
     getMonitorTokenMetadata(address) {
       return monitorTokenMetadataFromRow(
-        db.prepare('SELECT * FROM monitor_token_metadata WHERE address = ?').get(String(address).toLowerCase())
+        db.prepare('SELECT * FROM monitor_token_metadata WHERE address = ?').get(normalizeAddress(address))
       );
     },
     upsertMonitorTokenMarketData(marketData) {
-      const address = String(marketData.address || '').toLowerCase();
-      if (!ADDRESS_PATTERN.test(address)) throw new TypeError('Invalid monitor token address');
+      const address = normalizeAddress(marketData.address);
+      if (!isValidAddress(address)) throw new TypeError('Invalid monitor token address');
       const marketCap = marketData.marketCapUsd === null || marketData.marketCapUsd === undefined ||
         marketData.marketCapUsd === '' ? NaN : Number(marketData.marketCapUsd);
       const marketCapUsd = Number.isFinite(marketCap) && marketCap >= 0 ? marketCap : null;
@@ -714,17 +737,17 @@ export function createRobinhoodStore(filename) {
       `).run(
         eventType,
         String(event.assetType || 'token').trim().toLowerCase() || 'token',
-        String(event.walletAddress || '').toLowerCase(),
+        normalizeAddress(event.walletAddress),
         String(event.walletAlias || ''),
-        String(event.counterpartyAddress || '').toLowerCase(),
+        normalizeAddress(event.counterpartyAddress),
         String(event.platform || ''),
-        String(event.tokenAddress || '').toLowerCase(),
+        normalizeAddress(event.tokenAddress),
         String(event.tokenSymbol || event.tokenAddress || ''),
         String(event.tokenName || event.tokenSymbol || event.tokenAddress || ''),
         String(event.tokenAmount ?? '0'),
         String(event.rawTokenAmount ?? '0'),
         Number(event.tokenDecimals ?? 18),
-        String(event.txHash || '').toLowerCase(),
+        normalizeTransaction(event.txHash),
         Number(event.logIndex),
         Number(event.blockNumber),
         Number(event.blockTimestamp),
@@ -743,14 +766,14 @@ export function createRobinhoodStore(filename) {
           : null
       );
       const row = db.prepare('SELECT * FROM monitor_events WHERE tx_hash = ? AND log_index = ?').get(
-        String(event.txHash || '').toLowerCase(),
+        normalizeTransaction(event.txHash),
         Number(event.logIndex)
       );
       return { inserted: Number(result.changes) > 0, event: monitorEventFromRow(row) };
     },
     updateMonitorEventsTokenMarketData(tokenAddress, marketData, { eventIds } = {}) {
-      const address = String(tokenAddress || '').toLowerCase();
-      if (!ADDRESS_PATTERN.test(address)) throw new TypeError('Invalid monitor token address');
+      const address = normalizeAddress(tokenAddress);
+      if (!isValidAddress(address)) throw new TypeError('Invalid monitor token address');
       const marketCap = marketData.marketCapUsd === null || marketData.marketCapUsd === undefined ||
         marketData.marketCapUsd === '' ? NaN : Number(marketData.marketCapUsd);
       const marketCapUsd = Number.isFinite(marketCap) && marketCap >= 0 ? marketCap : null;

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  DEBOT_CHAINS,
   normalizeHotToken,
   normalizeMarketHistory,
   normalizeTokenDetail,
@@ -316,4 +317,80 @@ test('exposes token detail and wallet profit requests with validated normalized 
   await assert.rejects(client.fetchTokenDetail('0x1234'), /Invalid Robinhood token address/);
   await assert.rejects(client.fetchWalletTokenProfit(tokenAddress, '0x1234'), /Invalid Robinhood wallet address/);
   assert.equal(requests.length, 2);
+});
+
+test('routes Base requests through the same client without changing EVM address semantics', async () => {
+  const requests = [];
+  const client = new RobinhoodDebotClient({
+    baseUrl: 'https://debot.test/api',
+    chain: 'base',
+    fetchImpl: async (input) => {
+      const url = new URL(input);
+      requests.push(url);
+      return Response.json({
+        code: 0,
+        data: {
+          chain: 'base',
+          token: tokenAddress,
+          meta: { address: tokenAddress, symbol: 'BASE', creation_timestamp: 100 },
+          mkt_cap: 5_000_000
+        }
+      });
+    }
+  });
+
+  const metrics = await client.fetchTokenMetrics(tokenAddress.toUpperCase().replace('0X', '0x'));
+
+  assert.deepEqual(DEBOT_CHAINS, ['robinhood', 'base', 'solana']);
+  assert.equal(metrics.chain, 'base');
+  assert.equal(metrics.address, tokenAddress);
+  assert.equal(metrics.marketCapUsd, 5_000_000);
+  assert.equal(requests[0].searchParams.get('chain'), 'base');
+  assert.equal(requests[0].searchParams.get('token'), tokenAddress);
+  await assert.rejects(client.fetchTokenMetrics('0x1234'), /Invalid Base token address/);
+  assert.equal(requests.length, 1);
+});
+
+test('preserves case-sensitive Solana addresses and supports injected address adapters', async () => {
+  const solToken = 'So11111111111111111111111111111111111111112';
+  const solWallet = 'Vote111111111111111111111111111111111111111';
+  const requests = [];
+  const normalized = [];
+  const client = new RobinhoodDebotClient({
+    baseUrl: 'https://debot.test/api',
+    chain: 'solana',
+    addressNormalizer(value) {
+      const address = String(value || '').trim();
+      normalized.push(address);
+      return address;
+    },
+    addressValidator: (value) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value),
+    fetchImpl: async (input) => {
+      const url = new URL(input);
+      requests.push(url);
+      return Response.json({
+        code: 0,
+        data: {
+          chain: 'solana',
+          wallet: solWallet,
+          token: solToken,
+          buy_volume: 600,
+          profit_rate: 1
+        }
+      });
+    }
+  });
+
+  const profit = await client.fetchWalletTokenProfit(solToken, ` ${solWallet} `);
+
+  assert.equal(profit.chain, 'solana');
+  assert.equal(profit.address, solWallet);
+  assert.equal(profit.tokenAddress, solToken);
+  assert.equal(requests[0].searchParams.get('chain'), 'solana');
+  assert.equal(requests[0].searchParams.get('token'), solToken);
+  assert.equal(requests[0].searchParams.get('wallet'), solWallet);
+  assert.equal(normalized.includes(solToken), true);
+  assert.equal(normalized.includes(solWallet), true);
+  await assert.rejects(client.fetchWalletTokenProfit(solToken, 'not-a-solana-address'), /Invalid Solana wallet address/);
+  assert.equal(requests.length, 1);
 });

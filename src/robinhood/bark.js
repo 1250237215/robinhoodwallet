@@ -126,10 +126,13 @@ function walletEventMessage(event) {
   };
 }
 
-function notificationUrl(endpoint, { title, body, sound = 'alarm', volume = 5, url = '' } = {}) {
+function notificationUrl(
+  endpoint,
+  { title, body, sound = 'alarm', volume = 5, url = '', group = 'Robinhood 聪明钱' } = {}
+) {
   const base = normalizeBarkEndpoint(endpoint);
   const request = new URL(`${base}/${encodeURIComponent(String(title || 'Robinhood 聪明钱提醒'))}/${encodeURIComponent(String(body || '监控地址出现集合买入'))}`);
-  request.searchParams.set('group', 'Robinhood 聪明钱');
+  request.searchParams.set('group', String(group || 'Robinhood 聪明钱'));
   request.searchParams.set('sound', BARK_SOUNDS.has(sound) ? sound : 'alarm');
   const barkVolume = normalizeBarkVolume(volume);
   request.searchParams.set('level', 'critical');
@@ -139,7 +142,13 @@ function notificationUrl(endpoint, { title, body, sound = 'alarm', volume = 5, u
 }
 
 export class RobinhoodBarkNotifier {
-  constructor({ store, fetchImpl = fetch, timeoutMs = 10_000, now = Date.now } = {}) {
+  constructor({
+    store,
+    fetchImpl = fetch,
+    timeoutMs = 10_000,
+    now = Date.now,
+    brand = 'Robinhood'
+  } = {}) {
     if (!store?.listMonitorBarkTargets || !store?.createMonitorBarkTarget) {
       throw new TypeError('A Bark target store is required');
     }
@@ -148,6 +157,7 @@ export class RobinhoodBarkNotifier {
     this.fetch = fetchImpl;
     this.timeoutMs = Math.max(1_000, Math.min(30_000, Number(timeoutMs) || 10_000));
     this.now = now;
+    this.brand = cleanLabel(brand, 'Robinhood');
   }
 
   listTargets() {
@@ -190,7 +200,7 @@ export class RobinhoodBarkNotifier {
     const target = this.store.getMonitorBarkTarget(targetId(id));
     if (!target) return null;
     await this.#send(target, {
-      title: 'Robinhood 聪明钱雷达',
+      title: `${this.brand} 聪明钱雷达`,
       body: 'Bark 推送测试成功',
       sound,
       volume
@@ -241,7 +251,10 @@ export class RobinhoodBarkNotifier {
 
   async #send(target, payload) {
     try {
-      const response = await this.fetch(notificationUrl(target.endpoint, payload), {
+      const response = await this.fetch(notificationUrl(target.endpoint, {
+        ...payload,
+        group: `${this.brand} 聪明钱`
+      }), {
         method: 'GET',
         headers: { accept: 'application/json' },
         signal: AbortSignal.timeout(this.timeoutMs)

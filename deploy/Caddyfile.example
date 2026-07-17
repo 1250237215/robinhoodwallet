@@ -1,12 +1,50 @@
-{$ROBINHOOD_SITE_ADDRESS:http://localhost} {
+{$ROBINHOOD_SITE_ADDRESS:https://radar.example.com} {
 	encode zstd gzip
 	header Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	@solanaWebhook path /robinhood-radar/api/solana/monitor/webhook
+	handle @solanaWebhook {
+		uri strip_prefix /robinhood-radar
+		reverse_proxy 127.0.0.1:18120 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up Host {host}
+		}
+	}
+
+	@radarProtected {
+		path /robinhood-radar /robinhood-radar/*
+		not path /robinhood-radar/api/solana/monitor/webhook
+	}
+	basicauth @radarProtected {
+		radar {$RADAR_BASIC_AUTH_HASH}
+	}
 
 	redir /robinhood-radar /robinhood-radar/ 308
 
 	handle /robinhood-radar/api/robinhood/* {
 		uri strip_prefix /robinhood-radar
 		reverse_proxy 127.0.0.1:18118 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up Host {host}
+		}
+	}
+
+	handle /robinhood-radar/api/base/* {
+		uri strip_prefix /robinhood-radar
+		reverse_proxy 127.0.0.1:18119 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up Host {host}
+		}
+	}
+
+	handle /robinhood-radar/api/solana/* {
+		uri strip_prefix /robinhood-radar
+		reverse_proxy 127.0.0.1:18120 {
 			header_up X-Forwarded-Proto {scheme}
 			header_up Host {host}
 		}

@@ -8,6 +8,9 @@ import {
 import { normalizeWalletMonitorTier, WALLET_MONITOR_TIERS } from './tiering.js';
 
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
+const DEFAULT_CHAIN_ID = 'robinhood';
+const DEFAULT_CHAIN_LABEL = 'Robinhood';
+const DEFAULT_DEBOT_ADDRESS_ROOT = 'https://debot.ai/address/robinhood';
 const ALLOWED_TABS = new Set(['all_round', 'realized', 'unrealized', 'single_hit', 'all']);
 const WALLET_STATUSES = new Set(['active', 'excluded', 'watch']);
 const WALLET_CLASSIFICATIONS = new Set(['all_round', 'realized', 'unrealized', 'single_hit']);
@@ -121,8 +124,11 @@ function publicBuyFrequency(stats) {
   };
 }
 
-function mergeWalletAnnotation(summary, annotation, address, buyFrequency = null) {
-  const normalized = normalizeAddress(address || summary?.address || annotation?.address);
+function mergeWalletAnnotation(summary, annotation, address, buyFrequency = null, {
+  addressNormalizer = normalizeAddress,
+  debotAddressRoot = DEFAULT_DEBOT_ADDRESS_ROOT
+} = {}) {
+  const normalized = addressNormalizer(address || summary?.address || annotation?.address);
   const monitorTier = normalizeWalletMonitorTier(annotation?.monitorTier);
   const curation = {
     ...walletAnnotationDefaults(normalized),
@@ -148,7 +154,7 @@ function mergeWalletAnnotation(summary, annotation, address, buyFrequency = null
     curated: Boolean(annotation),
     confirmed: reviewState === 'confirmed',
     reviewState,
-    debotUrl: `https://debot.ai/address/robinhood/${normalized}`,
+    debotUrl: `${debotAddressRoot}/${normalized}`,
     curation,
     ...(buyFrequency ? { buyFrequency: publicBuyFrequency(buyFrequency) } : {})
   };
@@ -161,13 +167,17 @@ function walletPerformanceProfit(performance) {
     (finiteNumber(performance?.unrealizedProfitUsd) ?? 0);
 }
 
-function attachCandidateReviewMetadata(summaries) {
+function attachCandidateReviewMetadata(summaries, {
+  addressNormalizer = normalizeAddress,
+  addressValidator = isRobinhoodAddress,
+  debotAddressRoot = DEFAULT_DEBOT_ADDRESS_ROOT
+} = {}) {
   const byToken = new Map();
   for (const summary of summaries) {
-    summary.debotUrl = `https://debot.ai/address/robinhood/${normalizeAddress(summary.address)}`;
+    summary.debotUrl = `${debotAddressRoot}/${addressNormalizer(summary.address)}`;
     for (const performance of Array.isArray(summary.performances) ? summary.performances : []) {
-      const tokenAddress = normalizeAddress(performance.tokenAddress);
-      if (!ADDRESS_PATTERN.test(tokenAddress)) continue;
+      const tokenAddress = addressNormalizer(performance.tokenAddress);
+      if (!addressValidator(tokenAddress)) continue;
       if (!byToken.has(tokenAddress)) byToken.set(tokenAddress, []);
       byToken.get(tokenAddress).push({ summary, performance });
     }
@@ -177,7 +187,7 @@ function attachCandidateReviewMetadata(summaries) {
       walletPerformanceProfit(right.performance) - walletPerformanceProfit(left.performance) ||
       (finiteNumber(right.performance.bestMultiple, right.performance.totalMultiple) ?? 0) -
         (finiteNumber(left.performance.bestMultiple, left.performance.totalMultiple) ?? 0) ||
-      normalizeAddress(left.summary.address).localeCompare(normalizeAddress(right.summary.address))
+      addressNormalizer(left.summary.address).localeCompare(addressNormalizer(right.summary.address))
     );
     rows.forEach(({ performance }, index) => {
       performance.profitRank = index + 1;
@@ -195,7 +205,7 @@ function attachCandidateReviewMetadata(summaries) {
     const symbol = String(best.symbol || '金狗').trim().replace(/\s+/g, ' ').slice(0, 32) || '金狗';
     const profitRank = Math.max(1, Math.floor(finiteNumber(best.profitRank) ?? 1));
     summary.profitRank = profitRank;
-    summary.bestProfitTokenAddress = normalizeAddress(best.tokenAddress);
+    summary.bestProfitTokenAddress = addressNormalizer(best.tokenAddress);
     summary.bestProfitTokenSymbol = symbol;
     summary.suggestedAlias = `${symbol} ${profitRank}`;
   }
@@ -349,15 +359,15 @@ function walletMatchesTab(wallet, filters) {
   return hits >= 2 && walletBestMultiple(wallet) >= filters.multiple;
 }
 
-function sortWallets(a, b) {
+function sortWallets(a, b, addressNormalizer = normalizeAddress) {
   return (
     (finiteNumber(b.score) ?? 0) - (finiteNumber(a.score) ?? 0) ||
     walletBestMultiple(b) - walletBestMultiple(a) ||
-    normalizeAddress(a.address).localeCompare(normalizeAddress(b.address))
+    addressNormalizer(a.address).localeCompare(addressNormalizer(b.address))
   );
 }
 
-function sortWinners(a, b) {
+function sortWinners(a, b, addressNormalizer = normalizeAddress) {
   const statusOrder = {
     manual_complete: 0,
     qualified: 1,
@@ -371,7 +381,7 @@ function sortWinners(a, b) {
     (statusOrder[a.qualificationStatus] ?? 9) - (statusOrder[b.qualificationStatus] ?? 9) ||
     (b.peakMultiple ?? -1) - (a.peakMultiple ?? -1) ||
     (b.peakLiquidityUsd ?? -1) - (a.peakLiquidityUsd ?? -1) ||
-    normalizeAddress(a.address).localeCompare(normalizeAddress(b.address))
+    addressNormalizer(a.address).localeCompare(addressNormalizer(b.address))
   );
 }
 
@@ -413,9 +423,47 @@ export class RobinhoodService {
     scanToken = null,
     config = {},
     scanConcurrency = 2,
-    now = Date.now
+    now = Date.now,
+    chainId = null,
+    chainLabel = null,
+    addressNormalizer = null,
+    addressValidator = null,
+    transactionNormalizer = null,
+    debotAddressRoot = null,
+    walletSummaryBuilder = null
   }) {
-    if (!store?.upsertToken || !store?.listTokens) throw new TypeError('A Robinhood store is required');
+    const resolvedChainId = String(chainId || config.chainId || store?.chainId || DEFAULT_CHAIN_ID)
+      .trim()
+      .toLowerCase() || DEFAULT_CHAIN_ID;
+    const resolvedChainLabel = String(
+      chainLabel || config.chainLabel || store?.chainLabel || (resolvedChainId === DEFAULT_CHAIN_ID
+        ? DEFAULT_CHAIN_LABEL
+        : resolvedChainId)
+    ).trim() || resolvedChainId;
+    if (!store?.upsertToken || !store?.listTokens) {
+      throw new TypeError(`A ${resolvedChainLabel} store is required`);
+    }
+    const resolvedAddressNormalizer = addressNormalizer || config.addressNormalizer || store.normalizeAddress || normalizeAddress;
+    const resolvedAddressValidator = addressValidator || config.addressValidator || store.isValidAddress || isRobinhoodAddress;
+    const resolvedTransactionNormalizer = transactionNormalizer || config.transactionNormalizer || store.normalizeTransaction ||
+      ((value) => String(value || '').toLowerCase());
+    const resolvedWalletSummaryBuilder = walletSummaryBuilder || config.walletSummaryBuilder || buildWalletSummaries;
+    if (typeof resolvedAddressNormalizer !== 'function') throw new TypeError('addressNormalizer must be a function');
+    if (typeof resolvedAddressValidator !== 'function') throw new TypeError('addressValidator must be a function');
+    if (typeof resolvedTransactionNormalizer !== 'function') throw new TypeError('transactionNormalizer must be a function');
+    if (typeof resolvedWalletSummaryBuilder !== 'function') throw new TypeError('walletSummaryBuilder must be a function');
+    this.chainId = resolvedChainId;
+    this.chainLabel = resolvedChainLabel;
+    this.normalizeAddress = (value) => String(resolvedAddressNormalizer(value) ?? '');
+    this.isValidAddress = (value) => resolvedAddressValidator(this.normalizeAddress(value)) === true;
+    this.normalizeTransaction = (value) => String(resolvedTransactionNormalizer(value) ?? '');
+    this.debotAddressRoot = String(
+      debotAddressRoot || config.debotAddressRoot || (resolvedChainId === DEFAULT_CHAIN_ID
+        ? DEFAULT_DEBOT_ADDRESS_ROOT
+        : `https://debot.ai/address/${resolvedChainId}`)
+    ).replace(/\/$/, '');
+    this.walletSummaryBuilder = resolvedWalletSummaryBuilder;
+    this.lastSuccessMetadataKey = `${this.chainId}:last_success_at`;
     this.debotClient = debotClient || null;
     this.store = store;
     this.poolClient = poolClient;
@@ -489,8 +537,8 @@ export class RobinhoodService {
   }
 
   queueToken(token, { force = false, manual = false, minEntryUsd } = {}) {
-    const address = normalizeAddress(token?.address);
-    if (!isRobinhoodAddress(address)) throw new TypeError('Invalid Robinhood token address');
+    const address = this.normalizeAddress(token?.address);
+    if (!this.isValidAddress(address)) throw new TypeError(`Invalid ${this.chainLabel} token address`);
     const minimumEntryUsd = normalizedScanMinimumEntryUsd(
       minEntryUsd,
       token?.holderAnalysis?.minimumEntryUsd ?? this.config.minEntryUsd
@@ -523,7 +571,7 @@ export class RobinhoodService {
     const queued = [];
     const active = [];
     for (const token of tokens) {
-      const address = normalizeAddress(token.address);
+      const address = this.normalizeAddress(token.address);
       const alreadyRunning = this.queuedAddresses.has(address) || this.activeScans.has(address);
       const job = this.queueToken(token, { force, minEntryUsd });
       if (!job) continue;
@@ -646,9 +694,9 @@ export class RobinhoodService {
   #rebuildWalletSummaries() {
     const tokens = this.store.listTokens().filter((token) => token.manual === true);
     const actionsByToken = new Map(
-      tokens.map((token) => [normalizeAddress(token.address), this.store.listActionsForToken(token.address)])
+      tokens.map((token) => [this.normalizeAddress(token.address), this.store.listActionsForToken(token.address)])
     );
-    const summaries = buildWalletSummaries({
+    const summaries = this.walletSummaryBuilder({
       tokens,
       actionsByToken,
       minimumHitMultiple: this.config.defaultWinnerMultiple,
@@ -660,9 +708,16 @@ export class RobinhoodService {
       strongHolderRank: this.config.strongHolderRank,
       smartScoreWeights: this.config.smartScoreWeights,
       relatedClusterPenalty: this.config.relatedClusterPenalty,
-      lowFrequencyReasonThreshold: this.config.lowFrequencyReasonThreshold
+      lowFrequencyReasonThreshold: this.config.lowFrequencyReasonThreshold,
+      addressNormalizer: this.normalizeAddress,
+      addressValidator: this.isValidAddress,
+      transactionNormalizer: this.normalizeTransaction
     });
-    this.store.replaceWalletSummaries(attachCandidateReviewMetadata(summaries));
+    this.store.replaceWalletSummaries(attachCandidateReviewMetadata(summaries, {
+      addressNormalizer: this.normalizeAddress,
+      addressValidator: this.isValidAddress,
+      debotAddressRoot: this.debotAddressRoot
+    }));
   }
 
   getDashboard(filters = {}) {
@@ -674,7 +729,9 @@ export class RobinhoodService {
       tab: DEFAULT_FILTERS.tab
     });
     const tokens = this.store.listTokens().filter((token) => token.manual === true);
-    const winners = tokens.map((token) => qualifyToken(token, appliedFilters)).sort(sortWinners);
+    const winners = tokens
+      .map((token) => qualifyToken(token, appliedFilters))
+      .sort((left, right) => sortWinners(left, right, this.normalizeAddress));
     const walletFilters = {
       ...filters,
       ...appliedFilters,
@@ -713,6 +770,7 @@ export class RobinhoodService {
 
     return {
       ok: !stale,
+      chain: this.chainId,
       status,
       mode: 'manual-only',
       discoveryEnabled: false,
@@ -741,21 +799,21 @@ export class RobinhoodService {
   }
 
   getWallet(address) {
-    const normalized = normalizeAddress(address);
-    if (!isRobinhoodAddress(normalized)) throw new TypeError('Invalid Robinhood wallet address');
+    const normalized = this.normalizeAddress(address);
+    if (!this.isValidAddress(normalized)) throw new TypeError(`Invalid ${this.chainLabel} wallet address`);
     const summary = this.store
       .listWalletSummaries()
-      .find((candidate) => normalizeAddress(candidate.address) === normalized);
+      .find((candidate) => this.normalizeAddress(candidate.address) === normalized);
     const annotation = this.store.getWalletAnnotation?.(normalized) || null;
     const buyFrequency = annotation
       ? (this.store.listWalletBuyFrequencyStats?.({ asOf: unixSeconds(this.now), address: normalized }) || [])[0] || null
       : null;
     const tokenRows = [];
     const tokens = new Map(
-      this.store.listTokens().map((token) => [normalizeAddress(token.address), token])
+      this.store.listTokens().map((token) => [this.normalizeAddress(token.address), token])
     );
     for (const performance of Array.isArray(summary?.performances) ? summary.performances : []) {
-      const tokenAddress = normalizeAddress(performance.tokenAddress);
+      const tokenAddress = this.normalizeAddress(performance.tokenAddress);
       const token = tokens.get(tokenAddress) || {
         address: tokenAddress,
         symbol: performance.tokenSymbol || `${tokenAddress.slice(0, 6)}...${tokenAddress.slice(-4)}`,
@@ -766,7 +824,7 @@ export class RobinhoodService {
       const actions = tokens.has(tokenAddress)
         ? this.store
             .listActionsForToken(tokenAddress)
-            .filter((action) => normalizeAddress(action.wallet) === normalized)
+            .filter((action) => this.normalizeAddress(action.wallet) === normalized)
         : [];
       tokenRows.push({
         token,
@@ -778,11 +836,15 @@ export class RobinhoodService {
     if (!summary && !tokenRows.length && !annotation) return null;
     return {
       ok: true,
-      wallet: mergeWalletAnnotation(summary, annotation, normalized, buyFrequency),
+      chain: this.chainId,
+      wallet: mergeWalletAnnotation(summary, annotation, normalized, buyFrequency, {
+        addressNormalizer: this.normalizeAddress,
+        debotAddressRoot: this.debotAddressRoot
+      }),
       tokens: tokenRows,
       updatedAt:
         isoFromUnknown(annotation?.updatedAt) ||
-        (summary?.updatedAt ? isoFromUnknown(summary.updatedAt) : this.store.getMeta('robinhood:last_success_at'))
+        (summary?.updatedAt ? isoFromUnknown(summary.updatedAt) : this.store.getMeta(this.lastSuccessMetadataKey))
     };
   }
 
@@ -794,14 +856,14 @@ export class RobinhoodService {
       tab: DEFAULT_FILTERS.tab
     });
     const summaries = new Map(
-      this.store.listWalletSummaries().map((summary) => [normalizeAddress(summary.address), summary])
+      this.store.listWalletSummaries().map((summary) => [this.normalizeAddress(summary.address), summary])
     );
     const annotations = new Map(
-      (this.store.listWalletAnnotations?.() || []).map((annotation) => [normalizeAddress(annotation.address), annotation])
+      (this.store.listWalletAnnotations?.() || []).map((annotation) => [this.normalizeAddress(annotation.address), annotation])
     );
     const buyFrequencies = new Map(
       (this.store.listWalletBuyFrequencyStats?.({ asOf: unixSeconds(this.now) }) || [])
-        .map((stats) => [normalizeAddress(stats.address), stats])
+        .map((stats) => [this.normalizeAddress(stats.address), stats])
     );
     const addresses = new Set([...summaries.keys(), ...annotations.keys()]);
     const wallets = [];
@@ -811,7 +873,11 @@ export class RobinhoodService {
         summary,
         annotations.get(address) || null,
         address,
-        buyFrequencies.get(address) || null
+        buyFrequencies.get(address) || null,
+        {
+          addressNormalizer: this.normalizeAddress,
+          debotAddressRoot: this.debotAddressRoot
+        }
       );
       const keepConfirmedLibraryRecord = wallet.curated && appliedFilters.tab === 'all';
       if (summary && !keepConfirmedLibraryRecord && !walletMatchesTab(wallet, appliedFilters)) continue;
@@ -819,12 +885,12 @@ export class RobinhoodService {
       if (!walletMatchesCuration(wallet, filters)) continue;
       wallets.push(wallet);
     }
-    return wallets.sort(sortWallets);
+    return wallets.sort((left, right) => sortWallets(left, right, this.normalizeAddress));
   }
 
   updateWallet(address, patch = {}) {
-    const normalized = normalizeAddress(address);
-    if (!isRobinhoodAddress(normalized)) throw new TypeError('Invalid Robinhood wallet address');
+    const normalized = this.normalizeAddress(address);
+    if (!this.isValidAddress(normalized)) throw new TypeError(`Invalid ${this.chainLabel} wallet address`);
     if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
       throw new TypeError('Wallet update must be an object');
     }
@@ -932,14 +998,14 @@ export class RobinhoodService {
       const rawAddress = (commaIndex >= 0 ? trimmed.slice(0, commaIndex) : trimmed).trim();
       const noteProvided = commaIndex >= 0;
       const note = noteProvided ? trimmed.slice(commaIndex + 1).trim() : undefined;
-      const address = normalizeAddress(rawAddress);
-      if (!isRobinhoodAddress(address)) {
+      const address = this.normalizeAddress(rawAddress);
+      if (!this.isValidAddress(address)) {
         response.invalid += 1;
         response.results.push({
           line: lineNumber,
           input: trimmed.slice(0, 200),
           result: 'invalid',
-          reason: 'Invalid Robinhood wallet address'
+          reason: `Invalid ${this.chainLabel} wallet address`
         });
         continue;
       }
@@ -1013,8 +1079,8 @@ export class RobinhoodService {
   }
 
   deleteWallet(address) {
-    const normalized = normalizeAddress(address);
-    if (!isRobinhoodAddress(normalized)) throw new TypeError('Invalid Robinhood wallet address');
+    const normalized = this.normalizeAddress(address);
+    if (!this.isValidAddress(normalized)) throw new TypeError(`Invalid ${this.chainLabel} wallet address`);
     const previous = this.store.getWalletAnnotation?.(normalized) || null;
     const result = this.updateWallet(normalized, { status: 'excluded' });
     return {
@@ -1027,14 +1093,14 @@ export class RobinhoodService {
   }
 
   addManualWinner(address, { minEntryUsd } = {}) {
-    const normalized = normalizeAddress(address);
-    if (!isRobinhoodAddress(normalized)) throw new TypeError('Invalid Robinhood token address');
+    const normalized = this.normalizeAddress(address);
+    if (!this.isValidAddress(normalized)) throw new TypeError(`Invalid ${this.chainLabel} token address`);
     if (minEntryUsd !== undefined) normalizedScanMinimumEntryUsd(minEntryUsd, this.config.minEntryUsd);
     const existing = this.store.getToken(normalized);
     const addedAt = nowIso(this.now);
     const token = {
       ...(existing || {}),
-      chain: 'robinhood',
+      chain: this.chainId,
       address: normalized,
       symbol: existing?.symbol || `${normalized.slice(0, 6)}...${normalized.slice(-4)}`,
       name: existing?.name || 'Manual token',
@@ -1061,8 +1127,8 @@ export class RobinhoodService {
   }
 
   rescanManualWinner(address, { minEntryUsd } = {}) {
-    const normalized = normalizeAddress(address);
-    if (!isRobinhoodAddress(normalized)) throw new TypeError('Invalid Robinhood token address');
+    const normalized = this.normalizeAddress(address);
+    if (!this.isValidAddress(normalized)) throw new TypeError(`Invalid ${this.chainLabel} token address`);
     const token = this.store.getToken(normalized);
     if (!token || token.manual !== true) return null;
 

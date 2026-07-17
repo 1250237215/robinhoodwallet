@@ -4,7 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:robinhood": "esbuild src/robinhoodServer.js --bundle --platform=node --format=esm --minify --legal-comments=external --outfile=dist/robinhood-server.mjs",
+    "build:robinhood": "esbuild src/robinhood/main.js --bundle --platform=node --format=esm --minify --legal-comments=external --outfile=dist/robinhood-server.mjs",
+    "build:base": "esbuild src/base/server.js --bundle --platform=node --format=esm --minify --legal-comments=external --outfile=dist/base-server.mjs",
+    "build:solana": "esbuild src/solana/server.js --bundle --platform=node --format=esm --minify --legal-comments=external --outfile=dist/solana-server.mjs",
+    "build:all": "npm run build:robinhood && npm run build:base && npm run build:solana",
     "classify:wallets": "node scripts/classify-robinhood-wallets.mjs",
     "verify:monitor:rpc": "node scripts/verify-robinhood-monitor-latency.mjs",
     "start": "node src/server.js",

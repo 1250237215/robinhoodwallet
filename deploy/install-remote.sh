@@ -2,40 +2,129 @@
 
 set -Eeuo pipefail
 
-readonly service_name="robinhood-radar.service"
 readonly app_dir="/opt/robinhood-radar"
 readonly data_dir="/var/lib/robinhood-radar"
-readonly database="$data_dir/robinhood.sqlite"
-readonly unit_file="/etc/systemd/system/$service_name"
 readonly staging_dir="/root/robinhood-radar-deploy"
 readonly backup_root="/var/backups/robinhood-radar"
 readonly stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-readonly database_backup="$backup_root/robinhood-$stamp.sqlite"
 readonly release_backup="$backup_root/release-$stamp"
+readonly caddy_config="/etc/caddy/Caddyfile"
+readonly allow_solana_degraded="${ALLOW_SOLANA_DEGRADED:-0}"
+readonly services=("robinhood-radar" "base-radar" "solana-radar")
+readonly chains=("robinhood" "base" "solana")
 
-service_stopped=0
+declare -A was_active=()
+declare -A unit_existed=()
 rollback_needed=0
+caddy_changed=0
+
+[[ "$allow_solana_degraded" == "0" || "$allow_solana_degraded" == "1" ]] || {
+  echo "ALLOW_SOLANA_DEGRADED must be 0 or 1." >&2
+  exit 1
+}
+
+database_path() {
+  echo "$data_dir/$1.sqlite"
+}
+
+database_backup_path() {
+  echo "$backup_root/$1-$stamp.sqlite"
+}
+
+unit_path() {
+  echo "/etc/systemd/system/$1.service"
+}
+
+bundle_path() {
+  echo "$app_dir/$1-server.mjs"
+}
+
+quick_check_database() {
+  local database="$1"
+  local result
+  result="$(node --input-type=module -e '
+    import { DatabaseSync } from "node:sqlite";
+    const db = new DatabaseSync(process.argv[1], { readOnly: true });
+    const rows = db.prepare("PRAGMA quick_check").all();
+    db.close();
+    console.log(rows.map((row) => Object.values(row)[0]).join("\n"));
+  ' "$database")"
+  [[ "$result" == "ok" ]] || {
+    echo "SQLite quick_check failed for $database: $result" >&2
+    return 1
+  }
+}
+
+backup_optional_file() {
+  local source="$1"
+  local destination="$2"
+  if [[ -f "$source" ]]; then
+    cp --preserve=mode,ownership,timestamps "$source" "$destination"
+  else
+    touch "$destination.missing"
+  fi
+}
+
+restore_optional_file() {
+  local backup="$1"
+  local destination="$2"
+  if [[ -f "$backup.missing" ]]; then
+    rm -f "$destination"
+  elif [[ -f "$backup" ]]; then
+    install -m 0644 "$backup" "$destination"
+  fi
+}
 
 rollback() {
   local exit_code=$?
   trap - EXIT
 
   if [[ $exit_code -ne 0 ]]; then
-    echo "Deployment failed; restoring the previous Robinhood release." >&2
-    if [[ $rollback_needed -eq 1 && -d "$release_backup" && -f "$database_backup" ]]; then
-      systemctl stop "$service_name" || true
-      install -m 0644 "$release_backup/robinhood-server.mjs" "$app_dir/robinhood-server.mjs"
-      if [[ -f "$release_backup/robinhood-server.mjs.LEGAL.txt" ]]; then
-        install -m 0644 "$release_backup/robinhood-server.mjs.LEGAL.txt" "$app_dir/robinhood-server.mjs.LEGAL.txt"
+    echo "Deployment failed; restoring the previous three-chain release." >&2
+    if [[ $rollback_needed -eq 1 && -d "$release_backup" ]]; then
+      for service in "${services[@]}"; do
+        systemctl stop "$service.service" 2>/dev/null || true
+      done
+
+      for chain in "${chains[@]}"; do
+        restore_optional_file "$release_backup/$chain-server.mjs" "$(bundle_path "$chain")"
+        restore_optional_file "$release_backup/$chain-server.mjs.LEGAL.txt" "$(bundle_path "$chain").LEGAL.txt"
+        restore_optional_file "$release_backup/$chain-radar.service" "$(unit_path "$chain-radar")"
+
+        local database
+        local backup
+        database="$(database_path "$chain")"
+        backup="$(database_backup_path "$chain")"
+        if [[ -f "$backup.missing" ]]; then
+          rm -f "$database"
+        elif [[ -f "$backup" ]]; then
+          install -o robinhood-radar -g robinhood-radar -m 0640 "$backup" "$database"
+        fi
+      done
+
+      if [[ -d "$release_backup/public" ]]; then
+        rm -rf "$app_dir/public"
+        cp -a "$release_backup/public" "$app_dir/public"
       fi
-      rm -rf "$app_dir/public"
-      cp -a "$release_backup/public" "$app_dir/public"
-      install -m 0644 "$release_backup/robinhood-radar.service" "$unit_file"
-      install -o robinhood-radar -g robinhood-radar -m 0644 "$database_backup" "$database"
+
+      if [[ $caddy_changed -eq 1 ]]; then
+        restore_optional_file "$release_backup/Caddyfile" "$caddy_config"
+        caddy validate --config "$caddy_config" --adapter caddyfile || true
+        systemctl reload caddy.service || true
+      fi
+
       systemctl daemon-reload || true
-      systemctl start "$service_name" || true
-    elif [[ $service_stopped -eq 1 ]]; then
-      systemctl start "$service_name" || true
+      for service in "${services[@]}"; do
+        if [[ "${was_active[$service]:-0}" == "1" ]]; then
+          systemctl start "$service.service" || true
+        fi
+      done
+    else
+      for service in "${services[@]}"; do
+        if [[ "${was_active[$service]:-0}" == "1" ]]; then
+          systemctl start "$service.service" || true
+        fi
+      done
     fi
   fi
 
@@ -46,54 +135,69 @@ trap rollback EXIT
 
 for file in \
   "$staging_dir/robinhood-server.mjs" \
-  "$staging_dir/robinhood-server.mjs.LEGAL.txt" \
+  "$staging_dir/base-server.mjs" \
+  "$staging_dir/solana-server.mjs" \
   "$staging_dir/robinhood-radar.service" \
+  "$staging_dir/base-radar.service" \
+  "$staging_dir/solana-radar.service" \
   "$staging_dir/public.tar.gz"; do
   [[ -f "$file" ]] || { echo "Missing deployment file: $file" >&2; exit 1; }
 done
 
 install -d -m 0700 "$backup_root" "$release_backup"
+install -d -o robinhood-radar -g robinhood-radar -m 0750 "$data_dir"
+backup_optional_file "$caddy_config" "$release_backup/Caddyfile"
 
-systemctl stop "$service_name"
-service_stopped=1
+for service in "${services[@]}"; do
+  if systemctl is-active --quiet "$service.service" 2>/dev/null; then
+    was_active[$service]=1
+  else
+    was_active[$service]=0
+  fi
+  if [[ -f "$(unit_path "$service")" ]]; then
+    unit_existed[$service]=1
+  else
+    unit_existed[$service]=0
+  fi
+  if [[ "${unit_existed[$service]}" == "1" ]]; then
+    systemctl stop "$service.service"
+    systemctl is-active --quiet "$service.service" && {
+      echo "$service.service did not stop cleanly." >&2
+      exit 1
+    }
+  else
+    systemctl stop "$service.service" 2>/dev/null || true
+  fi
+done
 
-cp --preserve=mode,ownership,timestamps "$database" "$database_backup"
-chmod 0600 "$database_backup"
+for chain in "${chains[@]}"; do
+  database="$(database_path "$chain")"
+  database_backup="$(database_backup_path "$chain")"
+  if [[ -f "$database" ]]; then
+    cp --preserve=mode,ownership,timestamps "$database" "$database_backup"
+    chmod 0600 "$database_backup"
+    quick_check_database "$database_backup"
+  else
+    touch "$database_backup.missing"
+  fi
 
-quick_check="$(node --input-type=module -e '
-  import { DatabaseSync } from "node:sqlite";
-  const db = new DatabaseSync(process.argv[1], { readOnly: true });
-  const rows = db.prepare("PRAGMA quick_check").all();
-  db.close();
-  console.log(rows.map((row) => Object.values(row)[0]).join("\n"));
-' "$database_backup")"
-[[ "$quick_check" == "ok" ]] || { echo "SQLite backup quick_check failed: $quick_check" >&2; exit 1; }
+  backup_optional_file "$(bundle_path "$chain")" "$release_backup/$chain-server.mjs"
+  backup_optional_file "$(bundle_path "$chain").LEGAL.txt" "$release_backup/$chain-server.mjs.LEGAL.txt"
+  backup_optional_file "$(unit_path "$chain-radar")" "$release_backup/$chain-radar.service"
+done
 
 cp -a "$app_dir/public" "$release_backup/public"
-install -m 0644 "$app_dir/robinhood-server.mjs" "$release_backup/robinhood-server.mjs"
-if [[ -f "$app_dir/robinhood-server.mjs.LEGAL.txt" ]]; then
-  install -m 0644 "$app_dir/robinhood-server.mjs.LEGAL.txt" "$release_backup/robinhood-server.mjs.LEGAL.txt"
-fi
-install -m 0644 "$unit_file" "$release_backup/robinhood-radar.service"
 rollback_needed=1
 
-node --input-type=module -e '
-  import { DatabaseSync } from "node:sqlite";
-  const db = new DatabaseSync(process.argv[1]);
-  db.exec(`
-    BEGIN;
-    DROP TABLE IF EXISTS wallet_token_performance;
-    DROP TABLE IF EXISTS history_scan_cursors;
-    DELETE FROM wallet_summaries;
-  `);
-  db.prepare("DELETE FROM jobs WHERE id = ?").run("history:wallets");
-  db.prepare("DELETE FROM metadata WHERE key LIKE ?").run("robinhood:history:%");
-  db.exec("COMMIT");
-  db.close();
-' "$database"
-
-install -m 0644 "$staging_dir/robinhood-server.mjs" "$app_dir/robinhood-server.mjs"
-install -m 0644 "$staging_dir/robinhood-server.mjs.LEGAL.txt" "$app_dir/robinhood-server.mjs.LEGAL.txt"
+for chain in "${chains[@]}"; do
+  install -m 0644 "$staging_dir/$chain-server.mjs" "$(bundle_path "$chain")"
+  if [[ -f "$staging_dir/$chain-server.mjs.LEGAL.txt" ]]; then
+    install -m 0644 "$staging_dir/$chain-server.mjs.LEGAL.txt" "$(bundle_path "$chain").LEGAL.txt"
+  else
+    rm -f "$(bundle_path "$chain").LEGAL.txt"
+  fi
+  install -m 0644 "$staging_dir/$chain-radar.service" "$(unit_path "$chain-radar")"
+done
 
 rm -rf "$app_dir/public.new"
 install -d -m 0755 "$app_dir/public.new"
@@ -106,86 +210,139 @@ rm -rf "$app_dir/public.previous"
 mv "$app_dir/public" "$app_dir/public.previous"
 mv "$app_dir/public.new" "$app_dir/public"
 
-install -m 0644 "$staging_dir/robinhood-radar.service" "$unit_file"
 systemctl daemon-reload
-systemctl start "$service_name"
-service_stopped=0
-
-health_file="$(mktemp)"
-for attempt in $(seq 1 20); do
-  if curl --fail --silent --show-error \
-    "http://127.0.0.1:18118/api/robinhood/dashboard?tab=all" \
-    > "$health_file"; then
-    break
-  fi
-  if [[ $attempt -eq 20 ]]; then
-    echo "Robinhood health check did not become ready." >&2
-    exit 1
-  fi
-  sleep 1
+for service in "${services[@]}"; do
+  systemctl start "$service.service"
 done
 
-node --input-type=module -e '
-  import fs from "node:fs";
-  const dashboard = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-  if (dashboard.mode !== "manual-only") throw new Error("manual-only mode is not active");
-  if (dashboard.discoveryEnabled !== false) throw new Error("automatic discovery is still enabled");
-  if (Number(dashboard.filters?.minEntryUsd) !== 500) throw new Error("500 USD entry floor is not active");
-  if (Object.hasOwn(dashboard, "history")) throw new Error("removed wallet-history payload is still exposed");
-  if (Object.keys(dashboard.filters || {}).some((key) => key.startsWith("history"))) {
-    throw new Error("removed history filters are still exposed");
-  }
-  if ((dashboard.jobs || []).some((job) => job.id === "history:wallets" || job.type === "wallet_history")) {
-    throw new Error("removed wallet-history job is still exposed");
-  }
-  if ((dashboard.winners || []).some((token) => token.manual !== true)) {
-    throw new Error("legacy automatic tokens are visible");
-  }
-  console.log(JSON.stringify({
-    status: dashboard.status,
-    mode: dashboard.mode,
-    discoveryEnabled: dashboard.discoveryEnabled,
-    minEntryUsd: dashboard.filters?.minEntryUsd,
-    wallets: dashboard.wallets?.length || 0,
-    winners: dashboard.winners?.length || 0
-  }));
-' "$health_file"
+declare -A ports=([robinhood]=18118 [base]=18119 [solana]=18120)
+for chain in "${chains[@]}"; do
+  health_file="$(mktemp)"
+  for attempt in $(seq 1 30); do
+    if curl --fail --silent --show-error \
+      "http://127.0.0.1:${ports[$chain]}/api/$chain/dashboard?tab=all" \
+      > "$health_file"; then
+      break
+    fi
+    if [[ $attempt -eq 30 ]]; then
+      echo "$chain health check did not become ready." >&2
+      exit 1
+    fi
+    sleep 1
+  done
 
-removed_history_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  --request POST "http://127.0.0.1:18118/api/robinhood/jobs/history")"
-[[ "$removed_history_status" == "404" ]] || {
-  echo "Removed wallet-history endpoint returned HTTP $removed_history_status instead of 404." >&2
-  exit 1
-}
+  node --input-type=module -e '
+    import fs from "node:fs";
+    const expectedChain = process.argv[2];
+    const dashboard = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (dashboard.chain !== expectedChain) throw new Error(`wrong chain: ${dashboard.chain}`);
+    if (dashboard.mode !== "manual-only") throw new Error("manual-only mode is not active");
+    if (dashboard.discoveryEnabled !== false) throw new Error("automatic discovery is still enabled");
+    if (Object.hasOwn(dashboard, "history")) throw new Error("removed wallet-history payload is exposed");
+    if (Object.keys(dashboard.filters || {}).some((key) => key.startsWith("history"))) {
+      throw new Error("removed history filters are exposed");
+    }
+    if ((dashboard.jobs || []).some((job) => job.id === "history:wallets" || job.type === "wallet_history")) {
+      throw new Error("removed wallet-history job is exposed");
+    }
+    if ((dashboard.winners || []).some((token) => token.manual !== true)) {
+      throw new Error("legacy automatic tokens are visible");
+    }
+  ' "$health_file" "$chain"
+  rm -f "$health_file"
 
-monitor_health_file="$(mktemp)"
-curl --fail --silent --show-error \
-  "http://127.0.0.1:18118/api/robinhood/monitor" \
-  > "$monitor_health_file"
-node --input-type=module -e '
-  import fs from "node:fs";
-  const monitor = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-  if (!monitor.settings || !Number.isInteger(Number(monitor.settings.threshold))) {
-    throw new Error("monitor threshold is unavailable");
-  }
-  if (!monitor.health || monitor.health.running !== true) {
-    throw new Error("wallet monitor is not running");
-  }
-  console.log(JSON.stringify({
-    monitorStatus: monitor.status,
-    monitorEnabled: monitor.settings.enabled,
-    threshold: monitor.settings.threshold,
-    monitoredWallets: monitor.health.monitoredWallets || 0
-  }));
-' "$monitor_health_file"
+  monitor_file="$(mktemp)"
+  curl --fail --silent --show-error \
+    "http://127.0.0.1:${ports[$chain]}/api/$chain/monitor" \
+    > "$monitor_file"
+  node --input-type=module -e '
+    import fs from "node:fs";
+    const expectedChain = process.argv[2];
+    const allowSolanaDegraded = process.argv[3] === "1";
+    const monitor = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (monitor.chain !== expectedChain) throw new Error(`wrong monitor chain: ${monitor.chain}`);
+    if (!monitor.settings || !Number.isInteger(Number(monitor.settings.threshold))) {
+      throw new Error("monitor threshold is unavailable");
+    }
+    if (!monitor.health || typeof monitor.status !== "string") {
+      throw new Error("monitor health is unavailable");
+    }
+    if (expectedChain === "solana" && monitor.health.realtimeReady !== true && !allowSolanaDegraded) {
+      throw new Error(`Solana real-time provider is not ready: ${(monitor.health.reasons || []).join(",")}`);
+    }
+  ' "$monitor_file" "$chain" "$allow_solana_degraded"
+  if [[ "$chain" == "solana" && "$allow_solana_degraded" == "1" ]]; then
+    node --input-type=module -e '
+      import fs from "node:fs";
+      const monitor = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      if (monitor.health?.realtimeReady !== true) {
+        console.error(`WARNING: Solana deployed in explicit degraded mode: ${(monitor.health?.reasons || []).join(",")}`);
+      }
+    ' "$monitor_file"
+  fi
+  rm -f "$monitor_file"
 
-systemctl is-active --quiet "$service_name"
-rm -f "$health_file" "$monitor_health_file"
+  removed_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --request POST "http://127.0.0.1:${ports[$chain]}/api/$chain/jobs/history")"
+  [[ "$removed_status" == "404" ]] || {
+    echo "$chain removed history endpoint returned HTTP $removed_status instead of 404." >&2
+    exit 1
+  }
+
+  systemctl is-active --quiet "$chain-radar.service"
+  quick_check_database "$(database_path "$chain")"
+done
+
+if [[ -f "$staging_dir/Caddyfile" ]]; then
+  caddy_candidate="$(mktemp /etc/caddy/Caddyfile.robinhood-radar.XXXXXX)"
+  install -m 0644 "$staging_dir/Caddyfile" "$caddy_candidate"
+  caddy validate --config "$caddy_candidate" --adapter caddyfile
+  install -m 0644 "$caddy_candidate" "$caddy_config"
+  rm -f "$caddy_candidate"
+  caddy_changed=1
+  caddy validate --config "$caddy_config" --adapter caddyfile
+  systemctl reload caddy.service
+  systemctl is-active --quiet caddy.service
+fi
+
+if [[ -n "${RADAR_PUBLIC_BASE_URL:-}" ]]; then
+  public_curl_options=(--fail --silent --show-error --location)
+  if [[ -n "${RADAR_PUBLIC_USERNAME:-}" || -n "${RADAR_PUBLIC_PASSWORD:-}" ]]; then
+    [[ -n "${RADAR_PUBLIC_USERNAME:-}" && -n "${RADAR_PUBLIC_PASSWORD:-}" ]] || {
+      echo "Both RADAR_PUBLIC_USERNAME and RADAR_PUBLIC_PASSWORD are required." >&2
+      exit 1
+    }
+    public_curl_options+=(--user "$RADAR_PUBLIC_USERNAME:$RADAR_PUBLIC_PASSWORD")
+  fi
+  for chain in "${chains[@]}"; do
+    public_file="$(mktemp)"
+    curl "${public_curl_options[@]}" \
+      "${RADAR_PUBLIC_BASE_URL%/}/api/$chain/dashboard?tab=all" \
+      > "$public_file"
+    node --input-type=module -e '
+      import fs from "node:fs";
+      const expectedChain = process.argv[2];
+      const payload = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      if (payload.chain !== expectedChain) throw new Error(`wrong public chain: ${payload.chain}`);
+    ' "$public_file" "$chain"
+    rm -f "$public_file"
+  done
+fi
+
+for service in "${services[@]}"; do
+  systemctl enable "$service.service" >/dev/null
+done
+
 rm -rf "$app_dir/public.previous" "$staging_dir"
 rollback_needed=0
 
-echo "database_backup=$database_backup"
+for chain in "${chains[@]}"; do
+  echo "${chain}_database_backup=$(database_backup_path "$chain")"
+done
 echo "release_backup=$release_backup"
-echo "service_status=$(systemctl is-active "$service_name")"
+echo "caddy_backup=$release_backup/Caddyfile"
+for service in "${services[@]}"; do
+  echo "$service=$(systemctl is-active "$service.service")"
+done
 
 trap - EXIT

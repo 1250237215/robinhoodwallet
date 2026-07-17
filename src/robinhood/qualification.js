@@ -2,6 +2,10 @@ import { analyzeWalletToken, deriveWalletAdmissionMultiple, scoreWallet } from '
 
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 
+const defaultAddressNormalizer = (value) => String(value || '').toLowerCase();
+const defaultAddressValidator = (value) => ADDRESS_PATTERN.test(defaultAddressNormalizer(value));
+const defaultTransactionNormalizer = (value) => String(value || '').toLowerCase();
+
 function number(value) {
   if (value === null || value === undefined || value === '') return null;
   const next = Number(value);
@@ -12,10 +16,6 @@ function round(value, digits = 4) {
   if (!Number.isFinite(value)) return null;
   const scale = 10 ** digits;
   return Math.round(value * scale) / scale;
-}
-
-function normalizeAddress(value) {
-  return String(value || '').toLowerCase();
 }
 
 function ordered(actions) {
@@ -39,15 +39,19 @@ function maximum(values) {
   return rows.length ? Math.max(...rows) : null;
 }
 
-export function reliablePriceStats(actions, { minimumDistinctWallets = 2 } = {}) {
+export function reliablePriceStats(actions, {
+  minimumDistinctWallets = 2,
+  addressNormalizer = defaultAddressNormalizer,
+  addressValidator = defaultAddressValidator
+} = {}) {
   const trades = ordered(actions).filter(
     (action) => number(action.priceNative) > 0 && number(action.tokenAmount) > 0 && number(action.quoteAmount) > 0
   );
   const wallets = new Set();
   let reliableIndex = -1;
   for (let index = 0; index < trades.length; index += 1) {
-    const wallet = normalizeAddress(trades[index].wallet);
-    if (ADDRESS_PATTERN.test(wallet)) wallets.add(wallet);
+    const wallet = addressNormalizer(trades[index].wallet);
+    if (addressValidator(wallet)) wallets.add(wallet);
     if (wallets.size >= minimumDistinctWallets) {
       reliableIndex = index;
       break;
@@ -73,8 +77,8 @@ export function reliablePriceStats(actions, { minimumDistinctWallets = 2 } = {})
     if (number(trade.priceNative) > number(peakTrade.priceNative)) peakTrade = trade;
   }
   for (const trade of trades) {
-    const wallet = normalizeAddress(trade.wallet);
-    if (ADDRESS_PATTERN.test(wallet)) wallets.add(wallet);
+    const wallet = addressNormalizer(trade.wallet);
+    if (addressValidator(wallet)) wallets.add(wallet);
   }
   const peak = number(peakTrade.priceNative);
   return {
@@ -106,12 +110,14 @@ export function deriveTokenQualification({
   token,
   actions = [],
   scanComplete = false,
-  thresholds = {}
+  thresholds = {},
+  addressNormalizer = defaultAddressNormalizer,
+  addressValidator = defaultAddressValidator
 }) {
   const minimumMultiple = number(thresholds.multiple) ?? 10;
   const minimumLiquidityUsd = number(thresholds.minLiquidityUsd) ?? 50_000;
   const minimumWallets = number(thresholds.minWallets) ?? 100;
-  const stats = reliablePriceStats(actions);
+  const stats = reliablePriceStats(actions, { addressNormalizer, addressValidator });
   const fallbackMultiple = discoveryMultiple(token);
   const peakMultiple = scanComplete
     ? stats.peakMultiple ?? fallbackMultiple
@@ -291,23 +297,26 @@ function totalProfit(performance) {
   return realized + unrealized;
 }
 
-function fundingField(funding, keys) {
+function fundingField(funding, keys, normalizer = defaultTransactionNormalizer) {
   if (!funding || typeof funding !== 'object') return '';
   for (const key of keys) {
     const value = funding[key];
-    if (value !== null && value !== undefined && String(value).trim()) return String(value).toLowerCase();
+    if (value !== null && value !== undefined && String(value).trim()) return normalizer(value);
   }
   return '';
 }
 
-function clusterEvidence(performance) {
+function clusterEvidence(performance, {
+  addressNormalizer = defaultAddressNormalizer,
+  transactionNormalizer = defaultTransactionNormalizer
+} = {}) {
   const funding = performance?.firstFunding;
   const firstFundingSource = fundingField(funding, [
     'from', 'from_address', 'fromAddress', 'source', 'source_address', 'address', 'wallet'
-  ]);
+  ], addressNormalizer);
   const firstFundingTransaction = fundingField(funding, [
     'first_tx_hash', 'tx_hash', 'txHash', 'transaction_hash', 'transactionHash', 'hash'
-  ]);
+  ], transactionNormalizer);
   const firstBuyAt = number(performance?.firstBuyAt ?? performance?.entryTimestamp);
   const firstBuyTimeBucket = firstBuyAt === null ? null : Math.floor(firstBuyAt / 60) * 60;
   const buyTimes = Math.max(0, number(performance?.buyTimes) ?? 0);
@@ -548,7 +557,10 @@ export function buildWalletSummaries({
   strongHolderRank = 30,
   smartScoreWeights = null,
   relatedClusterPenalty = 0.9,
-  lowFrequencyReasonThreshold = 0.8
+  lowFrequencyReasonThreshold = 0.8,
+  addressNormalizer = defaultAddressNormalizer,
+  addressValidator = defaultAddressValidator,
+  transactionNormalizer = defaultTransactionNormalizer
 } = {}) {
   const baseMultiple = Math.max(1, number(smartBaseMultiple ?? minimumHitMultiple) ?? 5);
   const highMultiple = Math.max(baseMultiple, number(strictMultiple) ?? 10);
@@ -556,7 +568,7 @@ export function buildWalletSummaries({
   const defaultMinimumEntryUsd = Math.max(0, number(minimumEntryUsd) ?? 0);
   const wallets = new Map();
   for (const token of tokens) {
-    const tokenAddress = normalizeAddress(token.address);
+    const tokenAddress = addressNormalizer(token.address);
     const qualification = token.qualification || {};
     const tokenPeakMultiple = number(token.peakMultiple ?? qualification.peakMultiple);
     const hasExplicitQualification =
@@ -578,11 +590,11 @@ export function buildWalletSummaries({
     );
     if (token.holderAnalysis && typeof token.holderAnalysis === 'object') {
       for (const candidate of holderCandidates) {
-        const address = normalizeAddress(candidate.address);
+        const address = addressNormalizer(candidate.address);
         const entryCostUsd = number(
           candidate.rawBuyVolumeUsd ?? candidate.buyVolumeUsd ?? candidate.entryCostUsd
         );
-        if (!ADDRESS_PATTERN.test(address) || candidate.excluded || candidate.profitState !== 'complete') continue;
+        if (!addressValidator(address) || candidate.excluded || candidate.profitState !== 'complete') continue;
         if (candidate.eligible === false) continue;
         if (!(entryCostUsd >= tokenMinimumEntryUsd)) continue;
         const realizedMultiple = number(candidate.realizedMultiple);
@@ -678,7 +690,7 @@ export function buildWalletSummaries({
           significantProfitRate,
           strongHolderRank
         }));
-        const evidence = clusterEvidence(performance);
+        const evidence = clusterEvidence(performance, { addressNormalizer, transactionNormalizer });
         performance.clusterFingerprint = evidence.fingerprint;
         performance.clusterEvidence = evidence;
         if (!wallets.has(address)) wallets.set(address, []);
@@ -690,12 +702,12 @@ export function buildWalletSummaries({
       actionsByToken instanceof Map ? actionsByToken.get(tokenAddress) || [] : actionsByToken[tokenAddress] || []
     );
     if (!actions.length) continue;
-    const stats = reliablePriceStats(actions);
+    const stats = reliablePriceStats(actions, { addressNormalizer, addressValidator });
     const legacyIsWinner = isWinner || (!hasExplicitQualification && (stats.peakMultiple ?? 0) >= baseMultiple);
     const byWallet = new Map();
     for (const action of actions) {
-      const wallet = normalizeAddress(action.wallet);
-      if (!ADDRESS_PATTERN.test(wallet) || action.excluded) continue;
+      const wallet = addressNormalizer(action.wallet);
+      if (!addressValidator(wallet) || action.excluded) continue;
       if (!byWallet.has(wallet)) byWallet.set(wallet, []);
       byWallet.get(wallet).push(action);
     }
@@ -826,7 +838,7 @@ export function buildWalletSummaries({
         significantProfitRate,
         strongHolderRank
       }));
-      const evidence = clusterEvidence(performance);
+      const evidence = clusterEvidence(performance, { addressNormalizer, transactionNormalizer });
       performance.clusterFingerprint = evidence.fingerprint;
       performance.clusterEvidence = evidence;
       if (!wallets.has(address)) wallets.set(address, []);
@@ -840,8 +852,8 @@ export function buildWalletSummaries({
     const manualTokenAddresses = new Set();
     const manualWinnerHitTokenAddresses = new Set();
     for (const performance of performances) {
-      const performanceTokenAddress = normalizeAddress(performance.tokenAddress);
-      if (performance.manualToken !== true || !ADDRESS_PATTERN.test(performanceTokenAddress)) continue;
+      const performanceTokenAddress = addressNormalizer(performance.tokenAddress);
+      if (performance.manualToken !== true || !addressValidator(performanceTokenAddress)) continue;
       manualTokenAddresses.add(performanceTokenAddress);
       if (performance.manualWinnerHit === true) manualWinnerHitTokenAddresses.add(performanceTokenAddress);
     }

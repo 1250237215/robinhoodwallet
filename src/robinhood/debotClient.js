@@ -2,6 +2,49 @@ import { assessWalletTokenCostBasis, deriveWalletAdmissionMultiple } from './ana
 
 const DEBOT_BASE_URL = 'https://debot.ai/api';
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
+const SOLANA_ADDRESS_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+export const DEBOT_CHAINS = Object.freeze(['robinhood', 'base', 'solana']);
+const DEBOT_CHAIN_SET = new Set(DEBOT_CHAINS);
+
+function normalizeChain(value, fallback = 'robinhood') {
+  const chain = String(value || fallback).trim().toLowerCase();
+  if (!DEBOT_CHAIN_SET.has(chain)) throw new RangeError(`Unsupported DeBot chain: ${chain || value}`);
+  return chain;
+}
+
+function defaultAddressNormalizer(chain) {
+  return chain === 'solana'
+    ? (value) => String(value || '').trim()
+    : (value) => String(value || '').trim().toLowerCase();
+}
+
+function defaultAddressValidator(chain) {
+  return chain === 'solana'
+    ? (value) => SOLANA_ADDRESS_PATTERN.test(String(value || ''))
+    : (value) => ADDRESS_PATTERN.test(String(value || ''));
+}
+
+function normalizedAddress(value, { chain = 'robinhood', addressNormalizer } = {}) {
+  const normalizedChain = normalizeChain(chain);
+  const normalize = typeof addressNormalizer === 'function'
+    ? addressNormalizer
+    : defaultAddressNormalizer(normalizedChain);
+  return String(normalize(value) || '');
+}
+
+function normalizationOptions(rawChain, options = {}) {
+  return {
+    chain: normalizeChain(options.chain || rawChain || 'robinhood'),
+    addressNormalizer: options.addressNormalizer
+  };
+}
+
+function chainLabel(chain) {
+  if (chain === 'base') return 'Base';
+  if (chain === 'solana') return 'Solana';
+  return 'Robinhood';
+}
 
 function asNumber(value) {
   if (value === null || value === undefined || value === '') return null;
@@ -41,12 +84,13 @@ function normalizeMetricWindow(raw = {}) {
   };
 }
 
-export function normalizeTokenMetrics(raw = {}) {
+export function normalizeTokenMetrics(raw = {}, options = {}) {
   const meta = raw?.meta || {};
   const metrics = raw?.metrics || {};
+  const adapter = normalizationOptions(raw?.chain || meta.chain, options);
   return {
-    chain: String(raw?.chain || 'robinhood'),
-    address: String(raw?.token || meta.address || '').toLowerCase(),
+    chain: adapter.chain,
+    address: normalizedAddress(raw?.token || meta.address, adapter),
     symbol: String(meta.symbol || 'UNKNOWN'),
     name: String(meta.name || meta.symbol || 'Unknown'),
     decimals: asNumber(meta.decimals) ?? 18,
@@ -73,12 +117,13 @@ export function normalizeTokenMetrics(raw = {}) {
   };
 }
 
-export function normalizeHotToken(raw) {
+export function normalizeHotToken(raw, options = {}) {
   const market = raw?.market_info || {};
   const liquidity = raw?.pair_summary_info?.liquidity;
+  const adapter = normalizationOptions(raw?.chain, options);
   return {
-    chain: raw?.chain || 'robinhood',
-    address: String(raw?.address || '').toLowerCase(),
+    chain: adapter.chain,
+    address: normalizedAddress(raw?.address, adapter),
     symbol: String(raw?.symbol || 'UNKNOWN'),
     name: String(raw?.name || raw?.symbol || 'Unknown'),
     decimals: asNumber(raw?.decimals) ?? 18,
@@ -169,7 +214,8 @@ function returnMultiple(proceeds, cost) {
   return nextProceeds !== null && nextCost > 0 ? nextProceeds / nextCost : null;
 }
 
-export function normalizeWalletTokenProfit(raw = {}, requestedWallet = '') {
+export function normalizeWalletTokenProfit(raw = {}, requestedWallet = '', options = {}) {
+  const adapter = normalizationOptions(raw?.chain, options);
   const buyAmount = Math.abs(asNumber(raw.buy_amount) ?? 0);
   const sellAmount = Math.abs(asNumber(raw.sell_amount) ?? 0);
   const buyVolumeUsd = Math.abs(asNumber(raw.buy_volume) ?? 0);
@@ -245,9 +291,9 @@ export function normalizeWalletTokenProfit(raw = {}, requestedWallet = '') {
     ...costBasis
   });
   return {
-    address: String(raw.wallet || requestedWallet || '').toLowerCase(),
-    tokenAddress: String(raw.token || '').toLowerCase(),
-    chain: String(raw.chain || 'robinhood'),
+    address: normalizedAddress(raw.wallet || requestedWallet, adapter),
+    tokenAddress: normalizedAddress(raw.token, adapter),
+    chain: adapter.chain,
     currentPriceUsd,
     buyAmount,
     sellAmount,
@@ -282,23 +328,24 @@ export function normalizeWalletTokenProfit(raw = {}, requestedWallet = '') {
   };
 }
 
-export function normalizeTokenDetail(raw = {}) {
+export function normalizeTokenDetail(raw = {}, options = {}) {
   const token = raw.token || {};
   const meta = token.meta || {};
   const pair = raw.pair || {};
   const market = raw.market_metrics || {};
   const pools = Array.isArray(raw.pools?.list) ? raw.pools.list : [];
-  const primaryPoolAddress = String(pair.tokenPairAddress || pair.pair || '').toLowerCase();
+  const adapter = normalizationOptions(meta.chain || pair.chain, options);
+  const primaryPoolAddress = normalizedAddress(pair.tokenPairAddress || pair.pair, adapter);
   const primaryDex = String(pair.dex?.dex_name || pair.dex_name || '');
   return {
-    chain: String(meta.chain || pair.chain || 'robinhood'),
-    address: String(meta.address || pair.tokenAddress || '').toLowerCase(),
+    chain: adapter.chain,
+    address: normalizedAddress(meta.address || pair.tokenAddress, adapter),
     symbol: String(meta.symbol || pair.tokenSymbol || 'UNKNOWN'),
     name: String(meta.name || pair.tokenName || meta.symbol || 'Unknown'),
     decimals: asNumber(meta.decimals ?? pair.decimals) ?? 18,
     logo: String(meta.logo || token.social?.logo_cache || pair.tokenIcon || ''),
     creationTimestamp: asNumber(meta.creation_timestamp ?? pair.createTimestamp),
-    creatorAddress: String(meta.creator_address || '').toLowerCase(),
+    creatorAddress: normalizedAddress(meta.creator_address, adapter),
     priceUsd: asNumber(market.price ?? pair.price),
     marketCapUsd: asNumber(market.mkt_cap ?? market.fdv ?? pair.market_cap),
     liquidityUsd: asNumber(market.total_liquidity ?? market.liquidity ?? pair.liquidity),
@@ -307,11 +354,11 @@ export function normalizeTokenDetail(raw = {}) {
     primaryPoolAddress,
     primaryDex,
     pools: pools.map((pool) => ({
-      address: String(pool.pair || '').toLowerCase(),
+      address: normalizedAddress(pool.pair, adapter),
       dex: String(pool.dex_name || pool.contract || ''),
       liquidityUsd: asNumber(pool.liquidity),
       quoteSymbol: String(pool.base_token?.symbol || ''),
-      quoteAddress: String(pool.base_token?.address || '').toLowerCase()
+      quoteAddress: normalizedAddress(pool.base_token?.address, adapter)
     })),
     updatedAt: asNumber(market.update_time ?? pair.lastUpdateTime) || Math.floor(Date.now() / 1000)
   };
@@ -334,64 +381,98 @@ export function normalizeMarketHistory(raw = {}) {
 }
 
 export class RobinhoodDebotClient {
-  constructor({ baseUrl = DEBOT_BASE_URL, timeoutMs = 20_000, fetchImpl = globalThis.fetch } = {}) {
+  constructor({
+    baseUrl = DEBOT_BASE_URL,
+    timeoutMs = 20_000,
+    fetchImpl = globalThis.fetch,
+    chain = 'robinhood',
+    addressNormalizer,
+    addressValidator,
+    normalizeAddress,
+    validateAddress
+  } = {}) {
     if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl is required');
+    this.chain = normalizeChain(chain);
+    this.addressNormalizer = addressNormalizer || normalizeAddress || defaultAddressNormalizer(this.chain);
+    this.addressValidator = addressValidator || validateAddress || defaultAddressValidator(this.chain);
+    if (typeof this.addressNormalizer !== 'function') throw new TypeError('addressNormalizer must be a function');
+    if (typeof this.addressValidator !== 'function') throw new TypeError('addressValidator must be a function');
     this.baseUrl = String(baseUrl || DEBOT_BASE_URL).replace(/\/$/, '');
     this.timeoutMs = Math.max(1_000, Number(timeoutMs) || 20_000);
     this.fetchImpl = fetchImpl;
   }
 
+  normalizeAddress(value) {
+    return String(this.addressNormalizer(value) || '');
+  }
+
+  validateAddress(value) {
+    return this.addressValidator(value) === true;
+  }
+
+  requireAddress(value, kind) {
+    const address = this.normalizeAddress(value);
+    if (!this.validateAddress(address)) {
+      throw new TypeError(`Invalid ${chainLabel(this.chain)} ${kind} address`);
+    }
+    return address;
+  }
+
+  normalizationOptions() {
+    return { chain: this.chain, addressNormalizer: this.addressNormalizer };
+  }
+
   async fetchHotTokens({ signal } = {}) {
     const rows = await requestJson(
-      `${this.baseUrl}/dashboard/chain/recommend/hot_token?chain=robinhood`,
+      `${this.baseUrl}/dashboard/chain/recommend/hot_token?chain=${encodeURIComponent(this.chain)}`,
       { timeoutMs: this.timeoutMs, signal, fetchImpl: this.fetchImpl }
     );
-    return rows.map(normalizeHotToken).filter((token) => /^0x[0-9a-f]{40}$/.test(token.address));
+    return rows
+      .map((row) => normalizeHotToken(row, this.normalizationOptions()))
+      .filter((token) => this.validateAddress(token.address));
   }
 
 
   async fetchTokenMetrics(tokenAddress, { signal } = {}) {
-    const address = String(tokenAddress || '').toLowerCase();
+    const address = this.requireAddress(tokenAddress, 'token');
     const raw = await requestObject(
-      `${this.baseUrl}/dashboard/token/market/metrics?chain=robinhood&token=${encodeURIComponent(address)}`,
+      `${this.baseUrl}/dashboard/token/market/metrics?chain=${encodeURIComponent(this.chain)}&token=${encodeURIComponent(address)}`,
       { timeoutMs: this.timeoutMs, signal, fetchImpl: this.fetchImpl }
     );
-    return normalizeTokenMetrics(raw);
+    return normalizeTokenMetrics(raw, this.normalizationOptions());
   }
 
   async fetchTokenSafety(tokenAddress, { signal } = {}) {
-    const address = String(tokenAddress || '').toLowerCase();
+    const address = this.requireAddress(tokenAddress, 'token');
     const raw = await requestObject(
-      `${this.baseUrl}/dashboard/token/safe_info?chain=robinhood&token=${encodeURIComponent(address)}`,
+      `${this.baseUrl}/dashboard/token/safe_info?chain=${encodeURIComponent(this.chain)}&token=${encodeURIComponent(address)}`,
       { timeoutMs: this.timeoutMs, signal, fetchImpl: this.fetchImpl }
     );
     return normalizeSafety(raw);
   }
 
   async fetchTokenDetail(tokenAddress, { signal } = {}) {
-    const address = String(tokenAddress || '').toLowerCase();
-    if (!ADDRESS_PATTERN.test(address)) throw new TypeError('Invalid Robinhood token address');
+    const address = this.requireAddress(tokenAddress, 'token');
     const raw = await requestObject(
-      `${this.baseUrl}/dashboard/token/detail?chain=robinhood&token=${encodeURIComponent(address)}`,
+      `${this.baseUrl}/dashboard/token/detail?chain=${encodeURIComponent(this.chain)}&token=${encodeURIComponent(address)}`,
       { timeoutMs: this.timeoutMs, signal, fetchImpl: this.fetchImpl }
     );
-    return normalizeTokenDetail(raw);
+    return normalizeTokenDetail(raw, this.normalizationOptions());
   }
 
   async fetchTokenPeakMarketCap(tokenAddress, detail, { signal } = {}) {
-    const address = String(tokenAddress || '').toLowerCase();
-    if (!ADDRESS_PATTERN.test(address)) throw new TypeError('Invalid Robinhood token address');
+    const address = this.requireAddress(tokenAddress, 'token');
     const tokenDetail = detail || await this.fetchTokenDetail(address, { signal });
-    const primaryPoolAddress = String(
+    const primaryPoolAddress = this.normalizeAddress(
       tokenDetail?.primaryPoolAddress ||
       tokenDetail?.pools?.[0]?.address ||
       ''
-    ).toLowerCase();
-    if (!ADDRESS_PATTERN.test(primaryPoolAddress)) {
+    );
+    if (!this.validateAddress(primaryPoolAddress)) {
       throw new Error('DeBot token detail did not include a valid primary pool');
     }
     const params = new URLSearchParams({
-      chain: 'robinhood',
+      chain: this.chain,
       token: address,
       pair: primaryPoolAddress,
       dex_name: String(tokenDetail?.primaryDex || tokenDetail?.pools?.[0]?.dex || 'uniswapv2'),
@@ -442,14 +523,12 @@ export class RobinhoodDebotClient {
   }
 
   async fetchWalletTokenProfit(tokenAddress, walletAddress, { signal } = {}) {
-    const token = String(tokenAddress || '').toLowerCase();
-    const wallet = String(walletAddress || '').toLowerCase();
-    if (!ADDRESS_PATTERN.test(token)) throw new TypeError('Invalid Robinhood token address');
-    if (!ADDRESS_PATTERN.test(wallet)) throw new TypeError('Invalid Robinhood wallet address');
+    const token = this.requireAddress(tokenAddress, 'token');
+    const wallet = this.requireAddress(walletAddress, 'wallet');
     const raw = await requestObject(
-      `${this.baseUrl}/dex/profit/wallet_token_analysis?chain=robinhood&token=${encodeURIComponent(token)}&wallet=${encodeURIComponent(wallet)}`,
+      `${this.baseUrl}/dex/profit/wallet_token_analysis?chain=${encodeURIComponent(this.chain)}&token=${encodeURIComponent(token)}&wallet=${encodeURIComponent(wallet)}`,
       { timeoutMs: this.timeoutMs, signal, fetchImpl: this.fetchImpl }
     );
-    return normalizeWalletTokenProfit(raw, wallet);
+    return normalizeWalletTokenProfit(raw, wallet, this.normalizationOptions());
   }
 }
