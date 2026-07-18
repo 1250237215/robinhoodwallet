@@ -20,6 +20,7 @@ test('prediction backup retention is syntax-valid and restricted to 48-hour JSON
   assert.match(script, /\/opt\/dqdai-2\/site\/assets\/prediction_backups/);
   assert.match(script, /\/opt\/dqdai-3\/site\/assets\/prediction_backups/);
   assert.match(script, /-type f[\s\S]*-name 'all_predictions-\*\.json'[\s\S]*-mmin "\+\$\{retention_minutes\}"/);
+  assert.match(script, /-maxdepth 1/);
   assert.match(script, /flock -n/);
   assert.doesNotMatch(script, /rm\s+-rf/);
   assert.doesNotMatch(script, /-name 'all_predictions\.json'/);

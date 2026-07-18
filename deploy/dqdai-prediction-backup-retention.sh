@@ -29,11 +29,11 @@ for backup_dir in "${backup_dirs[@]}"; do
   fi
 
   before_bytes="$(du -sb -- "$backup_dir" | awk 'NR == 1 { print $1 }')"
-  stale_count="$(find -P "$backup_dir" -xdev -type f \
+  stale_count="$(find -P "$backup_dir" -maxdepth 1 -xdev -type f \
     -name 'all_predictions-*.json' -mmin "+${retention_minutes}" -print | wc -l)"
 
   if (( stale_count > 0 )); then
-    find -P "$backup_dir" -xdev -type f \
+    find -P "$backup_dir" -maxdepth 1 -xdev -type f \
       -name 'all_predictions-*.json' -mmin "+${retention_minutes}" -delete
   fi
 
