@@ -1,0 +1,9 @@
+[Unit]
+Description=Prune DQD AI prediction snapshots older than 48 hours
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dqdai-prediction-backup-retention
+Nice=10
+IOSchedulingClass=idle

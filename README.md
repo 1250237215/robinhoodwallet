@@ -139,6 +139,10 @@ marked partial.
 - `deploy/install-remote.sh` installs a prepared release with backup and rollback
   checks for all three binaries, their databases, the independent social database,
   and all service units.
+- `deploy/dqdai-prediction-backup-retention.sh` is installed separately with its
+  service and hourly timer. It deletes only `all_predictions-*.json` snapshots in
+  the three DQD AI backup directories after 48 hours; current prediction data and
+  website files are outside its match scope.
 - `deploy/Caddyfile.example` contains the prefix-based reverse proxy used by the
   existing radar URL. Set `ROBINHOOD_SITE_ADDRESS` to the public site address.
   It does not add a browser login; the exact Solana webhook route remains

@@ -1,0 +1,13 @@
+[Unit]
+Description=Run DQD AI prediction snapshot retention hourly
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+AccuracySec=1min
+RandomizedDelaySec=5min
+Persistent=true
+Unit=dqdai-prediction-backup-retention.service
+
+[Install]
+WantedBy=timers.target
