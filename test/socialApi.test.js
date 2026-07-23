@@ -169,6 +169,213 @@ test('social posts API persists merged feed membership and filters featured and 
   assert.equal((await invalid.json()).code, 'INVALID_SOCIAL_DATA');
 });
 
+test('DeBot analysis bridge uses bearer-only claims, inflight dedupe and short result caching', async (t) => {
+  const token = 'analysis-device-token';
+  const tokenAddress = '0x1111111111111111111111111111111111111111';
+  const { baseUrl, socialService } = await withSocialServer(t, { token });
+
+  await assert.rejects(
+    socialService.requestDeBot('debot.token_detail.v1', {
+      chain: 'robinhood',
+      token: tokenAddress
+    }),
+    { code: 'DEBOT_BRIDGE_UNAVAILABLE' }
+  );
+  await fetch(`${baseUrl}/api/social/bridge/heartbeat`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({ capabilities: ['posts', 'watchlist'] })
+  });
+  await assert.rejects(
+    socialService.requestDeBot('debot.token_detail.v1', {
+      chain: 'robinhood',
+      token: tokenAddress
+    }),
+    { code: 'DEBOT_BRIDGE_UNAVAILABLE' }
+  );
+  await fetch(`${baseUrl}/api/social/bridge/heartbeat`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({
+      bridgeId: 'chrome-analysis',
+      version: '1.1.0',
+      capabilities: ['posts', 'debot-analysis-v1']
+    })
+  });
+
+  assert.throws(() => socialService.requestDeBot('debot.token_detail.v1', {
+    chain: 'base',
+    token: tokenAddress
+  }), /Robinhood chain/);
+  assert.throws(() => socialService.requestDeBot('debot.token_detail.v1', {
+    chain: 'robinhood',
+    token: '0x1234'
+  }), /valid non-zero EVM address/);
+
+  const first = socialService.requestDeBot('debot.token_detail.v1', {
+    chain: 'robinhood',
+    token: tokenAddress
+  });
+  const duplicate = socialService.requestDeBot('debot.token_detail.v1', {
+    token: tokenAddress.toUpperCase().replace('0X', '0x'),
+    chain: 'ROBINHOOD'
+  });
+  const headerFallback = await fetch(`${baseUrl}/api/social/bridge/debot/jobs`, {
+    headers: { 'x-social-bridge-token': token }
+  });
+  assert.equal(headerFallback.status, 401);
+  const publicEnqueue = await fetch(`${baseUrl}/api/social/bridge/debot/jobs`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({ type: 'debot.token_detail.v1', payload: { chain: 'robinhood', token: tokenAddress } })
+  });
+  assert.equal(publicEnqueue.status, 405);
+
+  const claimedResponse = await fetch(`${baseUrl}/api/social/bridge/debot/jobs?limit=4`, {
+    headers: { authorization: `Bearer ${token}` }
+  });
+  const claimed = await claimedResponse.json();
+  assert.equal(claimedResponse.status, 200);
+  assert.equal(claimed.jobs.length, 1);
+  assert.equal(claimed.jobs[0].type, 'debot.token_detail.v1');
+  assert.deepEqual(claimed.jobs[0].payload, { chain: 'robinhood', token: tokenAddress });
+  assert.match(claimed.jobs[0].claimToken, /^[A-Za-z0-9_-]{32}$/);
+
+  const rejectedClaim = await fetch(
+    `${baseUrl}/api/social/bridge/debot/jobs/${claimed.jobs[0].id}/result`,
+    {
+      method: 'POST',
+      headers: auth(token),
+      body: JSON.stringify({ claimToken: 'wrong-claim-token', success: true, result: { token: {} } })
+    }
+  );
+  assert.equal(rejectedClaim.status, 409);
+  assert.equal((await rejectedClaim.json()).code, 'DEBOT_JOB_CLAIM_INVALID');
+
+  const mismatchedResult = await fetch(
+    `${baseUrl}/api/social/bridge/debot/jobs/${claimed.jobs[0].id}/result`,
+    {
+      method: 'POST',
+      headers: auth(token),
+      body: JSON.stringify({
+        claimToken: claimed.jobs[0].claimToken,
+        success: true,
+        result: {
+          token: {
+            meta: {
+              chain: 'robinhood',
+              address: '0x9999999999999999999999999999999999999999'
+            }
+          }
+        }
+      })
+    }
+  );
+  assert.equal(mismatchedResult.status, 400);
+
+  const rawResult = {
+    token: { meta: { chain: 'robinhood', address: tokenAddress, symbol: 'TEST' } }
+  };
+  const completedResponse = await fetch(
+    `${baseUrl}/api/social/bridge/debot/jobs/${claimed.jobs[0].id}/result`,
+    {
+      method: 'POST',
+      headers: auth(token),
+      body: JSON.stringify({ claimToken: claimed.jobs[0].claimToken, success: true, result: rawResult })
+    }
+  );
+  assert.equal(completedResponse.status, 200);
+  assert.deepEqual(await completedResponse.json(), { ok: true });
+  const expected = { schema: 'debot.token_detail.raw.v1', data: rawResult };
+  assert.deepEqual(await first, expected);
+  assert.deepEqual(await duplicate, expected);
+
+  const repeatedAck = await fetch(
+    `${baseUrl}/api/social/bridge/debot/jobs/${claimed.jobs[0].id}/result`,
+    {
+      method: 'POST',
+      headers: auth(token),
+      body: JSON.stringify({ claimToken: claimed.jobs[0].claimToken, success: true, result: rawResult })
+    }
+  );
+  assert.equal(repeatedAck.status, 200);
+  assert.deepEqual(await socialService.requestDeBot('debot.token_detail.v1', {
+    chain: 'robinhood',
+    token: tokenAddress
+  }), expected);
+  const empty = await (await fetch(`${baseUrl}/api/social/bridge/debot/jobs`, {
+    headers: { authorization: `Bearer ${token}` }
+  })).json();
+  assert.deepEqual(empty.jobs, []);
+});
+
+test('DeBot result endpoint enforces payload limits and stores only coarse remote errors', async (t) => {
+  const token = 'analysis-limits-token';
+  const tokenAddress = '0x2222222222222222222222222222222222222222';
+  const wallet = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const { baseUrl, socialService } = await withSocialServer(t, { token });
+  await fetch(`${baseUrl}/api/social/bridge/heartbeat`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({ capabilities: ['debot-analysis-v1'] })
+  });
+
+  const pending = socialService.requestDeBot('debot.wallet_token_analysis.v1', {
+    chain: 'robinhood',
+    token: tokenAddress,
+    wallet
+  });
+  const pendingFailure = assert.rejects(pending, (error) => {
+    assert.equal(error.code, 'DEBOT_BRIDGE_REQUEST_FAILED');
+    assert.equal(error.message.includes('authorization Bearer should-never-be-stored'), false);
+    return true;
+  });
+  const job = (await (await fetch(`${baseUrl}/api/social/bridge/debot/jobs`, {
+    headers: { authorization: `Bearer ${token}` }
+  })).json()).jobs[0];
+  const tooLarge = await fetch(`${baseUrl}/api/social/bridge/debot/jobs/${job.id}/result`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({
+      claimToken: job.claimToken,
+      success: true,
+      result: {
+        chain: 'robinhood',
+        token: tokenAddress,
+        wallet,
+        payload: 'x'.repeat(260 * 1024)
+      }
+    })
+  });
+  assert.equal(tooLarge.status, 413);
+  assert.equal((await tooLarge.json()).code, 'DEBOT_RESULT_TOO_LARGE');
+
+  const secret = 'authorization Bearer should-never-be-stored';
+  const failed = await fetch(`${baseUrl}/api/social/bridge/debot/jobs/${job.id}/result`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({
+      claimToken: job.claimToken,
+      success: false,
+      error: secret,
+      errorType: 'NETWORK'
+    })
+  });
+  assert.equal(failed.status, 200);
+  await pendingFailure;
+  const stored = socialService.store.getDeBotJob(job.id);
+  assert.equal(stored.errorCode, 'NETWORK');
+  assert.equal(stored.errorMessage.includes(secret), false);
+
+  const bodyLimit = await fetch(`${baseUrl}/api/social/bridge/debot/jobs/${job.id}/result`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({ padding: 'x'.repeat(513 * 1024) })
+  });
+  assert.equal(bodyLimit.status, 413);
+  assert.equal((await bodyLimit.json()).code, 'BODY_TOO_LARGE');
+});
+
 test('social SSE sends an initial snapshot and live normalized changes', async (t) => {
   const token = 'stream-device-token';
   const { baseUrl } = await withSocialServer(t, { token });

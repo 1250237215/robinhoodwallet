@@ -40,15 +40,21 @@ export function chooseMainPool(pairs, { targetToken, supportedQuotes }) {
 }
 
 export class RobinhoodPoolClient {
-  constructor({ baseUrl = 'https://api.dexscreener.com/token-pairs/v1/robinhood', timeoutMs = 20_000 } = {}) {
+  constructor({
+    baseUrl = 'https://api.dexscreener.com/token-pairs/v1/robinhood',
+    timeoutMs = 20_000,
+    fetchImpl = globalThis.fetch
+  } = {}) {
+    if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl is required');
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.timeoutMs = timeoutMs;
+    this.fetchImpl = fetchImpl;
   }
 
   async fetchPools(tokenAddress, { signal } = {}) {
     const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
     const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-    const response = await fetch(`${this.baseUrl}/${encodeURIComponent(tokenAddress)}`, {
+    const response = await this.fetchImpl(`${this.baseUrl}/${encodeURIComponent(tokenAddress)}`, {
       signal: combined,
       headers: { accept: 'application/json' }
     });

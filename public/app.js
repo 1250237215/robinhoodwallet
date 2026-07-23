@@ -70,6 +70,7 @@ let HASH_PATTERN = CHAIN_CONFIGS.robinhood.hashPattern;
 const ACTIVE_JOB_STATES = new Set(['queued', 'pending', 'running', 'scanning', 'refreshing', 'fetching', 'analyzing']);
 const REVIEW_SCAN_BATCH_GAP_MS = 5 * 60 * 1000;
 const BUY_FREQUENCY_REFRESH_MS = 30_000;
+const MANUAL_WINNER_POLL_INTERVAL_MS = 1_500;
 const MONITOR_POLL_INTERVAL_MS = 2_000;
 const MONITOR_RECENT_REFRESH_MS = 10_000;
 const SOCIAL_API_ROOT = `${APP_BASE}/api/social`;
@@ -319,6 +320,10 @@ const state = {
   requestSequence: 0,
   detailSequence: 0,
   pollTimer: null,
+  manualWinnerPollTimer: null,
+  manualWinnerPollBusy: false,
+  manualWinnerTracking: null,
+  manualWinnerTrackingSequence: 0,
   toastTimer: null,
   librarySearchTimer: null,
   monitorPollTimer: null,
@@ -2375,10 +2380,15 @@ function walletLibraryRecords(collection) {
 function latestReviewBatchTokenAddresses(jobs) {
   const scans = (Array.isArray(jobs) ? jobs : [])
     .filter((job) => String(firstValue(job, ['type', 'jobType'], '')).toLowerCase() === 'token_scan')
-    .filter((job) => String(firstValue(job, ['status', 'state'], '')).toLowerCase() === 'complete')
+    .filter((job) => {
+      const status = String(firstValue(job, ['status', 'state'], '')).toLowerCase();
+      return status === 'complete' || job?.cachedResult === true;
+    })
     .map((job) => {
       const tokenAddress = normalizeAddress(firstValue(job, ['tokenAddress', 'address', 'token'], ''));
-      const completedAtMs = Date.parse(firstValue(job, ['completedAt', 'finishedAt', 'updatedAt'], ''));
+      const completedAtMs = Date.parse(firstValue(job, [
+        'completedAt', 'failedAt', 'finishedAt', 'updatedAt'
+      ], ''));
       const startedAtMs = Date.parse(firstValue(job, ['startedAt', 'createdAt'], ''));
       return {
         tokenAddress,
@@ -2702,6 +2712,31 @@ function matchingWinnerJob(winner) {
   ])) === address) || null;
 }
 
+function winnerHasStaleHolderCache(winner) {
+  return winner?.holderAnalysis?.stale === true;
+}
+
+function winnerJobIsActive(winner) {
+  const status = String(firstValue(matchingWinnerJob(winner), ['status', 'state'], '')).toLowerCase();
+  return ACTIVE_JOB_STATES.has(status);
+}
+
+function winnerStaleHolderError(winner) {
+  const job = matchingWinnerJob(winner) || {};
+  return String(firstValue(winner?.holderAnalysis || {}, ['staleError', 'error'],
+    firstValue(winner || {}, ['scanError'], firstValue(job, ['error', 'scanError'], 'Holder 刷新失败'))));
+}
+
+function winnerStaleHolderTimestamp(winner) {
+  return firstValue(winner?.holderAnalysis || {}, ['cachedAt', 'snapshotAt'],
+    firstValue(winner || {}, ['scannedAt'], matchingWinnerJob(winner)?.cachedAt || null));
+}
+
+function winnerStaleFailureTimestamp(winner) {
+  return firstValue(winner || {}, ['scanFailedAt'],
+    firstValue(matchingWinnerJob(winner) || {}, ['failedAt', 'completedAt'], null));
+}
+
 function winnerRescanActive(winner) {
   const address = normalizeAddress(winner?.address);
   if (!address) return false;
@@ -2734,12 +2769,55 @@ function syncWinnerRescanButtonsByAddress(address) {
 
 function winnerPipelineCounts(winner) {
   const snapshot = holderPipelineCounts(winner);
-  const current = holderPipelineCounts(matchingWinnerJob(winner) || {});
+  const job = matchingWinnerJob(winner) || {};
+  if (winnerHasStaleHolderCache(winner) && !winnerJobIsActive(winner)) return snapshot;
+  const current = holderPipelineCounts(job);
   return Object.fromEntries(Object.keys(snapshot).map((key) => [key, current[key] ?? snapshot[key]]));
 }
 
 function winnerPipelineStage(winner) {
-  return pipelineStage(matchingWinnerJob(winner) || {}) || pipelineStage(winner);
+  const job = matchingWinnerJob(winner) || {};
+  if (winnerJobIsActive(winner)) return pipelineStage(job) || pipelineStage(winner);
+  if (winnerHasStaleHolderCache(winner)) return 'stale';
+  return pipelineStage(job) || pipelineStage(winner);
+}
+
+function winnerUsesOnchainFallback(winner) {
+  const job = matchingWinnerJob(winner) || {};
+  const jobScan = getObject(job, ['scan', 'result']) || {};
+  const winnerScan = getObject(winner, ['scan', 'result']) || {};
+  const values = [
+    winner?.analysisSource,
+    winner?.source,
+    winnerScan?.analysisSource,
+    winnerScan?.source,
+    job?.analysisSource,
+    job?.source,
+    jobScan?.analysisSource,
+    jobScan?.source
+  ];
+  return values.some((value) => /(onchain|robinhood_rpc)/i.test(String(value || '')));
+}
+
+function winnerOnchainFallbackMessage(winner) {
+  const job = matchingWinnerJob(winner) || {};
+  const jobScan = getObject(job, ['scan', 'result']) || {};
+  const winnerScan = getObject(winner, ['scan', 'result']) || {};
+  const sources = [
+    winner?.analysisFallback,
+    winnerScan?.analysisFallback,
+    job?.analysisFallback,
+    jobScan?.analysisFallback,
+    winnerScan,
+    jobScan
+  ];
+  for (const source of sources) {
+    const holderError = firstValue(source, ['holderFallbackError']);
+    if (holderError) return `Blockscout Holder 快照不可用：${holderError}`;
+    const reason = firstValue(source, ['reason', 'fallbackReason']);
+    if (reason) return `DeBot 受限：${reason}`;
+  }
+  return '';
 }
 
 function aggregateHolderPipeline(data) {
@@ -2779,6 +2857,8 @@ function pipelineStage(source) {
 
 function pipelineStageLabel(stage) {
   const value = String(stage || '').toLowerCase();
+  if (value === 'stale') return '上次有效收益';
+  if (/(onchain|transaction|attribution|pool|block)/.test(value)) return '扫描链上交易';
   if (/(analy|profit)/.test(value)) return '核算地址收益';
   if (/(fetch|holder|candidate)/.test(value)) return '抓取持仓候选';
   if (/(complete|ready|eligible)/.test(value)) return 'Holder 分析完成';
@@ -2812,9 +2892,11 @@ function renderStatus(data) {
   const counts = aggregateHolderPipeline(data);
   const countMessage = hasPipelineCounts(counts) ? pipelineSummary(counts) : '';
   const stage = activePipelineStage(data);
-  const scanningTitle = /(fetch|holder|candidate)/.test(stage) && !/(analy|profit)/.test(stage)
-    ? '正在抓取持仓候选'
-    : '正在核算候选地址收益';
+  const scanningTitle = /(onchain|transaction|attribution|pool|block)/.test(stage)
+    ? '正在扫描链上交易'
+    : /(fetch|holder|candidate)/.test(stage) && !/(analy|profit)/.test(stage)
+      ? '正在抓取持仓候选'
+      : '正在核算候选地址收益';
   const minimumEntryUsd = readFilters().minEntryUsd;
   const messages = {
     ready: ['候选与地址库已就绪', warning || countMessage || '自动分析结果先进入待审核候选，确认后才进入地址库。'],
@@ -3536,9 +3618,19 @@ function renderWalletTable(wallets) {
 function winnerStatus(winner) {
   const stage = winnerPipelineStage(winner);
   const counts = winnerPipelineCounts(winner);
+  const onchainFallback = winnerUsesOnchainFallback(winner);
+  if (!winnerJobIsActive(winner) && winnerHasStaleHolderCache(winner)) {
+    return { tone: 'partial', label: '旧结果可用 · 重扫失败' };
+  }
   if (/(fail|error)/.test(stage)) return { tone: 'failed', label: 'Holder 分析失败' };
   if (/(partial|incomplete)/.test(stage)) return { tone: 'partial', label: 'Holder 数据部分可用' };
   if (/(queue|pending|running)/.test(stage)) return { tone: 'pending', label: '等待 Holder 分析' };
+  if (onchainFallback && /(onchain|transaction|attribution|pool|block)/.test(stage)) {
+    return { tone: 'pending', label: '正在扫描链上交易' };
+  }
+  if (onchainFallback && /(complete|ready|eligible)/.test(stage)) {
+    return { tone: 'qualified', label: '链上扫描完成' };
+  }
   if (/(analy|profit)/.test(stage)) return { tone: 'pending', label: '核算地址收益' };
   if (/(fetch|holder|candidate)/.test(stage)) return { tone: 'pending', label: '抓取持仓候选' };
   if (/(complete|ready|eligible)/.test(stage)) return { tone: 'qualified', label: 'Holder 分析完成' };
@@ -3549,7 +3641,7 @@ function winnerStatus(winner) {
   const scanStatus = String(firstValue(winner, ['scanStatus', 'status'], '')).toLowerCase();
   const taskStatus = String(firstValue(winner, ['qualificationStatus', 'status'], '')).toLowerCase();
   const combined = `${scanStatus} ${taskStatus}`;
-  if (scanStatus === 'complete') return { tone: 'qualified', label: '扫描完成' };
+  if (scanStatus === 'complete') return { tone: 'qualified', label: onchainFallback ? '链上扫描完成' : '扫描完成' };
   if (scanStatus.includes('partial')) return { tone: 'partial', label: '部分数据' };
   if (/(failed|error)/.test(scanStatus)) return { tone: 'failed', label: '扫描失败' };
   if (/(running|pending|queued|scanning)/.test(combined)) return { tone: 'pending', label: '扫描中' };
@@ -3582,6 +3674,13 @@ function renderWinnerTable(winners) {
           const status = winnerStatus(winner);
           const counts = winnerPipelineCounts(winner);
           const stage = winnerPipelineStage(winner);
+          const onchainFallback = winnerUsesOnchainFallback(winner);
+          const staleHolderCache = winnerHasStaleHolderCache(winner) && !winnerJobIsActive(winner);
+          const analyzedLabel = onchainFallback && /(complete|ready|eligible)/.test(stage)
+            ? '链上交易扫描完成'
+            : stage
+              ? pipelineStageLabel(stage)
+              : '收益地址';
           const minimumEntryUsd = finiteNumber(
             matchingWinnerJob(winner)?.minimumEntryUsd,
             winner?.holderAnalysis?.minimumEntryUsd,
@@ -3609,10 +3708,10 @@ function renderWinnerTable(winners) {
                 </button>
               </td>
               <td data-label="已抓取"><strong>${formatInteger(counts.fetched)}</strong><span>Holder 候选</span></td>
-              <td data-label="已核算"><strong>${formatInteger(counts.analyzed)}</strong><span>${escapeHtml(stage ? pipelineStageLabel(stage) : '收益地址')}</span></td>
+              <td data-label="已核算"><strong>${formatInteger(counts.analyzed)}</strong><span>${escapeHtml(analyzedLabel)}</span></td>
               <td data-label="可入库 / 过滤"><strong>${formatInteger(counts.eligible)}</strong><span>${formatInteger(counts.filtered)} 个 &lt; ${formatMoney(minimumEntryUsd)}</span></td>
               <td data-label="状态"><span class="status-badge ${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span></td>
-              <td data-label="提交 / 更新"><strong>手工提交</strong><span>${escapeHtml(formatDateTime(firstValue(winner, ['scannedAt', 'updatedAt', 'addedAt'])))}</span></td>
+              <td data-label="提交 / 更新"><strong>${staleHolderCache ? '缓存快照' : '手工提交'}</strong><span>${escapeHtml(formatDateTime(staleHolderCache ? winnerStaleHolderTimestamp(winner) : firstValue(winner, ['scannedAt', 'updatedAt', 'addedAt'])))}</span></td>
             </tr>
           `;
         }).join('')}
@@ -4103,12 +4202,29 @@ function renderWinnerDetail(winner) {
   const effectiveWallets = firstValue(winner, ['effectiveWallets', 'effectiveWalletCount']);
   const pipeline = winnerPipelineCounts(winner);
   const stage = winnerPipelineStage(winner);
+  const onchainFallback = winnerUsesOnchainFallback(winner);
+  const staleHolderCache = winnerHasStaleHolderCache(winner) && !winnerJobIsActive(winner);
+  const staleHolderError = staleHolderCache ? winnerStaleHolderError(winner) : '';
+  const staleHolderTimestamp = staleHolderCache ? winnerStaleHolderTimestamp(winner) : null;
+  const staleFailureTimestamp = staleHolderCache ? winnerStaleFailureTimestamp(winner) : null;
+  const onchainFallbackMessage = winnerOnchainFallbackMessage(winner);
+  const unreconciledWallets = finiteNumber(
+    matchingWinnerJob(winner)?.result?.failedWallets,
+    winner?.holderAnalysis?.failedWallets,
+    winner?.scan?.failedWallets
+  );
+  const analysisLabel = onchainFallback && /(complete|ready|eligible)/.test(stage)
+    ? '链上交易扫描完成'
+    : pipelineStageLabel(stage);
   const minimumEntryUsd = finiteNumber(
     matchingWinnerJob(winner)?.minimumEntryUsd,
     winner?.holderAnalysis?.minimumEntryUsd,
     winner?.minimumEntryUsd,
     currentMinimumEntryUsd()
   ) ?? 500;
+  const holderNotice = staleHolderCache
+    ? `<div class="liquidity-notice"><i data-lucide="triangle-alert" aria-hidden="true"></i><div><strong>正在显示上次有效 Holder 结果</strong><span>有效快照 ${escapeHtml(formatDateTime(staleHolderTimestamp))}；最新重扫失败 ${escapeHtml(formatDateTime(staleFailureTimestamp))}。原因：${escapeHtml(staleHolderError)}</span></div></div>`
+    : `<div class="liquidity-notice neutral"><i data-lucide="info" aria-hidden="true"></i><div><strong>${onchainFallback ? '链上 Holder 部分分析' : 'Holder-first 口径'}</strong><span>${onchainFallback ? `${onchainFallbackMessage ? `${onchainFallbackMessage}。` : ''}${formatInteger(effectiveWallets)} 个链上交易地址来自已验证池的 Swap 日志；仅当 Blockscout 当前持仓能与已观察买卖对账时才计算收益。未观察到的转账、外部转入和未观察池活动不会入库。` : provisional ? `正在抓取持仓候选并核算逐地址收益；累计买入低于 ${formatMoney(minimumEntryUsd)} 的地址不会进入监控。` : `${formatInteger(effectiveWallets)} 个有效交易地址作为补充候选，最终按总盈利进入排行榜。`}</span></div></div>`;
   const rescanning = winnerRescanActive(winner);
   const tokenExplorerUrl = explorerUrl('token', address);
   elements.detail.innerHTML = `
@@ -4132,7 +4248,7 @@ function renderWinnerDetail(winner) {
 
     <div class="detail-metric-grid winner-metrics">
       ${renderMetric('已抓取候选', formatInteger(pipeline.fetched), 'Holder / 交易地址')}
-      ${renderMetric('已核算收益', formatInteger(pipeline.analyzed), pipelineStageLabel(stage))}
+      ${renderMetric('已核算收益', formatInteger(pipeline.analyzed), analysisLabel)}
       ${renderMetric('符合入库', formatInteger(pipeline.eligible), '进入聪明地址库')}
       ${renderMetric(`${formatMoney(minimumEntryUsd)} 以下已过滤`, formatInteger(pipeline.filtered), '不监控小额买入')}
     </div>
@@ -4143,10 +4259,12 @@ function renderWinnerDetail(winner) {
         <div><dt>提交方式</dt><dd>手工提交</dd></div>
         <div><dt>链上扫描</dt><dd class="${status.tone === 'failed' ? 'negative' : ''}">${escapeHtml(status.label)}</dd></div>
         <div><dt>Holder 候选</dt><dd>${pipeline.fetched === null ? '待抓取' : `${formatInteger(pipeline.fetched)} 个`}</dd></div>
+        ${staleHolderCache ? `<div><dt>有效快照</dt><dd>${escapeHtml(formatDateTime(staleHolderTimestamp))}</dd></div><div><dt>最新重扫</dt><dd class="negative">${escapeHtml(formatDateTime(staleFailureTimestamp))} 失败</dd></div>` : ''}
+        ${onchainFallback && unreconciledWallets !== null ? `<div><dt>未能对账</dt><dd>${formatInteger(unreconciledWallets)} 个</dd></div>` : ''}
       </dl>
     </section>
 
-    <div class="liquidity-notice neutral"><i data-lucide="info" aria-hidden="true"></i><div><strong>Holder-first 口径</strong><span>${provisional ? `正在抓取持仓候选并核算逐地址收益；累计买入低于 ${formatMoney(minimumEntryUsd)} 的地址不会进入监控。` : `${formatInteger(effectiveWallets)} 个有效交易地址作为补充候选，最终按总盈利进入排行榜。`}</span></div></div>
+    ${holderNotice}
   `;
   refreshIcons(elements.detail);
 }
@@ -4230,6 +4348,7 @@ function syncToolbarVisibility() {
 function schedulePoll(data) {
   clearTimeout(state.pollTimer);
   state.pollTimer = null;
+  if (state.manualWinnerTracking) return;
   if (statusFromData(data) === 'scanning') {
     state.pollTimer = setTimeout(() => void loadData({ quiet: true }), 3500);
   } else if (state.activeTab === 'all_round' && elements.sort.value === 'buy_frequency') {
@@ -4333,54 +4452,243 @@ async function rescanWinner(address) {
   }
 }
 
+function setManualWinnerFeedback(message, tone = '') {
+  elements.manualFeedback.textContent = message;
+  elements.manualFeedback.className = 'field-feedback';
+  if (tone) elements.manualFeedback.classList.add(tone);
+}
+
+function manualWinnerJobAddress(job) {
+  return normalizeAddress(firstValue(job, ['tokenAddress', 'address', 'token'], ''));
+}
+
+function manualWinnerJobStatus(job) {
+  return String(firstValue(job, ['status', 'state'], '')).toLowerCase();
+}
+
+function manualWinnerJobOutcome(job) {
+  const status = manualWinnerJobStatus(job);
+  if (job?.cachedResult === true && ['failed', 'error', 'complete', 'completed', 'partial'].includes(status)) {
+    return 'cached';
+  }
+  if (['failed', 'error', 'cancelled', 'canceled'].includes(status)) return 'failed';
+  if (['complete', 'completed', 'success', 'succeeded', 'partial'].includes(status)) return 'complete';
+  return 'active';
+}
+
+function manualWinnerJobError(record) {
+  return String(firstValue(record.job || {}, [
+    'error', 'errorMessage', 'error_message', 'lastError', 'scanError', 'message'
+  ], '未知分析错误'));
+}
+
+function clearManualWinnerTracking({ releaseSubmit = true } = {}) {
+  clearTimeout(state.manualWinnerPollTimer);
+  state.manualWinnerPollTimer = null;
+  state.manualWinnerPollBusy = false;
+  state.manualWinnerTracking = null;
+  state.manualWinnerTrackingSequence += 1;
+  if (releaseSubmit) elements.manualForm.querySelector('button[type="submit"]').disabled = false;
+}
+
+function scheduleManualWinnerPoll(sequence, delay = MANUAL_WINNER_POLL_INTERVAL_MS) {
+  clearTimeout(state.manualWinnerPollTimer);
+  state.manualWinnerPollTimer = null;
+  if (state.manualWinnerTracking?.sequence !== sequence) return;
+  state.manualWinnerPollTimer = setTimeout(() => void pollManualWinnerJobs(sequence), delay);
+}
+
+function manualWinnerTrackingSnapshot(tracking) {
+  const failed = tracking.records.filter((record) => manualWinnerJobOutcome(record.job) === 'failed');
+  const cached = tracking.records.filter((record) => manualWinnerJobOutcome(record.job) === 'cached');
+  const complete = tracking.records.filter((record) => manualWinnerJobOutcome(record.job) === 'complete');
+  const active = tracking.records.filter((record) => manualWinnerJobOutcome(record.job) === 'active');
+  return { failed, cached, complete, active, terminal: active.length === 0 };
+}
+
+function syncManualWinnerTrackingJobs(tracking, jobs) {
+  for (const record of tracking.records) {
+    const current = jobs.find((job) => String(job.id || '') === record.jobId)
+      || jobs.find((job) => manualWinnerJobAddress(job) === record.address);
+    if (current) record.job = current;
+  }
+}
+
+function renderManualWinnerTracking(tracking, snapshot = manualWinnerTrackingSnapshot(tracking)) {
+  const total = tracking.records.length;
+  const submissionFailureCount = tracking.submissionErrors.length;
+  if (snapshot.terminal) {
+    const failures = [
+      ...snapshot.failed.map((record) => `${shortAddress(record.address)}：${manualWinnerJobError(record)}`),
+      ...tracking.submissionErrors
+    ];
+    const partial = snapshot.complete.filter((record) => record.job?.partial === true).length;
+    const parts = [
+      snapshot.complete.length ? `分析完成 ${snapshot.complete.length} 个${partial ? `（${partial} 个部分可用）` : ''}` : '',
+      snapshot.cached.length ? `重扫失败但保留旧结果 ${snapshot.cached.length} 个` : '',
+      failures.length ? `失败 ${failures.length} 个` : '',
+      tracking.duplicates ? `${tracking.duplicates} 个此前已存在` : ''
+    ].filter(Boolean);
+    setManualWinnerFeedback(
+      `${parts.join(' · ')}${failures.length ? `：${failures.join('；')}` : ''}`,
+      failures.length || snapshot.cached.length ? 'error' : 'success'
+    );
+    return;
+  }
+
+  const queued = snapshot.active.filter((record) => ['queued', 'pending', ''].includes(manualWinnerJobStatus(record.job))).length;
+  const analyzing = snapshot.active.length - queued;
+  const current = snapshot.active.find((record) => analyzing && !['queued', 'pending', ''].includes(manualWinnerJobStatus(record.job)))
+    || snapshot.active[0];
+  const counts = holderPipelineCounts(current?.job || {});
+  const progress = hasPipelineCounts(counts)
+    ? pipelineSummary(counts)
+    : jobProgress(current?.job ? [current.job] : []);
+  const stage = pipelineStage(current?.job || {});
+  const parts = [
+    queued ? `排队中 ${queued} 个` : '',
+    analyzing ? `正在分析 ${analyzing} 个` : '',
+    snapshot.complete.length ? `已完成 ${snapshot.complete.length}/${total}` : '',
+    snapshot.cached.length ? `保留旧结果 ${snapshot.cached.length}/${total}` : '',
+    snapshot.failed.length ? `已失败 ${snapshot.failed.length}/${total}` : '',
+    stage ? pipelineStageLabel(stage) : '',
+    progress,
+    submissionFailureCount ? `提交失败 ${submissionFailureCount} 个` : ''
+  ].filter(Boolean);
+  setManualWinnerFeedback(parts.join(' · '), snapshot.failed.length ? 'error' : '');
+}
+
+function beginManualWinnerTracking(context, records, { duplicates = 0, submissionErrors = [] } = {}) {
+  clearManualWinnerTracking({ releaseSubmit: false });
+  clearTimeout(state.pollTimer);
+  state.pollTimer = null;
+  const tracking = {
+    sequence: state.manualWinnerTrackingSequence,
+    context,
+    records,
+    duplicates,
+    submissionErrors
+  };
+  state.manualWinnerTracking = tracking;
+  renderManualWinnerTracking(tracking);
+  return tracking.sequence;
+}
+
 async function addManualWinner(event) {
   event.preventDefault();
   const context = captureChainRequestContext();
   const parts = elements.manualInput.value.split(/[\s,;，；]+/).map((value) => value.trim()).filter(Boolean);
   const addresses = [...new Set(parts.map(normalizeAddress).filter(Boolean))];
   const invalid = parts.filter((value) => !normalizeAddress(value));
-  elements.manualFeedback.className = 'field-feedback';
+  setManualWinnerFeedback('');
   if (!addresses.length || invalid.length) {
-    elements.manualFeedback.textContent = invalid.length
+    setManualWinnerFeedback(invalid.length
       ? `${invalid.length} 个 CA 格式不正确。`
       : activeChain().family === 'solana'
         ? '请输入完整的 Solana Base58 Mint 地址。'
-        : '请输入完整的 0x 开头、40 位十六进制 CA。';
-    elements.manualFeedback.classList.add('error');
+        : '请输入完整的 0x 开头、40 位十六进制 CA。', 'error');
     elements.manualInput.focus();
     return;
   }
   if (addresses.length > 20) {
-    elements.manualFeedback.textContent = '单次最多提交 20 个 CA。';
-    elements.manualFeedback.classList.add('error');
+    setManualWinnerFeedback('单次最多提交 20 个 CA。', 'error');
     return;
   }
   elements.minHits.value = '1';
   const minEntryUsd = syncMinimumEntryDisplay({ normalizeInput: true });
   const submit = elements.manualForm.querySelector('button[type="submit"]');
   submit.disabled = true;
-  elements.manualFeedback.textContent = `正在提交 ${addresses.length} 个 CA...`;
+  setManualWinnerFeedback(`正在提交 ${addresses.length} 个 CA...`);
   try {
     const settled = await Promise.allSettled(addresses.map((address) => fetchChainJson(context, '/winners', {
       method: 'POST',
       body: JSON.stringify({ address, minEntryUsd })
     })));
     requireCurrentChainRequest(context);
-    const accepted = settled.filter((result) => result.status === 'fulfilled' && !result.value.duplicate).length;
-    const duplicates = settled.filter((result) => result.status === 'fulfilled' && result.value.duplicate).length;
-    const failed = settled.length - accepted - duplicates;
-    elements.manualFeedback.textContent = `${accepted} 个已加入 · ${duplicates} 个已存在${failed ? ` · ${failed} 个失败` : ''}`;
-    elements.manualFeedback.classList.add('success');
+    const fulfilled = settled.flatMap((result, index) => result.status === 'fulfilled'
+      ? [{ address: addresses[index], result: result.value }]
+      : []);
+    const duplicates = fulfilled.filter(({ result }) => result.duplicate).length;
+    const submissionErrors = settled.flatMap((result, index) => result.status === 'rejected'
+      ? [`${shortAddress(addresses[index])}：${result.reason?.message || String(result.reason)}`]
+      : []);
+    const records = fulfilled
+      .filter(({ result }) => !result.duplicate || result.job)
+      .map(({ address, result }) => ({
+        address,
+        jobId: String(result.job?.id || `scan:${address}`),
+        job: result.job || { id: `scan:${address}`, tokenAddress: address, status: 'queued' }
+      }));
     elements.manualInput.value = '';
-    window.setTimeout(() => {
-      if (chainRequestIsCurrent(context)) void loadData({ quiet: true });
-    }, 350);
+    if (!records.length) {
+      const message = [
+        duplicates ? `${duplicates} 个此前已存在` : '',
+        submissionErrors.length ? `提交失败 ${submissionErrors.length} 个：${submissionErrors.join('；')}` : ''
+      ].filter(Boolean).join(' · ');
+      setManualWinnerFeedback(message, submissionErrors.length ? 'error' : 'success');
+      return;
+    }
+    const trackingSequence = beginManualWinnerTracking(context, records, { duplicates, submissionErrors });
+    await loadData({ quiet: true });
+    if (chainRequestIsCurrent(context) && state.manualWinnerTracking?.sequence === trackingSequence) {
+      const tracking = state.manualWinnerTracking;
+      syncManualWinnerTrackingJobs(tracking, state.data?.jobs || []);
+      const snapshot = manualWinnerTrackingSnapshot(tracking);
+      renderManualWinnerTracking(tracking, snapshot);
+      if (snapshot.terminal) {
+        clearManualWinnerTracking();
+      } else {
+        scheduleManualWinnerPoll(trackingSequence);
+      }
+    }
   } catch (error) {
     if (!chainRequestIsCurrent(context)) return;
-    elements.manualFeedback.textContent = `加入失败：${error.message}`;
-    elements.manualFeedback.classList.add('error');
+    clearManualWinnerTracking();
+    setManualWinnerFeedback(`加入失败：${error.message}`, 'error');
   } finally {
-    if (chainRequestIsCurrent(context)) submit.disabled = false;
+    if (chainRequestIsCurrent(context) && !state.manualWinnerTracking) submit.disabled = false;
+  }
+}
+
+async function pollManualWinnerJobs(sequence) {
+  const tracking = state.manualWinnerTracking;
+  if (!tracking || tracking.sequence !== sequence || !chainRequestIsCurrent(tracking.context)) return;
+  state.manualWinnerPollTimer = null;
+  if (state.manualWinnerPollBusy || state.loading) {
+    scheduleManualWinnerPoll(sequence);
+    return;
+  }
+
+  state.manualWinnerPollBusy = true;
+  try {
+    const payload = await fetchChainJson(tracking.context, '/jobs');
+    if (!chainRequestIsCurrent(tracking.context) || state.manualWinnerTracking?.sequence !== sequence) return;
+    if (payload.chain && String(payload.chain) !== tracking.context.chainId) {
+      throw new Error('分析状态所属链不匹配');
+    }
+    const jobs = getCollection(payload, ['jobs', 'scans', 'items']) || [];
+    syncManualWinnerTrackingJobs(tracking, jobs);
+    if (state.data) {
+      state.data = { ...state.data, jobs };
+      renderStatus(state.data);
+      renderResults();
+    }
+
+    const snapshot = manualWinnerTrackingSnapshot(tracking);
+    renderManualWinnerTracking(tracking, snapshot);
+    if (!snapshot.terminal) {
+      scheduleManualWinnerPoll(sequence);
+      return;
+    }
+
+    clearManualWinnerTracking();
+    if (chainRequestIsCurrent(tracking.context)) await loadData({ quiet: true });
+  } catch (error) {
+    if (!chainRequestIsCurrent(tracking.context) || state.manualWinnerTracking?.sequence !== sequence) return;
+    setManualWinnerFeedback(`分析状态读取失败，正在重试：${error.message}`, 'error');
+    scheduleManualWinnerPoll(sequence);
+  } finally {
+    state.manualWinnerPollBusy = false;
   }
 }
 
@@ -4753,6 +5061,7 @@ function syncChainUi() {
 
 function resetChainState() {
   stopMonitorTransport();
+  clearManualWinnerTracking();
   clearTimeout(state.pollTimer);
   clearTimeout(state.librarySearchTimer);
   state.pollTimer = null;

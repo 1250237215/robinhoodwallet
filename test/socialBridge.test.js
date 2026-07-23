@@ -7,6 +7,10 @@ import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 import { migrateLocalSettings } from '../bridge/debot-social-bridge/options-config.js';
+import {
+  ANALYSIS_RESULT_OUTBOX_LIMITS,
+  createAnalysisResultOutbox
+} from '../bridge/debot-social-bridge/analysis-result-outbox.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const bridgeDirectory = path.join(root, 'bridge', 'debot-social-bridge');
@@ -80,6 +84,7 @@ function jsonResponse(data) {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
+  assert.equal(manifest.version, '1.1.0');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -186,6 +191,85 @@ test('extension options migrate a local token once without exposing or overwriti
       throw new Error('must not send');
     }
   }), missing);
+});
+
+test('analysis result outbox durably deduplicates claims and removes only acknowledged results', async () => {
+  const stored = {};
+  const storage = {
+    async get(key) {
+      return { [key]: structuredClone(stored[key]) };
+    },
+    async set(value) {
+      Object.assign(stored, structuredClone(value));
+    }
+  };
+  const outbox = createAnalysisResultOutbox({ storage });
+  const first = await outbox.enqueue({
+    jobId: 7,
+    claimToken: 'claim-one',
+    success: true,
+    result: { chain: 'robinhood', wallet: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }
+  });
+  assert.equal(first.added, 1);
+  assert.equal((await outbox.enqueue({
+    jobId: 7,
+    claimToken: 'claim-one',
+    success: true,
+    result: { duplicate: true }
+  })).duplicates, 1);
+
+  await outbox.enqueue({
+    jobId: 7,
+    claimToken: 'claim-two',
+    success: false,
+    error: 'TIMEOUT',
+    errorType: 'TIMEOUT'
+  });
+  await outbox.enqueue({
+    jobId: 8,
+    claimToken: 'claim-three',
+    success: false,
+    error: 'NETWORK',
+    errorType: 'NETWORK'
+  });
+  const batch = await outbox.readBatch();
+  assert.deepEqual(batch.records.map((record) => record.payload.claimToken), ['claim-two', 'claim-three']);
+  assert.equal(batch.records[0].payload.errorType, 'TIMEOUT');
+  await outbox.acknowledge(batch.records[0].key);
+  assert.deepEqual((await outbox.readBatch()).records.map((record) => record.payload.jobId), [8]);
+  assert.deepEqual(ANALYSIS_RESULT_OUTBOX_LIMITS, {
+    maxRecords: 200,
+    maxBytes: 2 * 1024 * 1024,
+    defaultBatchLimit: 20
+  });
+
+  const overflowStored = {};
+  const overflowStorage = {
+    async get(key) {
+      return { [key]: structuredClone(overflowStored[key]) };
+    },
+    async set(value) {
+      Object.assign(overflowStored, structuredClone(value));
+    }
+  };
+  const tightOutbox = createAnalysisResultOutbox({ storage: overflowStorage, maxBytes: 1_024 });
+  assert.equal((await tightOutbox.enqueue({
+    jobId: 11,
+    claimToken: 'persisted-claim',
+    success: true,
+    result: { chain: 'robinhood', token: '0x1111111111111111111111111111111111111111' }
+  })).added, 1);
+  const overflow = await tightOutbox.enqueue({
+    jobId: 11,
+    claimToken: 'oversized-replacement',
+    success: true,
+    result: { payload: 'x'.repeat(2_048) }
+  });
+  assert.equal(overflow.overflow, 1);
+  assert.equal(overflow.queued, 1);
+  assert.deepEqual((await tightOutbox.readBatch()).records.map((record) => record.payload.claimToken), [
+    'persisted-claim'
+  ]);
 });
 
 test('DeBot page bridge polls while hidden, consumes the expected channels and uses the observed API payloads', async () => {
@@ -328,6 +412,9 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.requestId === 'page-partial-probe'
       && message.payload.ok === false
       && message.payload.errorType === 'DEBOT')));
+  const partialHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
+  assert.deepEqual(Array.from(partialHeartbeat.payload.capabilities), ['debot-analysis-v1']);
+  assert.equal(Object.hasOwn(partialHeartbeat.payload, 'error'), false);
   const partialDelivery = window.messages.find((message) =>
     message.type === 'posts'
       && message.payload.posts.some((post) => post.externalId === 'partial-poll-document'));
@@ -500,6 +587,290 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   assert.equal(JSON.stringify(errorHeartbeat).includes('must-not-leave-the-page'), false);
 });
 
+test('DeBot page bridge executes fixed analysis jobs with sanitized results and four-worker concurrency', async () => {
+  const window = new FakeWindow('https://debot.ai');
+  const calls = [];
+  const token = '0x1111111111111111111111111111111111111111';
+  const wallet = '0x2222222222222222222222222222222222222222';
+  const pairAddress = '0x3333333333333333333333333333333333333333';
+  let deferWalletJobs = false;
+  let tokenDetailMode = 'ok';
+  let walletAnalysisMode = 'ok';
+  let activeWalletRequests = 0;
+  let maximumActiveWalletRequests = 0;
+  const deferredWalletRequests = [];
+  const tokenDetail = {
+    token: {
+      meta: {
+        chain: 'robinhood',
+        address: token,
+        creator_address: wallet,
+        symbol: 'SAFE',
+        name: 'Safe Token',
+        decimals: 18,
+        creation_timestamp: 1_780_000_000,
+        cookie: 'analysis-cookie-must-not-leave'
+      },
+      social: {
+        logo_cache: 'https://cdn.example/token.png',
+        authorization: 'analysis-auth-must-not-leave'
+      }
+    },
+    pair: {
+      chain: 'robinhood',
+      tokenAddress: token,
+      tokenPairAddress: pairAddress,
+      tokenSymbol: 'SAFE',
+      market_cap: 123_456,
+      dex: { dex_name: 'Noxa', sub_token: 'analysis-session-must-not-leave' },
+      arbitraryRaw: { private: true }
+    },
+    market_metrics: { price: 0.001, mkt_cap: 123_456, holders: 789, unknown: 'drop-me' },
+    pools: {
+      list: [{
+        pair: pairAddress,
+        dex_name: 'Noxa',
+        liquidity: 50_000,
+        base_token: { symbol: 'WETH', address: wallet, cookie: 'drop-me' },
+        arbitraryRaw: true
+      }]
+    },
+    cookie: 'analysis-cookie-must-not-leave',
+    authorization: 'analysis-auth-must-not-leave',
+    sub_token: 'analysis-session-must-not-leave',
+    arbitraryRaw: { private: true }
+  };
+  const walletAnalysis = {
+    chain: 'robinhood',
+    wallet,
+    token,
+    buy_amount: '12.5',
+    realized_profit: '44.25',
+    profit_rate: '1.75',
+    first_funding: {
+      from: pairAddress,
+      tx_hash: '0xfeed',
+      cookie: 'analysis-cookie-must-not-leave'
+    },
+    cookie: 'analysis-cookie-must-not-leave',
+    authorization: 'analysis-auth-must-not-leave',
+    sub_token: 'analysis-session-must-not-leave',
+    arbitraryRaw: { private: true }
+  };
+
+  const fetchImpl = async (url, options = {}) => {
+    const requestUrl = String(url);
+    calls.push({ url: requestUrl, options });
+    if (requestUrl.startsWith('/api/social/subscribe/list?')) return jsonResponse({ list: [] });
+    if (requestUrl.startsWith('/api/social/twitter/')) return jsonResponse({ feeds: [] });
+    if (requestUrl === `/api/dashboard/token/detail?chain=robinhood&token=${token}`) {
+      if (tokenDetailMode === 'null') return jsonResponse(null);
+      if (tokenDetailMode === 'mismatch') {
+        return jsonResponse({
+          ...tokenDetail,
+          token: { ...tokenDetail.token, meta: { ...tokenDetail.token.meta, address: pairAddress } },
+          pair: { ...tokenDetail.pair, tokenAddress: pairAddress }
+        });
+      }
+      return jsonResponse(tokenDetail);
+    }
+    if (requestUrl === `/api/dex/profit/wallet_token_analysis?chain=robinhood&token=${token}&wallet=${wallet}`) {
+      if (walletAnalysisMode === 'array') return jsonResponse([]);
+      if (walletAnalysisMode === 'mismatch') return jsonResponse({ ...walletAnalysis, wallet: pairAddress });
+      if (!deferWalletJobs) return jsonResponse(walletAnalysis);
+      activeWalletRequests += 1;
+      maximumActiveWalletRequests = Math.max(maximumActiveWalletRequests, activeWalletRequests);
+      return new Promise((resolve) => {
+        deferredWalletRequests.push(() => {
+          activeWalletRequests -= 1;
+          resolve(jsonResponse(walletAnalysis));
+        });
+      });
+    }
+    throw new Error(`Unexpected DeBot endpoint: ${requestUrl}`);
+  };
+  vm.runInNewContext(bridgeSource('debot-page.js'), {
+    window,
+    document: { visibilityState: 'hidden' },
+    fetch: fetchImpl,
+    setInterval: () => 1,
+    setTimeout,
+    clearTimeout,
+    URLSearchParams,
+    URL,
+    console
+  }, { filename: 'debot-page.js' });
+
+  await eventually(() => assert.ok(window.messages.some((message) => message.type === 'heartbeat')));
+  window.messages.length = 0;
+  calls.length = 0;
+
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'analysis-job',
+    job: {
+      id: 101,
+      type: 'debot.token_detail.v1',
+      claimToken: 'token-claim',
+      payload: { chain: 'robinhood', token }
+    }
+  });
+  await eventually(() => assert.ok(window.messages.some((message) =>
+    message.type === 'analysis-result' && message.payload.jobId === 101)));
+  const tokenCall = calls.find((call) => call.url.startsWith('/api/dashboard/token/detail?'));
+  assert.equal(tokenCall.url, `/api/dashboard/token/detail?chain=robinhood&token=${token}`);
+  assert.equal(tokenCall.options.credentials, 'include');
+  assert.equal(tokenCall.options.method ?? 'GET', 'GET');
+  const tokenResult = window.messages.find((message) =>
+    message.type === 'analysis-result' && message.payload.jobId === 101);
+  assert.equal(tokenResult.payload.success, true);
+  assert.equal(tokenResult.payload.result.token.meta.address, token);
+  assert.equal(tokenResult.payload.result.pair.market_cap, 123_456);
+  assert.equal(/analysis-(?:cookie|auth|session)-must-not-leave/.test(JSON.stringify(tokenResult)), false);
+  assert.equal(JSON.stringify(tokenResult).includes('arbitraryRaw'), false);
+
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'analysis-job',
+    job: {
+      id: 102,
+      type: 'debot.wallet_token_analysis.v1',
+      claimToken: 'wallet-claim',
+      payload: { chain: 'robinhood', token, wallet }
+    }
+  });
+  await eventually(() => assert.ok(window.messages.some((message) =>
+    message.type === 'analysis-result' && message.payload.jobId === 102)));
+  const walletCall = calls.find((call) => call.url.startsWith('/api/dex/profit/wallet_token_analysis?'));
+  assert.equal(
+    walletCall.url,
+    `/api/dex/profit/wallet_token_analysis?chain=robinhood&token=${token}&wallet=${wallet}`
+  );
+  assert.equal(walletCall.options.credentials, 'include');
+  assert.equal(walletCall.options.method ?? 'GET', 'GET');
+  const walletResult = window.messages.find((message) =>
+    message.type === 'analysis-result' && message.payload.jobId === 102);
+  assert.equal(walletResult.payload.success, true);
+  assert.equal(walletResult.payload.result.realized_profit, 44.25);
+  assert.equal(/analysis-(?:cookie|auth|session)-must-not-leave/.test(JSON.stringify(walletResult)), false);
+  assert.equal(JSON.stringify(walletResult).includes('arbitraryRaw'), false);
+
+  tokenDetailMode = 'mismatch';
+  walletAnalysisMode = 'array';
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'analysis-job',
+    job: {
+      id: 105,
+      type: 'debot.token_detail.v1',
+      claimToken: 'mismatched-token-result',
+      payload: { chain: 'robinhood', token }
+    }
+  });
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'analysis-job',
+    job: {
+      id: 106,
+      type: 'debot.wallet_token_analysis.v1',
+      claimToken: 'array-wallet-result',
+      payload: { chain: 'robinhood', token, wallet }
+    }
+  });
+  await eventually(() => {
+    const failures = window.messages.filter((message) =>
+      message.type === 'analysis-result' && [105, 106].includes(message.payload.jobId));
+    assert.equal(failures.length, 2);
+    assert.equal(failures.every((message) => message.payload.errorType === 'DEBOT'), true);
+  });
+  tokenDetailMode = 'null';
+  walletAnalysisMode = 'mismatch';
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'analysis-job',
+    job: {
+      id: 107,
+      type: 'debot.token_detail.v1',
+      claimToken: 'null-token-result',
+      payload: { chain: 'robinhood', token }
+    }
+  });
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'analysis-job',
+    job: {
+      id: 108,
+      type: 'debot.wallet_token_analysis.v1',
+      claimToken: 'mismatched-wallet-result',
+      payload: { chain: 'robinhood', token, wallet }
+    }
+  });
+  await eventually(() => {
+    const failures = window.messages.filter((message) =>
+      message.type === 'analysis-result' && [107, 108].includes(message.payload.jobId));
+    assert.equal(failures.length, 2);
+    assert.equal(failures.every((message) => message.payload.errorType === 'DEBOT'), true);
+  });
+  tokenDetailMode = 'ok';
+  walletAnalysisMode = 'ok';
+
+  const analysisFetchCount = calls.filter((call) => !call.url.startsWith('/api/social/')).length;
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'analysis-job',
+    job: {
+      id: 103,
+      type: 'debot.token_detail.v1',
+      claimToken: 'invalid-chain',
+      payload: { chain: 'base', token }
+    }
+  });
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'analysis-job',
+    job: {
+      id: 104,
+      type: 'debot.wallet_token_analysis.v1',
+      claimToken: 'invalid-wallet',
+      payload: { chain: 'robinhood', token, wallet: '0x1234' }
+    }
+  });
+  await eventually(() => {
+    const failures = window.messages.filter((message) =>
+      message.type === 'analysis-result' && [103, 104].includes(message.payload.jobId));
+    assert.equal(failures.length, 2);
+    assert.equal(failures.every((message) => message.payload.errorType === 'INVALID_JOB'), true);
+  });
+  assert.equal(calls.filter((call) => !call.url.startsWith('/api/social/')).length, analysisFetchCount);
+
+  deferWalletJobs = true;
+  window.messages.length = 0;
+  for (let index = 0; index < 5; index += 1) {
+    window.dispatchMessage({
+      source: 'debot-social-relay',
+      type: 'analysis-job',
+      job: {
+        id: 200 + index,
+        type: 'debot.wallet_token_analysis.v1',
+        claimToken: `parallel-claim-${index}`,
+        payload: { chain: 'robinhood', token, wallet }
+      }
+    });
+  }
+  await eventually(() => assert.equal(deferredWalletRequests.length, 4));
+  assert.equal(activeWalletRequests, 4);
+  assert.equal(maximumActiveWalletRequests, 4);
+  assert.equal(window.messages.some((message) =>
+    message.type === 'analysis-result' && message.payload.jobId === 204), false);
+  deferredWalletRequests[0]();
+  await eventually(() => assert.equal(deferredWalletRequests.length, 5));
+  assert.equal(activeWalletRequests, 4);
+  assert.equal(maximumActiveWalletRequests, 4);
+  for (const resolveRequest of deferredWalletRequests.slice(1)) resolveRequest();
+  await eventually(() => assert.equal(window.messages.filter((message) =>
+    message.type === 'analysis-result' && message.payload.jobId >= 200 && message.payload.jobId <= 204).length, 5));
+});
+
 test('relay transports only supported page events and delivers claimed commands to the page world', async () => {
   const window = new FakeWindow('https://debot.ai');
   const runtimeMessages = [];
@@ -584,6 +955,104 @@ test('relay transports only supported page events and delivers claimed commands 
   assert.equal(runtimeMessages.length, before);
 });
 
+test('relay claims at most four analysis jobs, validates claim tokens and refills immediately', async () => {
+  const window = new FakeWindow('https://debot.ai');
+  const runtimeMessages = [];
+  const jobs = Array.from({ length: 5 }, (_, index) => ({
+    id: 300 + index,
+    type: 'debot.wallet_token_analysis.v1',
+    claimToken: `relay-claim-${index}`,
+    payload: {
+      chain: 'robinhood',
+      token: '0x1111111111111111111111111111111111111111',
+      wallet: '0x2222222222222222222222222222222222222222'
+    },
+    leaseExpiresAt: Date.now() + 60_000
+  }));
+  const staleJob = {
+    ...jobs[0],
+    id: 299,
+    claimToken: 'expired-relay-claim',
+    deadlineAt: Date.now() + 60_000,
+    leaseExpiresAt: Date.now() - 1
+  };
+  let claimCount = 0;
+  const chrome = {
+    runtime: {
+      id: 'extension-test-id',
+      async sendMessage(message) {
+        runtimeMessages.push(message);
+        if (message.type === 'poll-commands') return { ok: true, payload: { commands: [] } };
+        if (message.type === 'poll-analysis-jobs') {
+          claimCount += 1;
+          if (claimCount === 1) return { ok: true, payload: { jobs: [staleJob, ...jobs.slice(0, 4)] } };
+          if (claimCount === 2) return { ok: true, payload: { jobs: [jobs[4]] } };
+          return { ok: true, payload: { jobs: [] } };
+        }
+        if (message.type === 'analysis-result') return { ok: true, payload: { durable: true } };
+        return { ok: true, payload: {} };
+      },
+      onMessage: { addListener() {} }
+    }
+  };
+  vm.runInNewContext(bridgeSource('debot-relay.js'), {
+    window,
+    chrome,
+    setInterval: () => 1,
+    setTimeout,
+    clearTimeout
+  }, { filename: 'debot-relay.js' });
+
+  await eventually(() => assert.equal(window.messages.filter((message) => message.type === 'analysis-job').length, 4));
+  const firstClaim = runtimeMessages.find((message) => message.type === 'poll-analysis-jobs');
+  assert.equal(firstClaim.payload.limit, 4);
+  assert.equal(window.messages.some((message) => message.type === 'analysis-job' && message.job.id === staleJob.id), false);
+  assert.equal(window.messages.some((message) => message.type === 'analysis-job' && message.job.id === 304), false);
+
+  const resultCount = runtimeMessages.filter((message) => message.type === 'analysis-result').length;
+  window.dispatchMessage({
+    source: 'debot-social-page',
+    type: 'analysis-result',
+    payload: {
+      jobId: jobs[0].id,
+      claimToken: 'wrong-claim-token',
+      success: false,
+      result: null,
+      error: 'DEBOT',
+      errorType: 'DEBOT'
+    }
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(runtimeMessages.filter((message) => message.type === 'analysis-result').length, resultCount);
+
+  window.dispatchMessage({
+    source: 'debot-social-page',
+    type: 'analysis-result',
+    payload: {
+      jobId: jobs[0].id,
+      claimToken: jobs[0].claimToken,
+      success: true,
+      result: {
+        chain: 'robinhood',
+        token: jobs[0].payload.token,
+        wallet: jobs[0].payload.wallet,
+        realized_profit: 12
+      },
+      error: '',
+      errorType: ''
+    }
+  });
+  await eventually(() => assert.ok(runtimeMessages.some((message) =>
+    message.type === 'analysis-result'
+      && message.payload.jobId === jobs[0].id
+      && message.payload.claimToken === jobs[0].claimToken)));
+  await eventually(() => assert.ok(window.messages.some((message) =>
+    message.type === 'analysis-job' && message.job.id === jobs[4].id)));
+  const claims = runtimeMessages.filter((message) => message.type === 'poll-analysis-jobs');
+  assert.equal(claims.length >= 2, true);
+  assert.equal(claims[1].payload.limit, 1);
+});
+
 test('Radar content bridge announces readiness only when the extension has a configured token', async () => {
   const window = new FakeWindow('http://217.116.171.250');
   const runtimeMessages = [];
@@ -645,6 +1114,18 @@ test('background uses the bridge secret only as authorization and submits allowl
   let failPostRequests = false;
   let postResponseMode = 'ok';
   let resolveDeferredPost = null;
+  let failAnalysisResultRequests = false;
+  let analysisResultResponseStatus = 200;
+  const analysisJob = {
+    id: 901,
+    type: 'debot.token_detail.v1',
+    claimToken: 'background-claim',
+    payload: {
+      chain: 'robinhood',
+      token: '0x1111111111111111111111111111111111111111'
+    },
+    leaseExpiresAt: Date.now() + 60_000
+  };
   const previousChrome = globalThis.chrome;
   const previousFetch = globalThis.fetch;
   globalThis.chrome = {
@@ -734,14 +1215,21 @@ test('background uses the bridge secret only as authorization and submits allowl
     }
   };
   globalThis.fetch = async (url, options) => {
-    requests.push({ url: String(url), options });
-    const isPostRequest = /\/bridge\/posts$/.test(String(url));
+    const requestUrl = String(url);
+    requests.push({ url: requestUrl, options });
+    const isPostRequest = /\/bridge\/posts$/.test(requestUrl);
+    const isAnalysisClaimRequest = /\/bridge\/debot\/jobs\?limit=\d+$/.test(requestUrl);
+    const isAnalysisResultRequest = /\/bridge\/debot\/jobs\/\d+\/result$/.test(requestUrl);
     if (failPostRequests && isPostRequest) {
       throw new TypeError('temporary network failure');
     }
+    if (failAnalysisResultRequests && isAnalysisResultRequest) {
+      throw new TypeError('temporary analysis network failure');
+    }
+    const responseStatus = isAnalysisResultRequest ? analysisResultResponseStatus : 200;
     return {
-      ok: true,
-      status: 200,
+      ok: responseStatus >= 200 && responseStatus < 300,
+      status: responseStatus,
       async text() {
         if (isPostRequest && postResponseMode === 'negative') return JSON.stringify({ ok: false });
         if (isPostRequest && postResponseMode === 'invalid') return '<html>temporary proxy page</html>';
@@ -749,6 +1237,10 @@ test('background uses the bridge secret only as authorization and submits allowl
           return new Promise((resolve) => {
             resolveDeferredPost = () => resolve(JSON.stringify({ ok: true }));
           });
+        }
+        if (isAnalysisClaimRequest) return JSON.stringify({ ok: true, jobs: [analysisJob] });
+        if (isAnalysisResultRequest && responseStatus >= 400) {
+          return JSON.stringify({ error: 'analysis result is permanently invalid' });
         }
         return JSON.stringify({ ok: true, commands: [] });
       }
@@ -775,8 +1267,8 @@ test('background uses the bridge secret only as authorization and submits allowl
   startupListener();
   assert.equal(alarms.length, alarmCount + 2);
   assert.equal(alarms.slice(-2).every((alarm) => alarm.name === 'debot-social-bridge-recovery'), true);
-  const send = (message) => new Promise((resolve) => {
-    assert.equal(listener(message, {}, resolve), true);
+  const send = (message, sender = {}) => new Promise((resolve) => {
+    assert.equal(listener(message, sender, resolve), true);
   });
 
   const settings = await send({ source: 'bridge-options', type: 'get-settings' });
@@ -805,6 +1297,133 @@ test('background uses the bridge secret only as authorization and submits allowl
   assert.equal(insecureServer.ok, false);
   assert.match(insecureServer.error, /Robinhood Radar API/);
   assert.equal(saved.serverBase, 'https://radar.217-116-171-250.sslip.io/robinhood-radar/api/social');
+
+  fakeTabs[0].discarded = true;
+  fakeTabs.push({ id: 19, url: 'https://debot.ai/', pinned: false, discarded: false, status: 'complete' });
+  sessionSaved.debotSocialBridgeRecoveryV1 = {
+    managedTabId: 17,
+    createdAt: 0,
+    structuralFailures: 0,
+    lastReloadAt: 0,
+    reloadLevel: 0
+  };
+  const switchedManagedClaim = await send({
+    source: 'debot-social-relay',
+    type: 'poll-analysis-jobs',
+    payload: { limit: 1 }
+  }, { tab: { id: 19 } });
+  assert.equal(switchedManagedClaim.ok, true);
+  assert.equal(switchedManagedClaim.payload.jobs[0].id, analysisJob.id);
+  assert.equal(sessionSaved.debotSocialBridgeRecoveryV1.managedTabId, 19);
+  fakeTabs[0].discarded = false;
+  fakeTabs.splice(1);
+  sessionSaved.debotSocialBridgeRecoveryV1 = {
+    ...sessionSaved.debotSocialBridgeRecoveryV1,
+    managedTabId: 17
+  };
+
+  const claimRequestCount = requests.filter((request) => /\/bridge\/debot\/jobs\?limit=/.test(request.url)).length;
+  const unmanagedClaim = await send({
+    source: 'debot-social-relay',
+    type: 'poll-analysis-jobs',
+    payload: { limit: 99 }
+  }, { tab: { id: 999 } });
+  assert.equal(unmanagedClaim.ok, true);
+  assert.deepEqual(unmanagedClaim.payload, { ok: true, jobs: [], managed: false });
+  assert.equal(requests.filter((request) => /\/bridge\/debot\/jobs\?limit=/.test(request.url)).length, claimRequestCount);
+
+  const managedClaim = await send({
+    source: 'debot-social-relay',
+    type: 'poll-analysis-jobs',
+    payload: { limit: 99 }
+  }, { tab: { id: 17 } });
+  assert.equal(managedClaim.ok, true);
+  assert.equal(managedClaim.payload.jobs[0].id, analysisJob.id);
+  const claimRequest = requests.findLast((request) => /\/bridge\/debot\/jobs\?limit=/.test(request.url));
+  assert.match(claimRequest.url, /\/bridge\/debot\/jobs\?limit=4$/);
+
+  failAnalysisResultRequests = true;
+  const queuedAnalysis = await send({
+    source: 'debot-social-relay',
+    type: 'analysis-result',
+    payload: {
+      jobId: analysisJob.id,
+      claimToken: analysisJob.claimToken,
+      success: true,
+      result: {
+        token: {
+          meta: {
+            chain: 'robinhood',
+            address: analysisJob.payload.token,
+            symbol: 'SAFE',
+            cookie: 'analysis-cookie-must-not-leave'
+          },
+          social: {
+            logo_cache: 'https://cdn.example/token.png',
+            authorization: 'analysis-auth-must-not-leave'
+          }
+        },
+        pair: {
+          chain: 'robinhood',
+          tokenAddress: analysisJob.payload.token,
+          market_cap: 123_456,
+          raw: { sub_token: 'analysis-session-must-not-leave' }
+        },
+        market_metrics: { price: 0.001, arbitraryRaw: true },
+        pools: { list: [] },
+        cookie: 'analysis-cookie-must-not-leave',
+        authorization: 'analysis-auth-must-not-leave',
+        sub_token: 'analysis-session-must-not-leave',
+        arbitraryRaw: { private: true }
+      },
+      error: '',
+      errorType: ''
+    }
+  }, { tab: { id: 17 } });
+  assert.equal(queuedAnalysis.ok, true);
+  assert.equal(queuedAnalysis.payload.durable, true);
+  await eventually(() => assert.ok(requests.some((request) =>
+    /\/bridge\/debot\/jobs\/901\/result$/.test(request.url))));
+  await eventually(() => assert.equal(saved.debotAnalysisResultOutboxV1?.records?.length, 1));
+  const persistedAnalysis = JSON.stringify(saved.debotAnalysisResultOutboxV1);
+  assert.equal(/analysis-(?:cookie|auth|session)-must-not-leave/.test(persistedAnalysis), false);
+  assert.equal(persistedAnalysis.includes('arbitraryRaw'), false);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  failAnalysisResultRequests = false;
+  const resultRequestCount = requests.filter((request) => /\/bridge\/debot\/jobs\/901\/result$/.test(request.url)).length;
+  alarmListener({ name: 'debot-social-bridge-recovery' });
+  await eventually(() => assert.ok(requests.filter((request) =>
+    /\/bridge\/debot\/jobs\/901\/result$/.test(request.url)).length > resultRequestCount));
+  await eventually(() => assert.equal(saved.debotAnalysisResultOutboxV1?.records?.length, 0));
+  const resultUpload = requests.findLast((request) => /\/bridge\/debot\/jobs\/901\/result$/.test(request.url));
+  const resultBody = JSON.parse(resultUpload.options.body);
+  assert.deepEqual(Object.keys(resultBody).sort(), ['claimToken', 'error', 'errorType', 'result', 'success']);
+  assert.equal(resultBody.claimToken, analysisJob.claimToken);
+  assert.equal(resultBody.result.token.meta.address, analysisJob.payload.token);
+  assert.equal(/analysis-(?:cookie|auth|session)-must-not-leave/.test(resultUpload.options.body), false);
+  assert.equal(resultUpload.options.body.includes('arbitraryRaw'), false);
+
+  analysisResultResponseStatus = 400;
+  const invalidResultRequestCount = requests.filter((request) =>
+    /\/bridge\/debot\/jobs\/902\/result$/.test(request.url)).length;
+  const terminalAnalysis = await send({
+    source: 'debot-social-relay',
+    type: 'analysis-result',
+    payload: {
+      jobId: 902,
+      claimToken: 'permanently-invalid-claim',
+      success: false,
+      result: null,
+      error: 'DEBOT',
+      errorType: 'DEBOT'
+    }
+  }, { tab: { id: 17 } });
+  assert.equal(terminalAnalysis.ok, true);
+  assert.equal(terminalAnalysis.payload.durable, true);
+  await eventually(() => assert.ok(requests.filter((request) =>
+    /\/bridge\/debot\/jobs\/902\/result$/.test(request.url)).length > invalidResultRequestCount));
+  await eventually(() => assert.equal(saved.debotAnalysisResultOutboxV1?.records?.length, 0));
+  analysisResultResponseStatus = 200;
 
   await send({
     source: 'debot-social-relay',

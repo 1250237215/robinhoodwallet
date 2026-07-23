@@ -80,6 +80,49 @@ function action({ tokenAddress = tokenA, wallet = walletA, txHash = '0xabc', log
   };
 }
 
+function profitableHolderAnalysis({
+  address = walletA,
+  snapshotAt = '2026-07-09T10:00:00.000Z',
+  totalProfitUsd = 6_000,
+  totalMultiple = 12
+} = {}) {
+  return {
+    strategy: 'holder_first',
+    complete: true,
+    snapshotAt,
+    fetchedHolders: 1,
+    analyzedWallets: 1,
+    eligibleWallets: 1,
+    failedWallets: 0,
+    minimumEntryUsd: 0,
+    candidates: [{
+      address,
+      holderRank: 3,
+      holdingTokenAmount: 10_000,
+      holdingValueUsd: 12_000,
+      buyVolumeUsd: 500,
+      totalProfitUsd,
+      totalMultiple,
+      entryProgress: 0.05,
+      early: true,
+      eligible: true,
+      profitState: 'complete'
+    }]
+  };
+}
+
+function staleHolderAnalysisFixture() {
+  const holderAnalysis = profitableHolderAnalysis({ address: walletB });
+  return {
+    ...holderAnalysis,
+    stale: true,
+    cached: true,
+    staleAt: '2026-07-10T11:00:00.000Z',
+    staleError: 'DeBot request failed with HTTP 403',
+    cachedAt: holderAnalysis.snapshotAt
+  };
+}
+
 test('start and refresh are manual-only and never call DeBot discovery', async (t) => {
   let fetches = 0;
   const { service, store } = createService({
@@ -235,6 +278,276 @@ test('does not replace cached actions when a manual scan reports partial data', 
 
   assert.deepEqual(store.listActionsForToken(tokenA).map((row) => row.txHash), ['0xold']);
   assert.equal(store.getToken(tokenA).scanStatus, 'partial');
+});
+
+test('replaces actions when verified onchain scanning completed but Holder analysis remains partial', async (t) => {
+  const nextAction = action({ txHash: '0xverified-next', logIndex: 2 });
+  const { service, store } = createService({
+    scanToken: async () => ({
+      actions: [nextAction],
+      holderAnalysis: { complete: false, partial: true, candidates: [] },
+      scan: { complete: false, partial: true, onchainComplete: true, strategy: 'holder_first_onchain_fallback' }
+    })
+  });
+  t.after(() => store.close());
+  store.upsertToken({ address: tokenA, symbol: 'AAA', name: 'Alpha', manual: true });
+  store.replaceTokenActions(tokenA, [action({ txHash: '0xold', logIndex: 1 })]);
+
+  service.queueToken(store.getToken(tokenA), { force: true, manual: true });
+  await service.waitForIdle();
+
+  assert.deepEqual(store.listActionsForToken(tokenA).map((row) => row.txHash), ['0xverified-next']);
+  assert.equal(store.getToken(tokenA).scanStatus, 'partial');
+});
+
+test('keeps the last usable Holder snapshot when a rescan throws', async (t) => {
+  const previousHolderAnalysis = profitableHolderAnalysis();
+  const previousScannedAt = '2026-07-09T10:01:00.000Z';
+  const { service, store } = createService({
+    scanToken: async () => {
+      throw new Error('DeBot request failed with HTTP 403');
+    }
+  });
+  t.after(() => store.close());
+  store.upsertToken({
+    address: tokenA,
+    symbol: 'CACHE',
+    name: 'Cached winner',
+    manual: true,
+    scanStatus: 'complete',
+    scannedAt: previousScannedAt,
+    holderAnalysis: previousHolderAnalysis
+  });
+  await service.start();
+
+  service.rescanManualWinner(tokenA);
+  await service.waitForIdle();
+
+  const token = store.getToken(tokenA);
+  assert.equal(token.scanStatus, 'partial');
+  assert.equal(token.scannedAt, previousScannedAt);
+  assert.equal(token.scanFailedAt, '2026-07-10T12:00:00.000Z');
+  assert.equal(token.scanError, 'DeBot request failed with HTTP 403');
+  assert.equal(token.holderAnalysis.complete, true);
+  assert.equal(token.holderAnalysis.stale, true);
+  assert.equal(token.holderAnalysis.cached, true);
+  assert.equal(token.holderAnalysis.cachedAt, previousHolderAnalysis.snapshotAt);
+  assert.deepEqual(token.holderAnalysis.candidates, previousHolderAnalysis.candidates);
+  assert.deepEqual(store.listWalletSummaries().map((wallet) => wallet.address), [walletA]);
+
+  const job = store.listJobs().find((candidate) => candidate.id === `scan:${tokenA}`);
+  assert.equal(job.status, 'failed');
+  assert.equal(job.partial, true);
+  assert.equal(job.cachedResult, true);
+  assert.equal(job.cachedAt, previousHolderAnalysis.snapshotAt);
+
+  const dashboard = service.getDashboard({ tab: 'all' });
+  assert.equal(dashboard.status, 'stale');
+  assert.equal(dashboard.stale, true);
+  assert.equal(dashboard.warnings.some((warning) => warning.includes('上次有效 Holder 结果')), true);
+  assert.equal(dashboard.warnings.some((warning) => warning.includes('没有可用 Holder 缓存')), false);
+});
+
+test('keeps cached Holder profit while accepting verified actions from an unusable partial refresh', async (t) => {
+  const previousHolderAnalysis = profitableHolderAnalysis();
+  const previousScannedAt = '2026-07-09T10:01:00.000Z';
+  const failedHolderAnalysis = {
+    strategy: 'holder_first_onchain_fallback',
+    complete: false,
+    partial: true,
+    fetchedHolders: 100,
+    analyzedWallets: 0,
+    eligibleWallets: 0,
+    failedWallets: 100,
+    candidates: [{ address: walletB, profitState: 'failed', ignoredReason: 'profit_unavailable' }],
+    failures: [{ address: walletB, error: 'Current Holder balance does not reconcile' }]
+  };
+  const nextAction = action({ txHash: '0xverified-partial', logIndex: 4 });
+  const { service, store } = createService({
+    scanToken: async () => ({
+      tokenPatch: { symbol: 'UPDATED', holderAnalysis: failedHolderAnalysis },
+      holderAnalysis: failedHolderAnalysis,
+      actions: [nextAction],
+      scan: { complete: false, partial: true, onchainComplete: true }
+    })
+  });
+  t.after(() => store.close());
+  store.upsertToken({
+    address: tokenA,
+    symbol: 'CACHE',
+    name: 'Cached winner',
+    manual: true,
+    scanStatus: 'complete',
+    scannedAt: previousScannedAt,
+    holderAnalysis: previousHolderAnalysis
+  });
+  store.replaceTokenActions(tokenA, [action({ txHash: '0xold-action', logIndex: 1 })]);
+  await service.start();
+
+  service.rescanManualWinner(tokenA);
+  await service.waitForIdle();
+
+  const token = store.getToken(tokenA);
+  assert.equal(token.symbol, 'UPDATED');
+  assert.equal(token.scanStatus, 'partial');
+  assert.equal(token.scannedAt, previousScannedAt);
+  assert.equal(token.holderAnalysis.stale, true);
+  assert.deepEqual(token.holderAnalysis.candidates, previousHolderAnalysis.candidates);
+  assert.match(token.scanError, /does not reconcile/);
+  assert.deepEqual(store.listActionsForToken(tokenA).map((row) => row.txHash), ['0xverified-partial']);
+  assert.deepEqual(store.listWalletSummaries().map((wallet) => wallet.address), [walletA]);
+
+  const job = store.listJobs().find((candidate) => candidate.id === `scan:${tokenA}`);
+  assert.equal(job.status, 'complete');
+  assert.equal(job.partial, true);
+  assert.equal(job.cachedResult, true);
+  assert.match(job.error, /does not reconcile/);
+});
+
+test('start repairs failed tokens with cached Holder candidates without queueing scans', async (t) => {
+  let scans = 0;
+  const previousHolderAnalysis = profitableHolderAnalysis();
+  const { service, store } = createService({
+    scanToken: async () => {
+      scans += 1;
+      return { actions: [], scan: { complete: true } };
+    }
+  });
+  t.after(() => store.close());
+  store.upsertToken({
+    address: tokenA,
+    symbol: 'CACHE',
+    name: 'Cached winner',
+    manual: true,
+    scanStatus: 'failed',
+    scanError: 'DeBot request failed with HTTP 403',
+    scanFailedAt: '2026-07-10T11:00:00.000Z',
+    scannedAt: '2026-07-09T10:01:00.000Z',
+    holderAnalysis: previousHolderAnalysis
+  });
+  store.upsertJob({
+    id: `scan:${tokenA}`,
+    type: 'token_scan',
+    tokenAddress: tokenA,
+    status: 'failed',
+    failedAt: '2026-07-10T11:00:00.000Z',
+    error: 'DeBot request failed with HTTP 403',
+    updatedAt: Date.parse('2026-07-10T11:00:00.000Z') / 1000
+  });
+  store.upsertToken({
+    address: tokenB,
+    symbol: 'EMPTY',
+    name: 'No cache',
+    manual: true,
+    scanStatus: 'failed',
+    scanError: 'No supported pool',
+    scanFailedAt: '2026-07-10T11:05:00.000Z'
+  });
+
+  await service.start();
+  await service.start();
+
+  assert.equal(scans, 0);
+  assert.equal(service.queue.length, 0);
+  assert.equal(service.activeScans.size, 0);
+  const recovered = store.getToken(tokenA);
+  assert.equal(recovered.scanStatus, 'partial');
+  assert.equal(recovered.holderAnalysis.stale, true);
+  assert.equal(recovered.holderAnalysis.staleAt, '2026-07-10T11:00:00.000Z');
+  assert.equal(store.getToken(tokenB).scanStatus, 'failed');
+  const recoveredJob = store.listJobs().find((job) => job.id === `scan:${tokenA}`);
+  assert.equal(recoveredJob.status, 'failed');
+  assert.equal(recoveredJob.cachedResult, true);
+  assert.deepEqual(store.listWalletSummaries().map((wallet) => wallet.address), [walletA]);
+
+  const dashboard = service.getDashboard({ tab: 'all' });
+  assert.equal(dashboard.status, 'stale');
+  assert.equal(dashboard.warnings.some((warning) => warning.startsWith('1 个 CA 的最新重扫失败')), true);
+  assert.equal(dashboard.warnings.some((warning) => warning.startsWith('1 个 CA 分析失败且没有可用')), true);
+});
+
+test('duplicate failed and stale CAs requeue while a healthy duplicate stays idempotent', async (t) => {
+  const scanned = [];
+  const nextHolderAnalysis = profitableHolderAnalysis({ snapshotAt: '2026-07-10T12:00:00.000Z' });
+  const { service, store } = createService({
+    scanConcurrency: 1,
+    scanToken: async ({ token }) => {
+      scanned.push(token.address);
+      return {
+        tokenPatch: { holderAnalysis: nextHolderAnalysis },
+        holderAnalysis: nextHolderAnalysis,
+        actions: [],
+        scan: { complete: true }
+      };
+    }
+  });
+  t.after(() => store.close());
+  store.upsertToken({
+    address: tokenA,
+    symbol: 'FAILED',
+    name: 'Failed token',
+    manual: true,
+    scanStatus: 'failed'
+  });
+  store.upsertJob({
+    id: `scan:${tokenA}`,
+    type: 'token_scan',
+    tokenAddress: tokenA,
+    status: 'failed',
+    error: 'timeout'
+  });
+  store.upsertToken({
+    address: tokenB,
+    symbol: 'STALE',
+    name: 'Stale token',
+    manual: true,
+    scanStatus: 'partial',
+    holderAnalysis: staleHolderAnalysisFixture()
+  });
+  store.upsertJob({
+    id: `scan:${tokenB}`,
+    type: 'token_scan',
+    tokenAddress: tokenB,
+    status: 'failed',
+    cachedResult: true,
+    error: 'blocked'
+  });
+  store.upsertToken({
+    address: tokenC,
+    symbol: 'HEALTHY',
+    name: 'Healthy token',
+    manual: true,
+    scanStatus: 'complete',
+    holderAnalysis: profitableHolderAnalysis({ address: walletC })
+  });
+  store.upsertJob({
+    id: `scan:${tokenC}`,
+    type: 'token_scan',
+    tokenAddress: tokenC,
+    status: 'complete'
+  });
+  await service.start();
+
+  const failed = service.addManualWinner(tokenA);
+  const stale = service.addManualWinner(tokenB);
+  const healthy = service.addManualWinner(tokenC);
+  await service.waitForIdle();
+
+  assert.equal(failed.duplicate, true);
+  assert.equal(failed.accepted, true);
+  assert.equal(failed.requeued, true);
+  assert.equal(stale.duplicate, true);
+  assert.equal(stale.accepted, true);
+  assert.equal(stale.requeued, true);
+  assert.equal(healthy.duplicate, true);
+  assert.equal(healthy.accepted, false);
+  assert.equal(healthy.requeued, false);
+  assert.deepEqual(scanned, [tokenA, tokenB]);
+  const refreshed = store.getToken(tokenB);
+  assert.equal(refreshed.scanStatus, 'complete');
+  assert.equal(refreshed.holderAnalysis.stale, undefined);
+  assert.equal(refreshed.scanError, null);
+  assert.equal(refreshed.scanFailedAt, null);
 });
 
 test('seeds an empty cache with explicitly partial actions from a manual winner', async (t) => {
@@ -578,6 +891,55 @@ test('keeps successful holder candidates when another profit lookup makes the sc
   assert.equal(dashboard.status, 'partial');
   assert.equal(dashboard.winners[0].qualificationStatus, 'manual_partial');
   assert.equal(dashboard.warnings.some((warning) => warning.includes('1 个候选地址')), true);
+});
+
+test('keeps a complete cached Holder snapshot when a refresh only returns partial candidates', async (t) => {
+  const previousHolderAnalysis = profitableHolderAnalysis();
+  const partialHolderAnalysis = {
+    strategy: 'holder_first',
+    complete: false,
+    partial: true,
+    analyzedWallets: 2,
+    eligibleWallets: 1,
+    failedWallets: 1,
+    candidates: [{
+      address: walletB,
+      holderRank: 4,
+      holdingValueUsd: 2_000,
+      buyVolumeUsd: 600,
+      totalMultiple: 12,
+      profitState: 'complete',
+      eligible: true
+    }],
+    failures: [{ address: walletA, error: 'timeout' }]
+  };
+  const { service, store } = createService({
+    scanToken: async () => ({
+      holderAnalysis: partialHolderAnalysis,
+      scan: { complete: false, partial: true, failedWallets: 1 }
+    })
+  });
+  t.after(() => store.close());
+  store.upsertToken({
+    address: tokenA,
+    symbol: 'CACHE',
+    manual: true,
+    scanStatus: 'complete',
+    scannedAt: '2026-07-09T10:01:00.000Z',
+    holderAnalysis: previousHolderAnalysis
+  });
+  await service.start();
+
+  service.rescanManualWinner(tokenA);
+  await service.waitForIdle();
+
+  const refreshed = store.getToken(tokenA);
+  assert.equal(refreshed.scanStatus, 'partial');
+  assert.equal(refreshed.holderAnalysis.complete, true);
+  assert.equal(refreshed.holderAnalysis.stale, true);
+  assert.deepEqual(refreshed.holderAnalysis.candidates, previousHolderAnalysis.candidates);
+  assert.match(refreshed.scanError, /timeout/);
+  assert.deepEqual(store.listWalletSummaries().map((wallet) => wallet.address), [walletA]);
 });
 
 test('uses smart admission by default so dynamic 5x wallets are not hidden by the 10x display threshold', async (t) => {

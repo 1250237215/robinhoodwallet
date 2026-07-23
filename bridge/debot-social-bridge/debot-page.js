@@ -2,11 +2,16 @@
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
   const DEFAULT_TYPES = 'tweet|retweet|quote|reName|reImage|reDescription|delTweet|follow|unfollow|reply';
-  const API_TIMEOUT_MS = 12_000;
+  const API_TIMEOUT_MS = 20_000;
   const DELIVERY_TIMEOUT_MS = 20_000;
   const DELIVERY_RETRY_BASE_MS = 2_000;
   const DELIVERY_RETRY_MAX_MS = 30_000;
   const ERROR_TYPES = new Set(['AUTH', 'TIMEOUT', 'NETWORK', 'DEBOT']);
+  const ANALYSIS_JOB_TYPES = new Set(['debot.token_detail.v1', 'debot.wallet_token_analysis.v1']);
+  const ANALYSIS_CONCURRENCY = 4;
+  const ANALYSIS_QUEUE_LIMIT = 32;
+  const MAX_ANALYSIS_RESULT_BYTES = 256 * 1024;
+  const EVM_ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
   const seen = new Map();
   const pendingPosts = new Map();
   const pendingDeliveries = new Map();
@@ -15,6 +20,9 @@
   let deliverySequence = 0;
   let commandQueue = Promise.resolve();
   let cachedAccounts = [];
+  let activeAnalysisJobs = 0;
+  const analysisQueue = [];
+  const analysisKeys = new Set();
 
   function emit(type, payload) {
     window.postMessage({ source: PAGE_SOURCE, type, payload }, window.location.origin);
@@ -305,6 +313,306 @@
     return body.data ?? body;
   }
 
+  class AnalysisJobError extends Error {
+    constructor(errorType) {
+      super(errorType);
+      this.name = 'AnalysisJobError';
+      this.errorType = errorType;
+    }
+  }
+
+  function optionalNumber(value) {
+    if (value === null || value === undefined || value === '') return undefined;
+    const result = Number(value);
+    return Number.isFinite(result) ? result : undefined;
+  }
+
+  function compact(value) {
+    return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== ''));
+  }
+
+  function limitedText(value, maximum) {
+    return String(value ?? '').slice(0, maximum);
+  }
+
+  function utf8Bytes(value) {
+    let bytes = 0;
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      if (code < 0x80) bytes += 1;
+      else if (code < 0x800) bytes += 2;
+      else if (code >= 0xd800 && code <= 0xdbff
+        && value.charCodeAt(index + 1) >= 0xdc00
+        && value.charCodeAt(index + 1) <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else bytes += 3;
+    }
+    return bytes;
+  }
+
+  function normalizeEvmAddress(value) {
+    const address = String(value || '').trim().toLowerCase();
+    return EVM_ADDRESS_PATTERN.test(address) ? address : '';
+  }
+
+  function sanitizeTokenDetail(rawValue, payload) {
+    if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
+      throw new AnalysisJobError('DEBOT');
+    }
+    const raw = rawValue;
+    const token = raw.token && typeof raw.token === 'object' ? raw.token : {};
+    const meta = token.meta && typeof token.meta === 'object' ? token.meta : {};
+    const social = token.social && typeof token.social === 'object' ? token.social : {};
+    const pair = raw.pair && typeof raw.pair === 'object' ? raw.pair : {};
+    const dex = pair.dex && typeof pair.dex === 'object' ? pair.dex : {};
+    const market = raw.market_metrics && typeof raw.market_metrics === 'object' ? raw.market_metrics : {};
+    const explicitChains = [meta.chain, pair.chain]
+      .filter((value) => value !== null && value !== undefined && String(value).trim())
+      .map((value) => String(value).trim().toLowerCase());
+    const explicitAddresses = [meta.address, pair.tokenAddress]
+      .filter((value) => value !== null && value !== undefined && String(value).trim())
+      .map(normalizeEvmAddress);
+    if (!explicitAddresses.length
+      || explicitChains.some((chain) => chain !== payload.chain)
+      || explicitAddresses.some((address) => !address || address !== payload.token)) {
+      throw new AnalysisJobError('DEBOT');
+    }
+    const address = payload.token;
+    const pools = (Array.isArray(raw.pools?.list) ? raw.pools.list : []).slice(0, 32).map((entry) => {
+      const pool = entry && typeof entry === 'object' ? entry : {};
+      const baseToken = pool.base_token && typeof pool.base_token === 'object' ? pool.base_token : {};
+      return compact({
+        pair: normalizeEvmAddress(pool.pair),
+        dex_name: limitedText(pool.dex_name, 120),
+        contract: limitedText(pool.contract, 120),
+        liquidity: optionalNumber(pool.liquidity),
+        base_token: compact({
+          symbol: limitedText(baseToken.symbol, 120),
+          address: normalizeEvmAddress(baseToken.address)
+        })
+      });
+    });
+    return {
+      token: {
+        meta: compact({
+          chain: 'robinhood',
+          address,
+          creator_address: normalizeEvmAddress(meta.creator_address),
+          symbol: limitedText(meta.symbol, 120),
+          name: limitedText(meta.name, 500),
+          decimals: optionalNumber(meta.decimals),
+          logo: limitedText(meta.logo, 2_000),
+          creation_timestamp: optionalNumber(meta.creation_timestamp)
+        }),
+        social: compact({ logo_cache: limitedText(social.logo_cache, 2_000) })
+      },
+      pair: compact({
+        chain: 'robinhood',
+        tokenPairAddress: normalizeEvmAddress(pair.tokenPairAddress),
+        pair: normalizeEvmAddress(pair.pair),
+        tokenAddress: normalizeEvmAddress(pair.tokenAddress) || address,
+        tokenSymbol: limitedText(pair.tokenSymbol, 120),
+        tokenName: limitedText(pair.tokenName, 500),
+        decimals: optionalNumber(pair.decimals),
+        createTimestamp: optionalNumber(pair.createTimestamp),
+        price: optionalNumber(pair.price),
+        market_cap: optionalNumber(pair.market_cap),
+        liquidity: optionalNumber(pair.liquidity),
+        totalSupply: optionalNumber(pair.totalSupply),
+        lastUpdateTime: optionalNumber(pair.lastUpdateTime),
+        dex_name: limitedText(pair.dex_name, 120),
+        dex: compact({ dex_name: limitedText(dex.dex_name, 120) })
+      }),
+      market_metrics: compact({
+        price: optionalNumber(market.price),
+        mkt_cap: optionalNumber(market.mkt_cap),
+        fdv: optionalNumber(market.fdv),
+        total_liquidity: optionalNumber(market.total_liquidity),
+        liquidity: optionalNumber(market.liquidity),
+        holders: optionalNumber(market.holders),
+        update_time: optionalNumber(market.update_time)
+      }),
+      pools: { list: pools }
+    };
+  }
+
+  const WALLET_PROFIT_NUMERIC_FIELDS = [
+    'price',
+    'buy_amount',
+    'sell_amount',
+    'buy_volume',
+    'sell_volume',
+    'position',
+    'hold_amount',
+    'actual_buy_amount',
+    'balance',
+    'holding_value_usd',
+    'position_value_usd',
+    'balance_usd',
+    'avg_buy_price',
+    'actual_buy_cost',
+    'realized_profit',
+    'unrealized_profit',
+    'realized_profit_rate',
+    'unrealized_profit_rate',
+    'profit_rate',
+    'profit',
+    'avg_cost_price',
+    'buy_times',
+    'buy_count',
+    'sell_times',
+    'sell_count',
+    'fees_usd',
+    'tx_fees_usd',
+    'first_trade_time',
+    'last_trade_time',
+    'hold_duration'
+  ];
+
+  const FIRST_FUNDING_FIELDS = [
+    'from',
+    'from_address',
+    'fromAddress',
+    'source',
+    'source_address',
+    'address',
+    'wallet',
+    'first_tx_hash',
+    'tx_hash',
+    'txHash',
+    'transaction_hash',
+    'transactionHash',
+    'hash'
+  ];
+
+  function sanitizeWalletTokenAnalysis(rawValue, payload) {
+    if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
+      throw new AnalysisJobError('DEBOT');
+    }
+    const raw = rawValue;
+    const explicitChain = String(raw.chain || '').trim().toLowerCase();
+    const explicitWallet = normalizeEvmAddress(raw.wallet);
+    const explicitToken = normalizeEvmAddress(raw.token);
+    if (explicitChain !== payload.chain || explicitWallet !== payload.wallet || explicitToken !== payload.token) {
+      throw new AnalysisJobError('DEBOT');
+    }
+    const { wallet, token } = payload;
+    const result = { chain: 'robinhood', wallet, token };
+    for (const field of WALLET_PROFIT_NUMERIC_FIELDS) {
+      const parsed = optionalNumber(raw[field]);
+      if (parsed !== undefined) result[field] = parsed;
+    }
+    if (raw.first_funding && typeof raw.first_funding === 'object') {
+      result.first_funding = compact(Object.fromEntries(
+        FIRST_FUNDING_FIELDS.map((field) => [field, limitedText(raw.first_funding[field], 200)])
+      ));
+    }
+    return result;
+  }
+
+  function normalizeAnalysisJob(value) {
+    const job = value && typeof value === 'object' ? value : {};
+    const id = Number(job.id);
+    const claimToken = limitedText(job.claimToken, 240);
+    if (!Number.isSafeInteger(id) || id <= 0 || !claimToken) return null;
+    return {
+      id,
+      claimToken,
+      type: limitedText(job.type, 80),
+      payload: job.payload && typeof job.payload === 'object' ? job.payload : {}
+    };
+  }
+
+  function validatedAnalysisPayload(job) {
+    if (!ANALYSIS_JOB_TYPES.has(job.type)) throw new AnalysisJobError('INVALID_JOB');
+    const chain = String(job.payload.chain || '').trim().toLowerCase();
+    const token = normalizeEvmAddress(job.payload.token);
+    if (chain !== 'robinhood' || !token) throw new AnalysisJobError('INVALID_JOB');
+    if (job.type === 'debot.token_detail.v1') return { chain, token };
+    const wallet = normalizeEvmAddress(job.payload.wallet);
+    if (!wallet) throw new AnalysisJobError('INVALID_JOB');
+    return { chain, token, wallet };
+  }
+
+  async function executeAnalysisJob(job) {
+    const payload = validatedAnalysisPayload(job);
+    const params = new URLSearchParams({ chain: payload.chain, token: payload.token });
+    let result;
+    if (job.type === 'debot.token_detail.v1') {
+      result = sanitizeTokenDetail(await api(`dashboard/token/detail?${params}`), payload);
+    } else {
+      params.set('wallet', payload.wallet);
+      result = sanitizeWalletTokenAnalysis(
+        await api(`dex/profit/wallet_token_analysis?${params}`),
+        payload
+      );
+    }
+    if (utf8Bytes(JSON.stringify(result)) > MAX_ANALYSIS_RESULT_BYTES) {
+      throw new AnalysisJobError('RESULT_TOO_LARGE');
+    }
+    return result;
+  }
+
+  function analysisErrorType(error) {
+    if (['INVALID_JOB', 'RESULT_TOO_LARGE'].includes(error?.errorType)) return error.errorType;
+    return coarseErrorType(error);
+  }
+
+  function pumpAnalysisQueue() {
+    while (activeAnalysisJobs < ANALYSIS_CONCURRENCY && analysisQueue.length) {
+      const job = analysisQueue.shift();
+      const key = `${job.id}:${job.claimToken}`;
+      activeAnalysisJobs += 1;
+      void executeAnalysisJob(job).then((result) => {
+        emit('analysis-result', {
+          jobId: job.id,
+          claimToken: job.claimToken,
+          success: true,
+          result,
+          error: '',
+          errorType: ''
+        });
+      }).catch((error) => {
+        const errorType = analysisErrorType(error);
+        emit('analysis-result', {
+          jobId: job.id,
+          claimToken: job.claimToken,
+          success: false,
+          result: null,
+          error: errorType,
+          errorType
+        });
+      }).finally(() => {
+        activeAnalysisJobs -= 1;
+        analysisKeys.delete(key);
+        pumpAnalysisQueue();
+      });
+    }
+  }
+
+  function enqueueAnalysisJob(value) {
+    const job = normalizeAnalysisJob(value);
+    if (!job) return false;
+    const key = `${job.id}:${job.claimToken}`;
+    if (analysisKeys.has(key)) return false;
+    if (analysisQueue.length >= ANALYSIS_QUEUE_LIMIT) {
+      emit('analysis-result', {
+        jobId: job.id,
+        claimToken: job.claimToken,
+        success: false,
+        result: null,
+        error: 'INVALID_JOB',
+        errorType: 'INVALID_JOB'
+      });
+      return false;
+    }
+    analysisKeys.add(key);
+    analysisQueue.push(job);
+    pumpAnalysisQueue();
+    return true;
+  }
+
   function watchlistRows(data) {
     const rows = data?.list || data?.records || data?.items || data || [];
     return Array.isArray(rows) ? rows : [];
@@ -371,18 +679,19 @@
       }
       emit('heartbeat', {
         bridgeId: 'debot-browser-extension',
-        version: '1.0.0',
+        version: '1.1.0',
         sessionId: String(Date.now()),
-        capabilities: ['posts', 'watchlist', 'commands', 'debot-session']
+        capabilities: ['posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1']
       });
       return { ok: true, followUp };
     } catch (error) {
       const errorType = coarseErrorType(error);
+      const analysisUnavailable = errorType === 'AUTH';
       emit('heartbeat', {
         bridgeId: 'debot-browser-extension',
-        version: '1.0.0',
-        capabilities: ['error'],
-        error: errorType
+        version: '1.1.0',
+        capabilities: analysisUnavailable ? ['debot-analysis-v1', 'error'] : ['debot-analysis-v1'],
+        ...(analysisUnavailable ? { error: errorType } : {})
       });
       return { ok: false, errorType, followUp };
     }
@@ -499,6 +808,10 @@
       const deliveryId = String(message.payload?.deliveryId || '');
       if (deliveryId && message.payload?.ok === true) acknowledgeDelivery(deliveryId);
       else if (deliveryId) retryDelivery(deliveryId);
+      return;
+    }
+    if (message.type === 'analysis-job') {
+      enqueueAnalysisJob(message.job);
       return;
     }
     if (message.type !== 'command') return;

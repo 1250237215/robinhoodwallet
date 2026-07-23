@@ -68,10 +68,13 @@ Configuration is supplied through environment variables. Common settings are:
 | `ROBINHOOD_MONITOR_MARKET_DATA_BATCH_SIZE` | `30` | Maximum token addresses per DexScreener request |
 | `ROBINHOOD_NOXA_LAUNCH_FACTORY` | Official Robinhood Noxa factory | Noxa `TokenLaunched` event source |
 | `ROBINHOOD_REQUEST_TIMEOUT_MS` | `20000` | External request timeout |
+| `ROBINHOOD_DEBOT_BRIDGE_TIMEOUT_MS` | `90000` | Maximum wait for a signed-in browser to complete one allowlisted DeBot analysis request |
+| `ROBINHOOD_DEBOT_REQUEST_TIMEOUT_MS` | `95000` | Outer DeBot client timeout, kept above the browser-bridge deadline |
 | `SOCIAL_DATA_FILE` | Next to the Robinhood database | Independent DeBot social cache and command queue |
 | `SOCIAL_BRIDGE_TOKEN` | Empty | Private browser-bridge device token; keep it in `/etc/robinhood-radar/social.env` |
 | `SOCIAL_RETENTION_DAYS` | `7` | Social post and completed-command retention |
 | `SOCIAL_BRIDGE_OFFLINE_MS` | `90000` | Time without a browser heartbeat before the bridge is shown offline; allows for Chrome background-tab timer throttling |
+| `SOCIAL_DEBOT_JOB_LEASE_MS` | `120000` | Browser analysis claim lease; longer than the bridge deadline so hidden-tab throttling can recover |
 
 See `src/robinhood/config.js` for all bounded settings and defaults.
 

@@ -77,6 +77,30 @@ test('manual CA dock is always visible and supports validated batches of up to 2
   assert.match(appJs, /body: JSON\.stringify\(\{ address, minEntryUsd \}\)/);
 });
 
+test('manual CA submissions stay visible from queue through terminal analysis status', () => {
+  for (const field of [
+    'manualWinnerPollTimer: null',
+    'manualWinnerPollBusy: false',
+    'manualWinnerTracking: null',
+    'manualWinnerTrackingSequence: 0'
+  ]) {
+    assert.equal(appJs.includes(field), true, `missing manual winner tracking state: ${field}`);
+  }
+  assert.match(appJs, /function beginManualWinnerTracking\(context, records/);
+  assert.match(appJs, /setManualWinnerFeedback\(parts\.join\(' · '\), snapshot\.failed\.length \? 'error' : ''\)/);
+  assert.match(appJs, /`排队中 \$\{queued\} 个`/);
+  assert.match(appJs, /`正在分析 \$\{analyzing\} 个`/);
+  assert.match(appJs, /pipelineSummary\(counts\)/);
+  assert.match(appJs, /`分析完成 \$\{snapshot\.complete\.length\} 个/);
+  assert.match(appJs, /manualWinnerJobError\(record\)/);
+  assert.match(appJs, /fetchChainJson\(tracking\.context, '\/jobs'\)/);
+  assert.match(appJs, /if \(state\.manualWinnerPollBusy \|\| state\.loading\)/);
+  assert.match(appJs, /state\.manualWinnerPollTimer = setTimeout\(\(\) => void pollManualWinnerJobs\(sequence\), delay\)/);
+  assert.doesNotMatch(appJs, /setInterval\(\(\) => void pollManualWinnerJobs/);
+  assert.match(appJs, /if \(state\.manualWinnerTracking\?\.sequence !== sequence\) return/);
+  assert.match(appJs, /if \(state\.manualWinnerTracking\) return;\s+if \(statusFromData\(data\) === 'scanning'\)/);
+});
+
 test('the interface only presents user-submitted tokens and holder-profit progress', () => {
   for (const forbidden of ['自动发现', '预筛达标', '链上达标', '历史样本', '样本判定']) {
     assert.equal(indexHtml.includes(forbidden) || appJs.includes(forbidden), false, `unexpected discovery copy: ${forbidden}`);
@@ -98,6 +122,41 @@ test('holder-first queue reports fetched, analyzed, eligible and configured-floo
   assert.match(appJs, /winnerPipelineCounts\(winner\)/);
   assert.match(appJs, /matchingWinnerJob\(winner\)/);
   assert.match(appJs, /pipelineSummary\(pipeline\)/);
+});
+
+test('onchain fallback scans are labeled separately from Holder-first analysis', () => {
+  assert.match(appJs, /function winnerUsesOnchainFallback\(winner\)/);
+  assert.match(appJs, /\(onchain\|robinhood_rpc\)/i);
+  assert.match(appJs, /label: '正在扫描链上交易'/);
+  assert.match(appJs, /label: '链上扫描完成'/);
+  assert.match(appJs, /链上交易扫描完成/);
+  assert.match(appJs, /链上 Holder 部分分析/);
+  assert.match(appJs, /仅当 Blockscout 当前持仓能与已观察买卖对账时才计算收益/);
+  assert.match(appJs, /未观察到的转账、外部转入和未观察池活动不会入库/);
+  assert.match(appJs, /未能对账/);
+});
+
+test('failed refreshes keep usable Holder snapshots visibly distinct from hard failures', () => {
+  assert.match(appJs, /function winnerHasStaleHolderCache\(winner\)/);
+  assert.match(appJs, /function winnerJobIsActive\(winner\)/);
+  assert.match(appJs, /winnerHasStaleHolderCache\(winner\) && !winnerJobIsActive\(winner\)\) return snapshot/);
+  assert.match(appJs, /if \(winnerJobIsActive\(winner\)\) return pipelineStage\(job\) \|\| pipelineStage\(winner\)/);
+  assert.match(appJs, /if \(winnerHasStaleHolderCache\(winner\)\) return 'stale'/);
+  assert.match(appJs, /label: '旧结果可用 · 重扫失败'/);
+  assert.match(appJs, /正在显示上次有效 Holder 结果/);
+  assert.match(appJs, /有效快照/);
+  assert.match(appJs, /最新重扫失败/);
+  assert.match(appJs, /winnerStaleHolderError\(winner\)/);
+  assert.match(appJs, /staleHolderCache \? '缓存快照' : '手工提交'/);
+});
+
+test('cached terminal scans remain reviewable and submission feedback reports the retained result', () => {
+  assert.match(appJs, /return status === 'complete' \|\| job\?\.cachedResult === true/);
+  assert.match(appJs, /'completedAt', 'failedAt', 'finishedAt', 'updatedAt'/);
+  assert.match(appJs, /job\?\.cachedResult === true && \['failed', 'error', 'complete', 'completed', 'partial'\]\.includes\(status\)/);
+  assert.match(appJs, /return 'cached'/);
+  assert.match(appJs, /`重扫失败但保留旧结果 \$\{snapshot\.cached\.length\} 个`/);
+  assert.match(appJs, /`保留旧结果 \$\{snapshot\.cached\.length\}\/\$\{total\}`/);
 });
 
 test('gold-dog queue hides wallet filters and restores them for wallet tabs', () => {
@@ -698,6 +757,7 @@ test('switching chains closes live transport, clears chain data, and invalidates
   );
   for (const operation of [
     'stopMonitorTransport();',
+    'clearManualWinnerTracking();',
     'state.requestSequence += 1;',
     'state.detailSequence += 1;',
     'state.data = null;',

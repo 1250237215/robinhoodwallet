@@ -70,6 +70,72 @@ function uniqueStrings(values) {
   return [...new Set(values.filter(Boolean).map(String))];
 }
 
+function holderCandidates(holderAnalysis) {
+  return Array.isArray(holderAnalysis?.candidates) ? holderAnalysis.candidates : [];
+}
+
+function usableHolderCandidate(candidate) {
+  if (!candidate || typeof candidate !== 'object') return false;
+  if (candidate.profitState && candidate.profitState !== 'complete') return false;
+  if (candidate.profitState === 'complete' || candidate.eligible === true) return true;
+  return finiteNumber(
+    candidate.totalProfitUsd,
+    candidate.realizedProfitUsd,
+    candidate.unrealizedProfitUsd,
+    candidate.totalMultiple
+  ) !== null;
+}
+
+function hasUsableHolderAnalysis(holderAnalysis) {
+  return holderCandidates(holderAnalysis).some(usableHolderCandidate);
+}
+
+function holderAnalysisError(holderAnalysis, scan, fallback = 'Holder analysis did not return usable results') {
+  const failure = Array.isArray(holderAnalysis?.failures)
+    ? holderAnalysis.failures.find((candidate) => candidate?.error)
+    : null;
+  return String(
+    holderAnalysis?.error ||
+    scan?.holderFallbackError ||
+    failure?.error ||
+    scan?.error ||
+    scan?.fallbackReason ||
+    fallback
+  );
+}
+
+function holderCacheTimestamp(token, job = null) {
+  return token?.holderAnalysis?.snapshotAt || token?.scannedAt || job?.completedAt || null;
+}
+
+function staleHolderAnalysis(holderAnalysis, { failedAt, error, cachedAt } = {}) {
+  return {
+    ...holderAnalysis,
+    stale: true,
+    cached: true,
+    staleAt: failedAt || null,
+    staleError: String(error || 'Holder refresh failed'),
+    cachedAt: cachedAt || holderAnalysis?.snapshotAt || null
+  };
+}
+
+function freshHolderAnalysis(holderAnalysis) {
+  if (!holderAnalysis || typeof holderAnalysis !== 'object') return holderAnalysis;
+  const {
+    stale: _stale,
+    cached: _cached,
+    staleAt: _staleAt,
+    staleError: _staleError,
+    cachedAt: _cachedAt,
+    ...fresh
+  } = holderAnalysis;
+  return fresh;
+}
+
+function hasStaleHolderCache(token) {
+  return token?.holderAnalysis?.stale === true && hasUsableHolderAnalysis(token.holderAnalysis);
+}
+
 function normalizedTags(values) {
   if (!Array.isArray(values)) return [];
   const seen = new Set();
@@ -399,7 +465,9 @@ function isoFromUnknown(value) {
 function latestTokenTimestamp(tokens) {
   let latest = null;
   for (const token of tokens) {
-    const candidate = isoFromUnknown(token.scannedAt || token.updatedAt || token.discoveredAt);
+    const candidate = isoFromUnknown(
+      token.scannedAt || token.holderAnalysis?.snapshotAt || token.updatedAt || token.discoveredAt
+    );
     if (candidate && (!latest || candidate > latest)) latest = candidate;
   }
   return latest;
@@ -511,6 +579,7 @@ export class RobinhoodService {
   start() {
     if (!this.started && !this.closed) {
       this.started = true;
+      this.#recoverFailedHolderCaches();
       this.#rebuildWalletSummaries();
     }
     return Promise.resolve({
@@ -633,10 +702,10 @@ export class RobinhoodService {
       });
 
       const scanComplete = result?.scan?.complete === true;
+      const onchainComplete = result?.scan?.onchainComplete === true;
       const cachedActions = this.store.listActionsForToken(token.address);
       const canSeedPartial = !scanComplete && cachedActions.length === 0;
-      const actionsReplaced = Array.isArray(result?.actions) && (scanComplete || canSeedPartial);
-      const holderAnalysisUpdated = Boolean(result?.holderAnalysis || result?.tokenPatch?.holderAnalysis);
+      const actionsReplaced = Array.isArray(result?.actions) && (scanComplete || onchainComplete || canSeedPartial);
       if (actionsReplaced) {
         this.store.replaceTokenActions(token.address, result.actions);
       }
@@ -644,17 +713,52 @@ export class RobinhoodService {
       const completedAt = nowIso(this.now);
       const latest = this.store.getToken(token.address) || token;
       const tokenPatch = result?.tokenPatch || result?.token || result?.winner || {};
+      const previousHolderAnalysis = latest.holderAnalysis;
+      const nextHolderAnalysis = result?.holderAnalysis || tokenPatch.holderAnalysis || null;
+      const cachedHolderAnalysisUsable = hasUsableHolderAnalysis(previousHolderAnalysis);
+      const refreshedHolderAnalysisUsable = hasUsableHolderAnalysis(nextHolderAnalysis);
+      const preserveCompleteHolderSnapshot = cachedHolderAnalysisUsable &&
+        previousHolderAnalysis?.complete === true &&
+        nextHolderAnalysis?.complete !== true;
+      const useCachedHolderAnalysis = cachedHolderAnalysisUsable && (
+        preserveCompleteHolderSnapshot ||
+        (!refreshedHolderAnalysisUsable && (
+          !scanComplete ||
+          previousHolderAnalysis?.stale === true ||
+          Boolean(nextHolderAnalysis && nextHolderAnalysis.complete !== true)
+        ))
+      );
+      const refreshError = useCachedHolderAnalysis
+        ? holderAnalysisError(
+            nextHolderAnalysis,
+            result?.scan,
+            preserveCompleteHolderSnapshot
+              ? 'New Holder analysis was partial; retained the last complete snapshot'
+              : 'Holder analysis did not return usable results'
+          )
+        : null;
+      const cachedAt = useCachedHolderAnalysis ? holderCacheTimestamp(latest) : null;
+      const storedHolderAnalysis = useCachedHolderAnalysis
+        ? staleHolderAnalysis(previousHolderAnalysis, {
+            failedAt: completedAt,
+            error: refreshError,
+            cachedAt
+          })
+        : freshHolderAnalysis(nextHolderAnalysis);
+      const holderAnalysisUpdated = Boolean(storedHolderAnalysis);
       this.store.upsertToken({
         ...latest,
         ...tokenPatch,
         ...(result?.qualification || {}),
+        ...(storedHolderAnalysis ? { holderAnalysis: storedHolderAnalysis } : {}),
         address: token.address,
         pool: result?.pool || tokenPatch.pool || latest.pool || null,
         qualification: result?.qualification || latest.qualification || null,
         scan: result?.scan || null,
-        scanStatus: scanComplete ? 'complete' : 'partial',
-        scanError: null,
-        scannedAt: completedAt,
+        scanStatus: scanComplete && !useCachedHolderAnalysis ? 'complete' : 'partial',
+        scanError: refreshError,
+        scanFailedAt: useCachedHolderAnalysis ? completedAt : null,
+        ...(useCachedHolderAnalysis ? {} : { scannedAt: completedAt }),
         updatedAt: unixSeconds(this.now)
       });
       if (actionsReplaced || holderAnalysisUpdated) this.#rebuildWalletSummaries();
@@ -663,7 +767,10 @@ export class RobinhoodService {
         status: 'complete',
         startedAt,
         completedAt,
-        partial: !scanComplete,
+        partial: !scanComplete || useCachedHolderAnalysis,
+        cachedResult: useCachedHolderAnalysis,
+        cachedAt,
+        error: refreshError,
         result: result?.scan || null,
         updatedAt: unixSeconds(this.now)
       });
@@ -671,10 +778,21 @@ export class RobinhoodService {
       const failedAt = nowIso(this.now);
       const message = errorMessage(error);
       const latest = this.store.getToken(token.address) || token;
+      const cachedResult = hasUsableHolderAnalysis(latest.holderAnalysis);
+      const cachedAt = cachedResult ? holderCacheTimestamp(latest) : null;
       this.store.upsertToken({
         ...latest,
         address: token.address,
-        scanStatus: 'failed',
+        ...(cachedResult
+          ? {
+              holderAnalysis: staleHolderAnalysis(latest.holderAnalysis, {
+                failedAt,
+                error: message,
+                cachedAt
+              })
+            }
+          : {}),
+        scanStatus: cachedResult ? 'partial' : 'failed',
         scanError: message,
         scanFailedAt: failedAt,
         updatedAt: unixSeconds(this.now)
@@ -686,8 +804,39 @@ export class RobinhoodService {
         failedAt,
         error: message,
         retryable: true,
+        partial: cachedResult,
+        cachedResult,
+        cachedAt,
         updatedAt: unixSeconds(this.now)
       });
+    }
+  }
+
+  #recoverFailedHolderCaches() {
+    const jobs = new Map(this.store.listJobs().map((job) => [job.id, job]));
+    for (const token of this.store.listTokens()) {
+      if (token.manual !== true || token.scanStatus !== 'failed' || !hasUsableHolderAnalysis(token.holderAnalysis)) {
+        continue;
+      }
+      const job = jobs.get(`scan:${this.normalizeAddress(token.address)}`) || null;
+      const failedAt = token.scanFailedAt || job?.failedAt || nowIso(this.now);
+      const message = String(token.scanError || job?.error || 'Latest Holder refresh failed');
+      const cachedAt = holderCacheTimestamp(token, job);
+      this.store.upsertToken({
+        ...token,
+        scanStatus: 'partial',
+        scanError: message,
+        scanFailedAt: failedAt,
+        holderAnalysis: staleHolderAnalysis(token.holderAnalysis, { failedAt, error: message, cachedAt })
+      });
+      if (job?.status === 'failed') {
+        this.store.upsertJob({
+          ...job,
+          partial: true,
+          cachedResult: true,
+          cachedAt
+        });
+      }
     }
   }
 
@@ -742,17 +891,20 @@ export class RobinhoodService {
     const jobs = this.store.listJobs().filter((job) => !['discovery', 'wallet_history'].includes(job.type));
     const lastSuccess =
       [latestTokenTimestamp(tokens), latestWalletAnnotationTimestamp(annotations)].filter(Boolean).sort().at(-1) || null;
-    const lastError = '';
     const running = jobs.some((job) => job.status === 'queued' || job.status === 'running');
     const pending = winners.some((winner) => ['pending', 'manual_pending'].includes(winner.qualificationStatus));
-    const failedScans = jobs.filter((job) => job.type === 'token_scan' && job.status === 'failed').length;
+    const staleCachedTokens = tokens.filter(hasStaleHolderCache);
+    const hardFailedTokens = tokens.filter((token) =>
+      token.scanStatus === 'failed' && !hasUsableHolderAnalysis(token.holderAnalysis)
+    );
+    const failedScans = hardFailedTokens.length;
     const failedHolderWallets = tokens.reduce(
       (sum, token) => sum + Math.max(0, finiteNumber(token.holderAnalysis?.failedWallets) ?? 0),
       0
     );
-    const partial = pending || failedScans > 0 ||
+    const partial = pending || failedScans > 0 || staleCachedTokens.length > 0 ||
       winners.some((winner) => winner.scanStatus === 'partial');
-    const stale = Boolean(lastError);
+    const stale = staleCachedTokens.length > 0;
     let status = 'ready';
     if (running || this.refreshPromise) status = 'scanning';
     else if (stale && tokens.length) status = 'stale';
@@ -761,7 +913,10 @@ export class RobinhoodService {
     else if (partial) status = 'partial';
 
     const warnings = uniqueStrings([
-      failedScans ? `${failedScans} 个代币的链上扫描失败，可稍后重试` : '',
+      staleCachedTokens.length
+        ? `${staleCachedTokens.length} 个 CA 的最新重扫失败，正在继续显示上次有效 Holder 结果`
+        : '',
+      failedScans ? `${failedScans} 个 CA 分析失败且没有可用 Holder 缓存，可稍后重试` : '',
       failedHolderWallets ? `${failedHolderWallets} 个候选地址的 DeBot 收益分析失败，可重扫补全` : '',
       tokens.length && winners.every((winner) => winner.qualificationStatus.includes('pending'))
         ? '手工提交的金狗正在补全链上倍数、流动性和有效地址数据'
@@ -1114,16 +1269,36 @@ export class RobinhoodService {
     this.store.upsertToken(token);
     const duplicate = Boolean(existing?.manual);
     const existingJob = this.store.listJobs().find((candidate) => candidate.id === `scan:${normalized}`) || null;
-    const job = duplicate
-      ? existingJob
-      : this.queueToken(token, { manual: true, force: existing?.scanStatus === 'complete', minEntryUsd });
+    const alreadyRunning = this.queuedAddresses.has(normalized) || this.activeScans.has(normalized);
+    const retryableDuplicate = duplicate && (
+      existing?.scanStatus === 'failed' ||
+      hasStaleHolderCache(existing) ||
+      existingJob?.cachedResult === true
+    );
+    const shouldQueue = !duplicate || retryableDuplicate;
+    const job = shouldQueue
+      ? this.queueToken(token, {
+          manual: true,
+          force: retryableDuplicate || existing?.scanStatus === 'complete',
+          minEntryUsd
+        })
+      : existingJob;
+    const accepted = shouldQueue && !alreadyRunning && this.queuedAddresses.has(normalized);
     const filters = normalizedFilters({}, {
       multiple: this.config.defaultWinnerMultiple,
       minLiquidityUsd: this.config.minLiquidityUsd,
       minWallets: this.config.minEffectiveWallets,
       tab: DEFAULT_FILTERS.tab
     });
-    return { ok: true, duplicate, winner: qualifyToken(token, filters), job };
+    return {
+      ok: true,
+      duplicate,
+      accepted,
+      alreadyRunning,
+      requeued: duplicate && accepted,
+      winner: qualifyToken(token, filters),
+      job
+    };
   }
 
   rescanManualWinner(address, { minEntryUsd } = {}) {

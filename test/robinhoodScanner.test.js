@@ -205,6 +205,8 @@ test('scans a verified pool into transaction-attributed economic actions', async
   });
 
   assert.equal(result.scan.complete, true);
+  assert.equal(result.scan.historyComplete, true);
+  assert.equal(result.scan.historyStartSource, 'pool_creation');
   assert.equal(result.pool.verified, true);
   assert.deepEqual(result.pool.reserves, { target: 1_000_000, quote: 100 });
   assert.equal(result.pool.currentPriceNative, 0.0001);

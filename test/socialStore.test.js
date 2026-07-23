@@ -27,18 +27,29 @@ function fixture(t, initialNow = Date.parse('2026-07-17T12:00:00Z')) {
 
 test('social config uses an independent database and bounded bridge settings', () => {
   assert.equal(createSocialConfig({}).bridgeOfflineMs, 90_000);
+  assert.equal(createSocialConfig({}).debotJobLeaseMs, 120_000);
   const config = createSocialConfig({
     SOCIAL_DATA_FILE: '/tmp/independent-social.sqlite',
     SOCIAL_BRIDGE_TOKEN: ' device-secret ',
     SOCIAL_RETENTION_DAYS: '14',
     SOCIAL_BRIDGE_OFFLINE_MS: '25000',
-    SOCIAL_COMMAND_LEASE_MS: '45000'
+    SOCIAL_COMMAND_LEASE_MS: '45000',
+    SOCIAL_DEBOT_JOB_LEASE_MS: '95000',
+    SOCIAL_DEBOT_REQUEST_TIMEOUT_MS: '35000',
+    SOCIAL_DEBOT_TOKEN_CACHE_TTL_MS: '65000',
+    SOCIAL_DEBOT_WALLET_CACHE_TTL_MS: '32000',
+    SOCIAL_DEBOT_PENDING_CAP: '300'
   });
   assert.equal(config.dataFile, '/tmp/independent-social.sqlite');
   assert.equal(config.bridgeToken, 'device-secret');
   assert.equal(config.retentionDays, 14);
   assert.equal(config.bridgeOfflineMs, 25_000);
   assert.equal(config.commandLeaseMs, 45_000);
+  assert.equal(config.debotJobLeaseMs, 95_000);
+  assert.equal(config.debotRequestTimeoutMs, 35_000);
+  assert.equal(config.debotTokenCacheTtlMs, 65_000);
+  assert.equal(config.debotWalletCacheTtlMs, 32_000);
+  assert.equal(config.debotPendingCap, 300);
 });
 
 test('social feed sources normalize aliases, flags, ordering and missing values', () => {
@@ -264,6 +275,83 @@ test('remote snapshots do not overwrite a newer pending local watchlist intent',
   const failedAdd = store.listWatchlist({ includeRemoved: true }).find((entry) => entry.handle === 'bob');
   assert.equal(failedAdd.desiredState, 'active');
   assert.equal(failedAdd.syncStatus, 'failed');
+});
+
+test('DeBot jobs dedupe inflight work, rotate expired leases and cache successful results', (t) => {
+  const initialNow = Date.parse('2026-07-17T12:00:00Z');
+  const { store, setNow } = fixture(t, initialNow);
+  const input = {
+    requestKey: 'token-detail-key',
+    type: 'debot.token_detail.v1',
+    payload: {
+      chain: 'robinhood',
+      token: '0x1111111111111111111111111111111111111111'
+    },
+    deadlineAt: initialNow + 180_000,
+    cacheTtlMs: 60_000,
+    pendingCap: 256
+  };
+  const created = store.enqueueDeBotJob(input);
+  assert.equal(created.state, 'created');
+  assert.equal(store.enqueueDeBotJob(input).state, 'inflight');
+
+  const firstClaim = store.claimDeBotJobs({
+    limit: 4,
+    leaseMs: 90_000,
+    createClaimToken: () => 'first-claim-token'
+  });
+  assert.equal(firstClaim.length, 1);
+  assert.equal(firstClaim[0].claimToken, 'first-claim-token');
+  assert.deepEqual(store.claimDeBotJobs({
+    createClaimToken: () => 'unused-claim-token'
+  }), []);
+  assert.equal(store.acknowledgeDeBotJob(firstClaim[0].id, {
+    claimToken: 'wrong-token',
+    success: true,
+    result: { data: {} }
+  }).state, 'claim_mismatch');
+
+  setNow(initialNow + 91_000);
+  const reclaimed = store.claimDeBotJobs({
+    leaseMs: 90_000,
+    createClaimToken: () => 'second-claim-token'
+  });
+  assert.equal(reclaimed.length, 1);
+  assert.equal(reclaimed[0].attempts, 2);
+  assert.equal(reclaimed[0].claimToken, 'second-claim-token');
+  assert.equal(store.acknowledgeDeBotJob(reclaimed[0].id, {
+    claimToken: reclaimed[0].claimToken,
+    success: true,
+    result: { schema: 'debot.token_detail.raw.v1', data: { token: { symbol: 'TEST' } } }
+  }).state, 'completed');
+  assert.equal(store.getCachedDeBotResult(input.requestKey).result.data.token.symbol, 'TEST');
+
+  setNow(initialNow + 152_000);
+  assert.equal(store.getCachedDeBotResult(input.requestKey), null);
+});
+
+test('DeBot jobs enforce the independent pending cap and remove old terminal records', (t) => {
+  const initialNow = Date.parse('2026-07-17T12:00:00Z');
+  const { store, setNow } = fixture(t, initialNow);
+  const enqueue = (requestKey, token) => store.enqueueDeBotJob({
+    requestKey,
+    type: 'debot.token_detail.v1',
+    payload: { chain: 'robinhood', token },
+    deadlineAt: initialNow + 30_000,
+    cacheTtlMs: 0,
+    pendingCap: 1
+  });
+  assert.equal(enqueue('first', '0x1111111111111111111111111111111111111111').state, 'created');
+  assert.equal(enqueue('second', '0x2222222222222222222222222222222222222222').state, 'full');
+
+  setNow(initialNow + 31_000);
+  assert.deepEqual(store.claimDeBotJobs({
+    createClaimToken: () => 'unused-expired-token'
+  }), []);
+  setNow(initialNow + 120_000);
+  const cleanup = store.cleanup({ retentionDays: 7, debotTerminalRetentionMs: 60_000 });
+  assert.equal(cleanup.debotJobsDeleted, 1);
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM debot_bridge_jobs').get().count, 0);
 });
 
 test('retention removes only posts and terminal queue history older than the configured window', (t) => {

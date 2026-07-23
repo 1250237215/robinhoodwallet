@@ -100,6 +100,29 @@ function commandFromRow(row) {
   };
 }
 
+function debotJobFromRow(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    requestKey: row.request_key,
+    type: row.job_type,
+    payload: parseJson(row.payload_json, {}),
+    status: row.status,
+    attempts: Number(row.attempts || 0),
+    claimToken: row.claim_token,
+    result: parseJson(row.result_json, null),
+    errorCode: row.error_code,
+    errorMessage: row.error_message,
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+    deadlineAt: Number(row.deadline_at),
+    claimedAt: row.claimed_at === null ? null : Number(row.claimed_at),
+    leaseExpiresAt: row.lease_expires_at === null ? null : Number(row.lease_expires_at),
+    completedAt: row.completed_at === null ? null : Number(row.completed_at),
+    cacheExpiresAt: row.cache_expires_at === null ? null : Number(row.cache_expires_at)
+  };
+}
+
 function changeFromRow(row) {
   if (!row) return null;
   return {
@@ -253,6 +276,32 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       last_seen_at INTEGER,
       updated_at INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS debot_bridge_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_key TEXT NOT NULL,
+      job_type TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      claim_token TEXT NOT NULL DEFAULT '',
+      result_json TEXT,
+      error_code TEXT NOT NULL DEFAULT '',
+      error_message TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      deadline_at INTEGER NOT NULL,
+      claimed_at INTEGER,
+      lease_expires_at INTEGER,
+      completed_at INTEGER,
+      cache_expires_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS debot_bridge_jobs_queue_idx
+      ON debot_bridge_jobs(status, id);
+    CREATE INDEX IF NOT EXISTS debot_bridge_jobs_request_idx
+      ON debot_bridge_jobs(request_key, status, id DESC);
+    CREATE INDEX IF NOT EXISTS debot_bridge_jobs_cache_idx
+      ON debot_bridge_jobs(request_key, cache_expires_at DESC);
   `);
 
   const socialPostColumns = new Set(db.prepare('PRAGMA table_info(social_posts)').all().map((column) => column.name));
@@ -699,6 +748,185 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         return commandFromRow(db.prepare('SELECT * FROM social_commands WHERE id = ?').get(numericId));
       });
     },
+    getDeBotJob(id) {
+      const numericId = Number(id);
+      if (!Number.isSafeInteger(numericId) || numericId < 1) throw new TypeError('Invalid DeBot job id');
+      return debotJobFromRow(db.prepare('SELECT * FROM debot_bridge_jobs WHERE id = ?').get(numericId));
+    },
+    getCachedDeBotResult(requestKey) {
+      const key = String(requestKey || '');
+      if (!key) throw new TypeError('A DeBot request key is required');
+      const timestamp = now();
+      const row = db.prepare(`
+        SELECT * FROM debot_bridge_jobs
+        WHERE request_key = ? AND status = 'completed' AND cache_expires_at > ?
+        ORDER BY cache_expires_at DESC, id DESC
+        LIMIT 1
+      `).get(key, timestamp);
+      return debotJobFromRow(row);
+    },
+    enqueueDeBotJob({
+      requestKey,
+      type,
+      payload,
+      deadlineAt,
+      cacheTtlMs,
+      pendingCap = 256
+    } = {}) {
+      const key = String(requestKey || '');
+      if (!key) throw new TypeError('A DeBot request key is required');
+      const jobType = String(type || '');
+      if (!jobType) throw new TypeError('A DeBot job type is required');
+      const deadline = Number(deadlineAt);
+      if (!Number.isSafeInteger(deadline)) throw new TypeError('A valid DeBot deadline is required');
+      const ttl = Math.max(0, Math.floor(Number(cacheTtlMs) || 0));
+      const cap = Math.max(1, Math.floor(Number(pendingCap) || 256));
+      const timestamp = now();
+      return transaction(db, () => {
+        db.prepare(`
+          UPDATE debot_bridge_jobs
+          SET status = 'expired', completed_at = ?, updated_at = ?, claim_token = '',
+              error_code = 'DEADLINE', error_message = 'DeBot bridge request expired'
+          WHERE status IN ('pending', 'claimed') AND deadline_at <= ?
+        `).run(timestamp, timestamp, timestamp);
+
+        const cached = db.prepare(`
+          SELECT * FROM debot_bridge_jobs
+          WHERE request_key = ? AND status = 'completed' AND cache_expires_at > ?
+          ORDER BY cache_expires_at DESC, id DESC
+          LIMIT 1
+        `).get(key, timestamp);
+        if (cached) return { state: 'cached', job: debotJobFromRow(cached) };
+
+        const inflight = db.prepare(`
+          SELECT * FROM debot_bridge_jobs
+          WHERE request_key = ? AND status IN ('pending', 'claimed') AND deadline_at > ?
+          ORDER BY id DESC
+          LIMIT 1
+        `).get(key, timestamp);
+        if (inflight) {
+          if (deadline > Number(inflight.deadline_at) || ttl > Number(inflight.cache_expires_at || 0)) {
+            db.prepare(`
+              UPDATE debot_bridge_jobs
+              SET deadline_at = MAX(deadline_at, ?), cache_expires_at = MAX(cache_expires_at, ?), updated_at = ?
+              WHERE id = ?
+            `).run(deadline, ttl, timestamp, inflight.id);
+          }
+          return {
+            state: 'inflight',
+            job: debotJobFromRow(db.prepare('SELECT * FROM debot_bridge_jobs WHERE id = ?').get(inflight.id))
+          };
+        }
+
+        const pending = Number(db.prepare(`
+          SELECT COUNT(*) AS count FROM debot_bridge_jobs WHERE status IN ('pending', 'claimed')
+        `).get().count || 0);
+        if (pending >= cap) return { state: 'full', job: null };
+
+        const result = db.prepare(`
+          INSERT INTO debot_bridge_jobs(
+            request_key, job_type, payload_json, status, created_at, updated_at,
+            deadline_at, cache_expires_at
+          ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)
+        `).run(key, jobType, json(payload), timestamp, timestamp, deadline, ttl);
+        const job = debotJobFromRow(
+          db.prepare('SELECT * FROM debot_bridge_jobs WHERE id = ?').get(Number(result.lastInsertRowid))
+        );
+        return { state: 'created', job };
+      });
+    },
+    claimDeBotJobs({ limit = 4, leaseMs = 120_000, createClaimToken } = {}) {
+      if (typeof createClaimToken !== 'function') throw new TypeError('A DeBot claim-token factory is required');
+      const timestamp = now();
+      const boundedLimit = Math.min(32, Math.max(1, Math.floor(Number(limit) || 4)));
+      const lease = Math.max(1_000, Math.floor(Number(leaseMs) || 120_000));
+      return transaction(db, () => {
+        db.prepare(`
+          UPDATE debot_bridge_jobs
+          SET status = 'expired', completed_at = ?, updated_at = ?, claim_token = '',
+              error_code = 'DEADLINE', error_message = 'DeBot bridge request expired'
+          WHERE status IN ('pending', 'claimed') AND deadline_at <= ?
+        `).run(timestamp, timestamp, timestamp);
+        db.prepare(`
+          UPDATE debot_bridge_jobs
+          SET status = 'pending', claimed_at = NULL, lease_expires_at = NULL,
+              claim_token = '', updated_at = ?
+          WHERE status = 'claimed' AND lease_expires_at <= ? AND deadline_at > ?
+        `).run(timestamp, timestamp, timestamp);
+        const rows = db.prepare(`
+          SELECT * FROM debot_bridge_jobs
+          WHERE status = 'pending' AND deadline_at > ?
+          ORDER BY id
+          LIMIT ?
+        `).all(timestamp, boundedLimit);
+        const claimed = [];
+        const claim = db.prepare(`
+          UPDATE debot_bridge_jobs
+          SET status = 'claimed', attempts = attempts + 1, claim_token = ?, claimed_at = ?,
+              lease_expires_at = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending'
+        `);
+        for (const row of rows) {
+          const claimToken = String(createClaimToken() || '');
+          if (!claimToken || claimToken.length > 240) throw new TypeError('Invalid DeBot claim token');
+          const result = claim.run(claimToken, timestamp, timestamp + lease, timestamp, row.id);
+          if (Number(result.changes) > 0) {
+            claimed.push(debotJobFromRow(db.prepare('SELECT * FROM debot_bridge_jobs WHERE id = ?').get(row.id)));
+          }
+        }
+        return claimed;
+      });
+    },
+    acknowledgeDeBotJob(id, {
+      claimToken,
+      success,
+      result = null,
+      errorCode = '',
+      errorMessage = ''
+    } = {}) {
+      const numericId = Number(id);
+      if (!Number.isSafeInteger(numericId) || numericId < 1) throw new TypeError('Invalid DeBot job id');
+      if (typeof success !== 'boolean') throw new TypeError('success must be a boolean');
+      const token = String(claimToken || '');
+      if (!token) throw new TypeError('A DeBot claim token is required');
+      const timestamp = now();
+      return transaction(db, () => {
+        const row = db.prepare('SELECT * FROM debot_bridge_jobs WHERE id = ?').get(numericId);
+        if (!row) return { state: 'not_found', job: null };
+        if (row.claim_token !== token) return { state: 'claim_mismatch', job: debotJobFromRow(row) };
+        if (['completed', 'failed'].includes(row.status)) {
+          return { state: 'terminal', job: debotJobFromRow(row) };
+        }
+        if (
+          row.status !== 'claimed' ||
+          Number(row.lease_expires_at || 0) <= timestamp ||
+          Number(row.deadline_at) <= timestamp
+        ) {
+          return { state: 'claim_expired', job: debotJobFromRow(row) };
+        }
+        const cacheTtlMs = Math.max(0, Number(row.cache_expires_at || 0));
+        db.prepare(`
+          UPDATE debot_bridge_jobs SET
+            status = ?, result_json = ?, error_code = ?, error_message = ?, completed_at = ?,
+            cache_expires_at = ?, updated_at = ?
+          WHERE id = ? AND status = 'claimed' AND claim_token = ?
+        `).run(
+          success ? 'completed' : 'failed',
+          success ? json(result) : null,
+          success ? '' : String(errorCode || 'DEBOT').slice(0, 80),
+          success ? '' : String(errorMessage || 'DeBot browser bridge request failed').slice(0, 240),
+          timestamp,
+          success && cacheTtlMs > 0 ? timestamp + cacheTtlMs : null,
+          timestamp,
+          numericId,
+          token
+        );
+        return {
+          state: success ? 'completed' : 'failed',
+          job: debotJobFromRow(db.prepare('SELECT * FROM debot_bridge_jobs WHERE id = ?').get(numericId))
+        };
+      });
+    },
     reconcileRemoteWatchlist(inputs) {
       if (!Array.isArray(inputs)) throw new TypeError('accounts must be an array');
       const timestamp = now();
@@ -823,9 +1051,10 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         pendingCommands: Number(commands.pending || 0)
       };
     },
-    cleanup({ retentionDays = 7 } = {}) {
+    cleanup({ retentionDays = 7, debotTerminalRetentionMs = 60 * 60 * 1_000 } = {}) {
       const timestamp = now();
       const cutoff = timestamp - Math.max(1, Number(retentionDays) || 7) * 24 * 60 * 60 * 1_000;
+      const debotCutoff = timestamp - Math.max(60_000, Number(debotTerminalRetentionMs) || 60 * 60 * 1_000);
       return transaction(db, () => {
         const posts = db.prepare('DELETE FROM social_posts WHERE published_at < ? AND updated_at < ?').run(cutoff, cutoff);
         const changes = db.prepare('DELETE FROM social_changes WHERE created_at < ?').run(cutoff);
@@ -833,11 +1062,24 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
           DELETE FROM social_commands
           WHERE completed_at < ? AND status IN ('completed', 'failed', 'cancelled')
         `).run(cutoff);
+        db.prepare(`
+          UPDATE debot_bridge_jobs
+          SET status = 'expired', completed_at = ?, updated_at = ?, claim_token = '',
+              error_code = 'DEADLINE', error_message = 'DeBot bridge request expired'
+          WHERE status IN ('pending', 'claimed') AND deadline_at <= ?
+        `).run(timestamp, timestamp, timestamp);
+        const debotJobs = db.prepare(`
+          DELETE FROM debot_bridge_jobs
+          WHERE status IN ('completed', 'failed', 'expired')
+            AND completed_at < ?
+            AND (cache_expires_at IS NULL OR cache_expires_at <= ?)
+        `).run(debotCutoff, timestamp);
         return {
           cutoff,
           postsDeleted: Number(posts.changes),
           changesDeleted: Number(changes.changes),
-          commandsDeleted: Number(commands.changes)
+          commandsDeleted: Number(commands.changes),
+          debotJobsDeleted: Number(debotJobs.changes)
         };
       });
     },

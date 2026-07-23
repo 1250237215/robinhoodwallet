@@ -4,13 +4,15 @@ import path from 'node:path';
 
 import { createRobinhoodConfig } from './robinhood/config.js';
 import { BARK_SOUNDS, createRobinhoodBarkNotifier } from './robinhood/bark.js';
+import { createDebotBridgeFetch } from './robinhood/debotBridgeFetch.js';
 import { RobinhoodDebotClient } from './robinhood/debotClient.js';
 import { RobinhoodHolderClient } from './robinhood/holderClient.js';
-import { scanTokenHolders } from './robinhood/holderScanner.js';
 import { RobinhoodDexScreenerClient, RobinhoodMarketDataClient } from './robinhood/marketClient.js';
 import { createRobinhoodWalletMonitor } from './robinhood/monitor.js';
 import { validateWalletMonitorRulesPatch } from './robinhood/monitorRules.js';
+import { RobinhoodPoolClient } from './robinhood/poolClient.js';
 import { RobinhoodRpcClient } from './robinhood/rpcClient.js';
+import { createRobinhoodResilientScanner } from './robinhood/resilientScanner.js';
 import { createRobinhoodService, MAX_WALLET_BATCH_LINES } from './robinhood/service.js';
 import { createRobinhoodStore } from './robinhood/store.js';
 import { WALLET_MONITOR_TIERS } from './robinhood/tiering.js';
@@ -522,7 +524,7 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
     if (req.method !== 'POST') methodNotAllowed(['GET', 'POST']);
     const body = await readJson(req);
     const result = service.addManualWinner(address(body.address, 'token', addressCodec), scanOptions(body));
-    sendJson(res, result.duplicate ? 200 : 202, result);
+    sendJson(res, result.accepted === true || (result.accepted === undefined && !result.duplicate) ? 202 : 200, result);
     return true;
   }
 
@@ -715,9 +717,22 @@ export async function startRobinhoodStandaloneServer(
   const store = createRobinhoodStore(config.dataFile);
   const socialConfig = createSocialConfig(env, { fallbackDirectory: path.dirname(config.dataFile) });
   const socialService = createSocialService({ config: socialConfig });
+  const debotBridgeTimeoutMs = Math.min(
+    110_000,
+    Math.max(5_000, Number(env.ROBINHOOD_DEBOT_BRIDGE_TIMEOUT_MS) || 90_000)
+  );
+  const debotRequestTimeoutMs = Math.min(
+    120_000,
+    Math.max(debotBridgeTimeoutMs + 5_000, Number(env.ROBINHOOD_DEBOT_REQUEST_TIMEOUT_MS) || 95_000)
+  );
+  const debotFetch = createDebotBridgeFetch({
+    socialService,
+    fetchImpl,
+    timeoutMs: debotBridgeTimeoutMs
+  });
   const activeDebotClient = debotClient || new RobinhoodDebotClient({
-    timeoutMs: config.requestTimeoutMs,
-    fetchImpl
+    timeoutMs: debotRequestTimeoutMs,
+    fetchImpl: debotFetch
   });
   const activeDexScreenerClient = dexScreenerClient || new RobinhoodDexScreenerClient({
     timeoutMs: config.marketRequestTimeoutMs,
@@ -740,15 +755,26 @@ export async function startRobinhoodStandaloneServer(
     batchSize: config.rpcBatchSize,
     batchDelayMs: config.rpcBatchDelayMs
   });
+  const poolClient = new RobinhoodPoolClient({
+    timeoutMs: config.requestTimeoutMs,
+    fetchImpl
+  });
   const service = createRobinhoodService({
     config,
     store,
     debotClient: activeDebotClient,
     holderClient: new RobinhoodHolderClient({
       baseUrl: config.blockscoutApiUrl,
-      timeoutMs: config.requestTimeoutMs
+      timeoutMs: config.requestTimeoutMs,
+      fetchImpl
     }),
-    scanToken: scanTokenHolders,
+    poolClient,
+    scanToken: createRobinhoodResilientScanner({
+      poolClient,
+      rpc: rpcClient,
+      config,
+      debotBlockCooldownMs: Math.max(0, Number(env.ROBINHOOD_DEBOT_BLOCK_COOLDOWN_MS) || 15_000)
+    }),
     scanConcurrency: Number(env.ROBINHOOD_SCAN_CONCURRENCY || 1)
   });
   const barkNotifier = createRobinhoodBarkNotifier({

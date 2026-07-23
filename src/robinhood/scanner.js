@@ -279,9 +279,16 @@ export async function scanToken({
 
   onProgress({ stage: 'block_range', percent: 15, pool: pool.address });
   const latestBlock = await chainClient.getBlockNumber({ signal });
-  const startTimestamp = toUnixSeconds(pool.createdAt) || toUnixSeconds(token?.creationTimestamp);
-  const fromBlock = startTimestamp
-    ? await chainClient.findBlockByTimestamp(startTimestamp, { highBlock: latestBlock, signal })
+  const poolCreatedAt = toUnixSeconds(pool.createdAt);
+  const tokenCreatedAt = toUnixSeconds(token?.creationTimestamp);
+  const historyStartTimestamp = poolCreatedAt || tokenCreatedAt;
+  const historyStartSource = poolCreatedAt
+    ? 'pool_creation'
+    : tokenCreatedAt
+      ? 'token_creation'
+      : 'rolling_log_window';
+  const fromBlock = historyStartTimestamp
+    ? await chainClient.findBlockByTimestamp(historyStartTimestamp, { highBlock: latestBlock, signal })
     : Math.max(0, latestBlock - config.logWindow);
   const rawLogs = await chainClient.getLogs(
     {
@@ -365,10 +372,16 @@ export async function scanToken({
     quoteDecimals,
     { signal }
   );
+  const complete = rawLogs.length < config.maxSwapsPerToken;
+  const historyComplete = Boolean(historyStartTimestamp) && complete;
   const currentPriceNative =
     reserves?.target > 0 && reserves?.quote > 0
       ? reserves.quote / reserves.target
-      : actions.at(-1)?.priceNative ?? null;
+      : Number(hintedPool.currentPriceNative) > 0
+        ? Number(hintedPool.currentPriceNative)
+        : complete
+          ? actions.at(-1)?.priceNative ?? null
+          : null;
   const directoryQuoteUsd =
     Number(hintedPool.currentPriceUsd) > 0 && Number(hintedPool.currentPriceNative) > 0
       ? Number(hintedPool.currentPriceUsd) / Number(hintedPool.currentPriceNative)
@@ -385,7 +398,6 @@ export async function scanToken({
         : tokenImpliedQuoteUsd;
   const verifiedLiquidityUsd =
     reserves?.quote > 0 && Number(quoteUsd) > 0 ? reserves.quote * Number(quoteUsd) * 2 : null;
-  const complete = rawLogs.length < config.maxSwapsPerToken;
   const poolResult = {
     ...pool,
     quoteToken,
@@ -427,6 +439,9 @@ export async function scanToken({
     scan: {
       complete,
       partial: !complete,
+      historyComplete,
+      historyStartTimestamp,
+      historyStartSource,
       fromBlock,
       toBlock: latestBlock,
       swapLogs: rawLogs.length,

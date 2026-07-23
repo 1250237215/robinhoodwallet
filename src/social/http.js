@@ -65,6 +65,12 @@ function suppliedToken(req) {
   ).trim();
 }
 
+function suppliedBearerToken(req) {
+  const authorization = String(req.headers.authorization || '');
+  if (!/^Bearer\s+/i.test(authorization)) return '';
+  return authorization.replace(/^Bearer\s+/i, '').trim();
+}
+
 function constantTimeEqual(left, right) {
   const leftBuffer = Buffer.from(String(left));
   const rightBuffer = Buffer.from(String(right));
@@ -82,6 +88,19 @@ function requireDevice(req, token) {
   }
   if (!constantTimeEqual(suppliedToken(req), token)) {
     throw new SocialHttpError(401, 'A valid social device token is required', 'SOCIAL_UNAUTHORIZED');
+  }
+}
+
+function requireBridgeBearer(req, token) {
+  if (!token) {
+    throw new SocialHttpError(
+      503,
+      'The DeBot bridge has not been paired',
+      'SOCIAL_UNPAIRED'
+    );
+  }
+  if (!constantTimeEqual(suppliedBearerToken(req), token)) {
+    throw new SocialHttpError(401, 'A valid bearer token is required', 'SOCIAL_UNAUTHORIZED');
   }
 }
 
@@ -304,6 +323,23 @@ export function createSocialApiHandler({ service, bridgeToken = '' }) {
         return true;
       }
 
+      if (url.pathname === '/api/social/bridge/debot/jobs') {
+        method(req, ['GET']);
+        requireBridgeBearer(req, token);
+        const limit = integerParam(url.searchParams, 'limit', 4, 1, 32);
+        sendJson(res, 200, service.claimDeBotJobs({ limit }));
+        return true;
+      }
+
+      const debotResultMatch = url.pathname.match(/^\/api\/social\/bridge\/debot\/jobs\/(\d+)\/result$/);
+      if (debotResultMatch) {
+        method(req, ['POST']);
+        requireBridgeBearer(req, token);
+        const body = await readJson(req, 512 * 1024);
+        sendJson(res, 200, service.submitDeBotResult(Number(debotResultMatch[1]), body));
+        return true;
+      }
+
       const commandAckMatch = url.pathname.match(/^\/api\/social\/bridge\/commands\/(\d+)\/ack$/);
       if (commandAckMatch) {
         method(req, ['POST']);
@@ -317,9 +353,11 @@ export function createSocialApiHandler({ service, bridgeToken = '' }) {
 
       throw new SocialHttpError(404, 'Social API route not found', 'NOT_FOUND');
     } catch (error) {
-      const known = error instanceof SocialHttpError;
+      const serviceStatus = Number(error?.statusCode);
+      const knownServiceError = Number.isSafeInteger(serviceStatus) && serviceStatus >= 400 && serviceStatus <= 599;
+      const known = error instanceof SocialHttpError || knownServiceError;
       const invalidInput = error instanceof TypeError || error instanceof RangeError;
-      const statusCode = known ? error.statusCode : invalidInput ? 400 : 500;
+      const statusCode = known ? Number(error.statusCode) : invalidInput ? 400 : 500;
       if (known && error.allow) res.setHeader('allow', error.allow);
       sendJson(res, statusCode, {
         ok: false,

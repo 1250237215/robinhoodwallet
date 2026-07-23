@@ -1,10 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createServer } from '../src/server.js';
+import { createDefaultRobinhoodService, createServer } from '../src/server.js';
+import { createRobinhoodStore } from '../src/robinhood/store.js';
 
 const token = '0x1111111111111111111111111111111111111111';
 const wallet = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+test('combined server defaults to the resilient Robinhood scanner', (t) => {
+  const store = createRobinhoodStore(':memory:');
+  const { service } = createDefaultRobinhoodService({}, {
+    config: { dataFile: ':memory:' },
+    store,
+    debotClient: { fetchHotTokens: async () => [] },
+    holderClient: { fetchTopHolders: async () => ({ holders: [], token: {} }) },
+    poolClient: { fetchPools: async () => [] },
+    rpc: {}
+  });
+  t.after(() => {
+    service.close();
+    store.close();
+  });
+
+  assert.equal(service.scanToken.name, 'resilientScan');
+});
 
 async function withServer(robinhoodService, run) {
   const server = createServer({ robinhoodService });

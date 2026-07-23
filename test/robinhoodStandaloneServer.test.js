@@ -12,8 +12,8 @@ import {
 } from '../src/robinhoodServer.js';
 import { RobinhoodDebotClient } from '../src/robinhood/debotClient.js';
 import { RobinhoodHolderClient } from '../src/robinhood/holderClient.js';
-import { scanTokenHolders } from '../src/robinhood/holderScanner.js';
 import { RobinhoodDexScreenerClient, RobinhoodMarketDataClient } from '../src/robinhood/marketClient.js';
+import { RobinhoodPoolClient } from '../src/robinhood/poolClient.js';
 
 const wallet = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const token = '0x1111111111111111111111111111111111111111';
@@ -422,7 +422,7 @@ test('standalone monitor routes expose snapshots, incremental events, and valida
   }, monitor);
 });
 
-test('standalone startup wires holder scans separately from DexScreener-first monitor enrichment', async (t) => {
+test('standalone startup wires resilient holder scans separately from DexScreener-first monitor enrichment', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-holder-server-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const running = await startRobinhoodStandaloneServer(
@@ -446,7 +446,9 @@ test('standalone startup wires holder scans separately from DexScreener-first mo
     }
   );
   try {
-    assert.equal(running.service.scanToken, scanTokenHolders);
+    assert.equal(typeof running.service.scanToken, 'function');
+    assert.equal(running.service.scanToken.name, 'resilientScan');
+    assert.equal(running.service.poolClient instanceof RobinhoodPoolClient, true);
     assert.equal(running.service.debotClient instanceof RobinhoodDebotClient, true);
     assert.equal(running.debotClient, running.service.debotClient);
     assert.equal(running.dexScreenerClient instanceof RobinhoodDexScreenerClient, true);

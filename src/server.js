@@ -10,9 +10,10 @@ import { createDevTweetAttitudeAnalyzerFromEnv } from './devTweetAttitude.js';
 import { createRobinhoodConfig } from './robinhood/config.js';
 import { RobinhoodDebotClient } from './robinhood/debotClient.js';
 import { RobinhoodHolderClient } from './robinhood/holderClient.js';
-import { scanTokenHolders } from './robinhood/holderScanner.js';
 import { RobinhoodPoolClient } from './robinhood/poolClient.js';
 import { validateWalletMonitorRulesPatch } from './robinhood/monitorRules.js';
+import { createRobinhoodResilientScanner } from './robinhood/resilientScanner.js';
+import { RobinhoodRpcClient } from './robinhood/rpcClient.js';
 import { createRobinhoodService, MAX_WALLET_BATCH_LINES } from './robinhood/service.js';
 import { createRobinhoodStore } from './robinhood/store.js';
 import { WALLET_MONITOR_TIERS } from './robinhood/tiering.js';
@@ -72,16 +73,31 @@ function sendJson(res, statusCode, body) {
 export function createDefaultRobinhoodService(env = process.env, overrides = {}) {
   const config = overrides.config || createRobinhoodConfig(env);
   const store = overrides.store || createRobinhoodStore(config.dataFile);
+  const activeDebotClient = overrides.debotClient || new RobinhoodDebotClient({ timeoutMs: config.requestTimeoutMs });
+  const activeHolderClient = overrides.holderClient || new RobinhoodHolderClient({
+    baseUrl: config.blockscoutApiUrl,
+    timeoutMs: config.requestTimeoutMs
+  });
+  const activePoolClient = overrides.poolClient || new RobinhoodPoolClient({ timeoutMs: config.requestTimeoutMs });
+  const activeRpcClient = overrides.rpc || new RobinhoodRpcClient({
+    rpcUrl: config.rpcUrl,
+    timeoutMs: config.requestTimeoutMs,
+    maxRetries: config.rpcMaxRetries,
+    retryDelayMs: config.rpcRetryDelayMs,
+    maxRetryDelayMs: config.rpcMaxRetryDelayMs,
+    logWindow: config.logWindow,
+    batchSize: config.rpcBatchSize,
+    batchDelayMs: config.rpcBatchDelayMs
+  });
   const service = createRobinhoodService({
     config,
     store,
-    debotClient: overrides.debotClient || new RobinhoodDebotClient({ timeoutMs: config.requestTimeoutMs }),
-    holderClient: overrides.holderClient || new RobinhoodHolderClient({
-      baseUrl: config.blockscoutApiUrl,
-      timeoutMs: config.requestTimeoutMs
-    }),
-    poolClient: overrides.poolClient || new RobinhoodPoolClient({ timeoutMs: config.requestTimeoutMs }),
-    scanToken: Object.hasOwn(overrides, 'scanToken') ? overrides.scanToken : scanTokenHolders,
+    debotClient: activeDebotClient,
+    holderClient: activeHolderClient,
+    poolClient: activePoolClient,
+    scanToken: Object.hasOwn(overrides, 'scanToken')
+      ? overrides.scanToken
+      : createRobinhoodResilientScanner({ poolClient: activePoolClient, rpc: activeRpcClient, config }),
     scanConcurrency: Number(env.ROBINHOOD_SCAN_CONCURRENCY || 1)
   });
   service.start();
@@ -478,7 +494,7 @@ async function handleRobinhoodRequest(req, res, url, service) {
     const body = await readJsonBody(req);
     const address = validatedAddress(body.address, 'token');
     const result = await service.addManualWinner(address, validatedScanOptions(body));
-    sendJson(res, result.duplicate ? 200 : 202, result);
+    sendJson(res, result.accepted === true || (result.accepted === undefined && !result.duplicate) ? 202 : 200, result);
     return true;
   }
 
