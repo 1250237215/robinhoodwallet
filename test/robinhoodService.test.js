@@ -868,21 +868,48 @@ test('keeps successful holder candidates when another profit lookup makes the sc
   const { service, store } = createService({
     minEntryUsd: 500,
     scanToken: async () => ({
-      tokenPatch: { holderAnalysis: partialHolderAnalysis },
+      tokenPatch: {
+        holderAnalysis: partialHolderAnalysis,
+        analysisSource: 'debot_holder_first',
+        analysisFallback: null
+      },
       holderAnalysis: partialHolderAnalysis,
       qualification: { status: 'manual', qualified: false, provisional: true },
       actions: [],
-      scan: { complete: false, partial: true, strategy: 'holder_first', failedWallets: 1 }
+      scan: {
+        complete: false,
+        partial: true,
+        strategy: 'holder_first',
+        source: 'debot_holder_first',
+        analysisSource: 'debot_holder_first',
+        failedWallets: 1
+      }
     })
   });
   t.after(() => store.close());
 
-  service.addManualWinner(tokenA);
+  store.upsertToken({
+    address: tokenA,
+    symbol: 'STALE',
+    name: 'Previously blocked',
+    manual: true,
+    scanStatus: 'partial',
+    analysisSource: 'onchain_holder_fallback',
+    analysisFallback: {
+      from: 'debot',
+      status: 403,
+      reason: 'DeBot request failed with HTTP 403'
+    }
+  });
+  service.queueToken(store.getToken(tokenA), { force: true, manual: true });
   await service.waitForIdle();
 
   const token = store.getToken(tokenA);
   assert.equal(token.scanStatus, 'partial');
   assert.equal(token.holderAnalysis.failedWallets, 1);
+  assert.equal(token.analysisSource, 'debot_holder_first');
+  assert.equal(token.analysisFallback, null);
+  assert.equal(token.scan.analysisSource, 'debot_holder_first');
   assert.deepEqual(store.listWalletSummaries().map((wallet) => wallet.address), [walletA]);
   const job = store.listJobs().find((candidate) => candidate.id === `scan:${tokenA}`);
   assert.equal(job.status, 'complete');

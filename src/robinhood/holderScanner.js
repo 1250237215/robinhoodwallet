@@ -320,6 +320,8 @@ export async function scanTokenHolders({
       effectiveWallets: qualification.effectiveWallets,
       qualificationStatus: 'manual',
       holderAnalysis,
+      analysisSource: 'debot_holder_first',
+      analysisFallback: null,
       updatedAt
     },
     qualification,
@@ -329,6 +331,8 @@ export async function scanTokenHolders({
       complete,
       partial: !complete,
       strategy: 'holder_first',
+      source: 'debot_holder_first',
+      analysisSource: 'debot_holder_first',
       holderSource,
       profitSource: 'debot_wallet_token_analysis',
       holderLimit: config.holderCandidateLimit,

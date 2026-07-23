@@ -139,6 +139,10 @@ test('analyzes only top non-infrastructure holders and enforces the 500 USD floo
   assert.equal(result.tokenPatch.peakMarketCapSource, 'debot_primary_pool_daily_high');
   assert.equal(result.tokenPatch.peakMarketCapProvisional, false);
   assert.equal(result.tokenPatch.effectiveWallets, 2_000);
+  assert.equal(result.tokenPatch.analysisSource, 'debot_holder_first');
+  assert.equal(result.tokenPatch.analysisFallback, null);
+  assert.equal(result.scan.source, 'debot_holder_first');
+  assert.equal(result.scan.analysisSource, 'debot_holder_first');
   assert.equal(progress.at(-1).stage, 'complete');
 });
 
@@ -223,6 +227,9 @@ test('returns a useful partial snapshot when one holder profit request fails', a
   assert.equal(result.holderAnalysis.candidates[1].ignoredReason, 'profit_unavailable');
   assert.equal(result.qualification.provisional, true);
   assert.equal(result.qualification.confidence, 'medium');
+  assert.equal(result.tokenPatch.analysisSource, 'debot_holder_first');
+  assert.equal(result.tokenPatch.analysisFallback, null);
+  assert.equal(result.scan.analysisSource, 'debot_holder_first');
 });
 
 test('uses a Base chain profile to exclude chain infrastructure and label holder evidence', async () => {
