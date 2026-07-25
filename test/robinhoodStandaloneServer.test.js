@@ -105,6 +105,60 @@ test('standalone deployment server exposes the split overview endpoint', async (
   });
 });
 
+test('standalone summary views omit heavy Holder and wallet detail payloads', async () => {
+  const service = {
+    getDashboard() {
+      return {
+        ok: true,
+        status: 'ready',
+        chain: 'robinhood',
+        wallets: [{
+          address: wallet,
+          performances: [{ tokenAddress: token, entryCostUsd: 800, hit: true, rawPayload: { large: true } }],
+          clusterEvidence: [{ large: true }]
+        }],
+        winners: [{
+          address: token,
+          pools: [{ address: wallet }],
+          holderAnalysis: {
+            fetchedHolders: 100,
+            candidates: [{ address: wallet, totalProfitUsd: 10_000 }],
+            failures: []
+          }
+        }],
+        jobs: [],
+        updatedAt: '2026-07-24T00:00:00.000Z',
+        stale: false,
+        partial: false,
+        warnings: []
+      };
+    }
+  };
+
+  await withServer(service, async (baseUrl) => {
+    const [dashboardResponse, walletsResponse, winnersResponse, fullResponse] = await Promise.all([
+      fetch(`${baseUrl}/api/robinhood/dashboard?view=summary`),
+      fetch(`${baseUrl}/api/robinhood/wallets?view=summary`),
+      fetch(`${baseUrl}/api/robinhood/winners?view=summary`),
+      fetch(`${baseUrl}/api/robinhood/winners`)
+    ]);
+    const dashboard = await dashboardResponse.json();
+    const wallets = await walletsResponse.json();
+    const winners = await winnersResponse.json();
+    const full = await fullResponse.json();
+
+    assert.equal(dashboard.view, 'summary');
+    assert.equal(dashboard.wallets[0].performances[0].entryCostUsd, 800);
+    assert.equal(Object.hasOwn(dashboard.wallets[0].performances[0], 'rawPayload'), false);
+    assert.equal(Object.hasOwn(dashboard.wallets[0], 'clusterEvidence'), false);
+    assert.equal(wallets.view, 'summary');
+    assert.equal(winners.view, 'summary');
+    assert.equal(winners.winners[0].holderAnalysis.candidateCount, 1);
+    assert.equal(Object.hasOwn(winners.winners[0].holderAnalysis, 'candidates'), false);
+    assert.equal(full.winners[0].holderAnalysis.candidates.length, 1);
+  });
+});
+
 test('standalone deployment server exposes a repeatable single-token Holder rescan', async () => {
   const received = [];
   const service = {

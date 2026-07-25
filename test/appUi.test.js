@@ -301,7 +301,7 @@ test('a separate review-aware wallet request preserves confirmed annotations alo
   assert.match(appJs, /loadCurationWallets\(context, filters\)/);
 });
 
-test('pending review wallets load independently and only the latest completed scan batch is shown', () => {
+test('summary dashboard reuses one wallet collection and only the latest completed scan batch is shown', () => {
   assert.match(appJs, /function buildPendingReviewQuery\(filters\)/);
   const pendingQuerySource = appJs.slice(
     appJs.indexOf('function buildPendingReviewQuery'),
@@ -329,9 +329,14 @@ test('pending review wallets load independently and only the latest completed sc
     appJs.indexOf('async function loadApiData'),
     appJs.indexOf('function activeJobs')
   );
-  assert.match(apiLoaderSource, /pendingWalletsPromise = loadPendingWallets\(context, filters\)/);
+  assert.match(appJs, /view: 'summary'/);
+  assert.match(appJs, /classification === 'all_round'.*filters\.monitorTier.*filters\.monitorTier !== 'all'/s);
+  assert.match(apiLoaderSource, /const dashboardWallets = getCollection\(record, \['wallets', 'items', 'addresses'\]\) \|\| \[\]/);
+  assert.match(apiLoaderSource, /const pendingWallets = pendingReviewRecords\(dashboardWallets\)/);
+  assert.match(apiLoaderSource, /walletLibraryRecords\(dashboardWallets\),\s*reviewBatch\.wallets/);
+  assert.match(apiLoaderSource, /loadPendingWallets\(context, filters\)/);
   assert.equal((apiLoaderSource.match(/latestReviewBatch\(pendingWallets, jobs, winners, filters\.minEntryUsd\)/g) || []).length, 2);
-  assert.equal((apiLoaderSource.match(/walletLibraryRecords\(curationWallets\),\s*reviewBatch\.wallets/g) || []).length, 2);
+  assert.equal((apiLoaderSource.match(/walletLibraryRecords\(curationWallets\),\s*reviewBatch\.wallets/g) || []).length, 1);
   assert.equal((apiLoaderSource.match(/reviewBatchTokenAddresses: reviewBatch\.tokenAddresses/g) || []).length, 2);
   assert.match(appJs, /最近重扫待审核 Holder/);
   assert.match(indexHtml, /最近重扫候选/);

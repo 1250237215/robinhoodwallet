@@ -2321,6 +2321,7 @@ function readFilters() {
 
 function buildQuery(filters, classification = state.activeTab) {
   const params = new URLSearchParams({
+    view: 'summary',
     tab: ['winners', 'candidates', 'all_round'].includes(classification) ? 'all' : classification,
     window: String(filters.windowDays),
     minHits: String(filters.minHits),
@@ -2337,6 +2338,9 @@ function buildQuery(filters, classification = state.activeTab) {
   if (filters.search) params.set('search', filters.search);
   if (filters.tag) params.set('tag', filters.tag);
   if (filters.status) params.set('status', filters.status);
+  if (classification === 'all_round' && filters.monitorTier && filters.monitorTier !== 'all') {
+    params.set('monitorTier', filters.monitorTier);
+  }
   return params.toString();
 }
 
@@ -2350,6 +2354,7 @@ function buildCurationQuery(filters) {
 
 function buildPendingReviewQuery(filters) {
   const params = new URLSearchParams({
+    view: 'summary',
     tab: 'all',
     review: 'pending'
   });
@@ -2375,6 +2380,18 @@ function walletLibraryRecords(collection) {
     const reviewState = String(wallet?.reviewState || '').toLowerCase();
     return wallet?.curated === true || reviewState === 'confirmed' || reviewState === 'excluded';
   });
+}
+
+function pendingReviewRecords(collection) {
+  return (Array.isArray(collection) ? collection : []).filter((wallet) => (
+    String(wallet?.reviewState || '').toLowerCase() === 'pending'
+  ));
+}
+
+function dashboardOverviewRecord(record) {
+  return Object.fromEntries(Object.entries(record || {}).filter(([key]) => (
+    !['wallets', 'winners', 'jobs'].includes(key)
+  )));
 }
 
 function latestReviewBatchTokenAddresses(jobs) {
@@ -2520,6 +2537,7 @@ async function exportConfirmedWalletsToDebot() {
   elements.debotExportButton.disabled = true;
   try {
     const params = new URLSearchParams({
+      view: 'summary',
       tab: 'all',
       strategy: 'smart',
       multiple: '10',
@@ -2552,33 +2570,16 @@ async function loadApiData(context, filters) {
     const dashboard = await fetchChainJson(context, `/dashboard?${query}`, { acceptStatuses: [503] });
     requireCurrentChainRequest(context);
     const record = unwrapRecord(dashboard);
-    const curationWalletsPromise = loadCurationWallets(context, filters);
-    const pendingWalletsPromise = loadPendingWallets(context, filters);
-    let walletPayload = null;
-    try {
-      walletPayload = await fetchChainJson(context, `/wallets?${query}`);
-      requireCurrentChainRequest(context);
-    } catch (error) {
-      if (![404, 405].includes(error.status)) {
-        await Promise.allSettled([curationWalletsPromise, pendingWalletsPromise]);
-        throw error;
-      }
-    }
-    const [curationWallets, pendingWallets] = await Promise.all([
-      curationWalletsPromise,
-      pendingWalletsPromise
-    ]);
-    requireCurrentChainRequest(context);
+    const dashboardWallets = getCollection(record, ['wallets', 'items', 'addresses']) || [];
+    const pendingWallets = pendingReviewRecords(dashboardWallets);
     const jobs = getCollection(record, ['jobs', 'scans', 'items']) || [];
     const winners = getCollection(record, ['winners', 'tokens', 'items']) || [];
     const reviewBatch = latestReviewBatch(pendingWallets, jobs, winners, filters.minEntryUsd);
     return {
       chain: String(record.chain || context.chainId),
-      overview: record,
+      overview: dashboardOverviewRecord(record),
       wallets: mergeWalletCollections(
-        walletLibraryRecords(getCollection(record, ['wallets', 'items', 'addresses']) || []),
-        walletLibraryRecords(getCollection(walletPayload, ['wallets', 'items', 'addresses']) || []),
-        walletLibraryRecords(curationWallets),
+        walletLibraryRecords(dashboardWallets),
         reviewBatch.wallets
       ),
       winners,

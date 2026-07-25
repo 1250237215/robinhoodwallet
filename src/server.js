@@ -16,6 +16,7 @@ import { createRobinhoodResilientScanner } from './robinhood/resilientScanner.js
 import { RobinhoodRpcClient } from './robinhood/rpcClient.js';
 import { createRobinhoodService, MAX_WALLET_BATCH_LINES } from './robinhood/service.js';
 import { createRobinhoodStore } from './robinhood/store.js';
+import { summarizeDashboard, summarizeWallet, summarizeWinner } from './robinhood/summaryView.js';
 import { WALLET_MONITOR_TIERS } from './robinhood/tiering.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -68,6 +69,10 @@ function sendJson(res, statusCode, body) {
     'cache-control': 'no-store'
   });
   res.end(JSON.stringify(body));
+}
+
+function summaryView(params) {
+  return params.get('view') === 'summary';
 }
 
 export function createDefaultRobinhoodService(env = process.env, overrides = {}) {
@@ -424,7 +429,10 @@ async function handleRobinhoodRequest(req, res, url, service) {
     const dashboard = await service.getDashboard(parseRobinhoodWalletFilters(url.searchParams));
     sendJson(res, dashboard.ok ? 200 : dashboard.stale && dashboard.wallets?.length ? 206 : 503, {
       ok: dashboard.ok,
-      wallets: dashboard.wallets || [],
+      ...(summaryView(url.searchParams) ? { view: 'summary' } : {}),
+      wallets: summaryView(url.searchParams)
+        ? (dashboard.wallets || []).map(summarizeWallet)
+        : dashboard.wallets || [],
       filters: dashboard.filters,
       updatedAt: dashboard.updatedAt,
       stale: dashboard.stale
@@ -457,7 +465,7 @@ async function handleRobinhoodRequest(req, res, url, service) {
     const dashboard = await service.getDashboard(parseRobinhoodWalletFilters(url.searchParams));
     const cachedRows = (dashboard.winners?.length || 0) + (dashboard.wallets?.length || 0);
     const statusCode = dashboard.ok ? 200 : dashboard.stale && cachedRows ? 206 : 503;
-    sendJson(res, statusCode, dashboard);
+    sendJson(res, statusCode, summaryView(url.searchParams) ? summarizeDashboard(dashboard) : dashboard);
     return true;
   }
 
@@ -483,7 +491,10 @@ async function handleRobinhoodRequest(req, res, url, service) {
       });
       sendJson(res, dashboard.ok ? 200 : dashboard.stale && dashboard.winners?.length ? 206 : 503, {
         ok: dashboard.ok,
-        winners: dashboard.winners || [],
+        ...(summaryView(url.searchParams) ? { view: 'summary' } : {}),
+        winners: summaryView(url.searchParams)
+          ? (dashboard.winners || []).map(summarizeWinner)
+          : dashboard.winners || [],
         filters: dashboard.filters,
         updatedAt: dashboard.updatedAt,
         stale: dashboard.stale

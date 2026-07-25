@@ -15,6 +15,7 @@ import { RobinhoodRpcClient } from './robinhood/rpcClient.js';
 import { createRobinhoodResilientScanner } from './robinhood/resilientScanner.js';
 import { createRobinhoodService, MAX_WALLET_BATCH_LINES } from './robinhood/service.js';
 import { createRobinhoodStore } from './robinhood/store.js';
+import { summarizeDashboard, summarizeWallet, summarizeWinner } from './robinhood/summaryView.js';
 import { WALLET_MONITOR_TIERS } from './robinhood/tiering.js';
 import { createSocialConfig } from './social/config.js';
 import { createSocialApiHandler } from './social/http.js';
@@ -55,6 +56,10 @@ function sendJson(res, statusCode, body) {
 
 function methodNotAllowed(methods) {
   throw new HttpError(405, 'Method not allowed', 'METHOD_NOT_ALLOWED', { allow: methods.join(', ') });
+}
+
+function summaryView(params) {
+  return params.get('view') === 'summary';
 }
 
 function boundedNumber(params, name, { minimum, maximum, integer = false } = {}) {
@@ -469,7 +474,11 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
   if (url.pathname === '/api/robinhood/dashboard') {
     if (req.method !== 'GET') methodNotAllowed(['GET']);
     const result = service.getDashboard(parseWalletFilters(url.searchParams));
-    sendJson(res, dashboardStatus(result, (result.wallets?.length || 0) + (result.winners?.length || 0)), result);
+    sendJson(
+      res,
+      dashboardStatus(result, (result.wallets?.length || 0) + (result.winners?.length || 0)),
+      summaryView(url.searchParams) ? summarizeDashboard(result) : result
+    );
     return true;
   }
 
@@ -500,7 +509,10 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
     sendJson(res, dashboardStatus(result, result.wallets?.length || 0), {
       ok: result.ok,
       chain: result.chain || chain,
-      wallets: result.wallets || [],
+      ...(summaryView(url.searchParams) ? { view: 'summary' } : {}),
+      wallets: summaryView(url.searchParams)
+        ? (result.wallets || []).map(summarizeWallet)
+        : result.wallets || [],
       filters: result.filters,
       updatedAt: result.updatedAt,
       stale: result.stale
@@ -514,7 +526,10 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
       sendJson(res, dashboardStatus(result, result.winners?.length || 0), {
         ok: result.ok,
         chain: result.chain || chain,
-        winners: result.winners || [],
+        ...(summaryView(url.searchParams) ? { view: 'summary' } : {}),
+        winners: summaryView(url.searchParams)
+          ? (result.winners || []).map(summarizeWinner)
+          : result.winners || [],
         filters: result.filters,
         updatedAt: result.updatedAt,
         stale: result.stale
