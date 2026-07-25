@@ -50,6 +50,18 @@ function tokenDetail() {
   };
 }
 
+function profit(address, patch = {}) {
+  return {
+    address,
+    currentPriceUsd: 10,
+    averageBuyPriceUsd: 0.5,
+    buyVolumeUsd: 800,
+    totalMultiple: 20,
+    profitState: 'complete',
+    ...patch
+  };
+}
+
 test('analyzes only top non-infrastructure holders and enforces the 500 USD floor', async () => {
   const profitCalls = [];
   let active = 0;
@@ -230,6 +242,205 @@ test('returns a useful partial snapshot when one holder profit request fails', a
   assert.equal(result.tokenPatch.analysisSource, 'debot_holder_first');
   assert.equal(result.tokenPatch.analysisFallback, null);
   assert.equal(result.scan.analysisSource, 'debot_holder_first');
+});
+
+test('retries forbidden and transient wallet-profit failures once at low concurrency and preserves order', async () => {
+  const calls = new Map();
+  let retryActive = 0;
+  let maxRetryActive = 0;
+  const progress = [];
+  const result = await scanTokenHolders({
+    token: { address: token, manual: true },
+    config: config({ holderCandidateLimit: 3, holderProfitConcurrency: 3 }),
+    holderClient: {
+      fetchTopHolders: async () => ({
+        holders: [holder(walletA, 1), holder(walletB, 2), holder(walletC, 3)],
+        token: { holders: 500 },
+        snapshotAt: '2026-07-11T00:00:00.000Z'
+      })
+    },
+    debotClient: {
+      fetchTokenDetail: async () => tokenDetail(),
+      fetchWalletTokenProfit: async (_tokenAddress, address) => {
+        const attempt = (calls.get(address) || 0) + 1;
+        calls.set(address, attempt);
+        if (attempt === 1) {
+          const error = new Error(
+            address === walletA
+              ? 'DeBot request failed with HTTP 403'
+              : address === walletB ? 'fetch failed' : 'too many requests'
+          );
+          if (address === walletA) error.status = 403;
+          if (address === walletC) error.status = 429;
+          throw error;
+        }
+        if (attempt === 2) {
+          retryActive += 1;
+          maxRetryActive = Math.max(maxRetryActive, retryActive);
+          await new Promise((resolve) => setImmediate(resolve));
+          retryActive -= 1;
+        }
+        return profit(address);
+      }
+    },
+    onProgress: (entry) => progress.push(entry)
+  });
+
+  assert.deepEqual(Object.fromEntries(calls), { [walletA]: 2, [walletB]: 2, [walletC]: 2 });
+  assert.equal(maxRetryActive, 2);
+  assert.deepEqual(result.holderAnalysis.candidates.map((candidate) => candidate.address), [walletA, walletB, walletC]);
+  assert.equal(result.scan.complete, true);
+  assert.equal(result.scan.partial, false);
+  assert.equal(result.scan.failedWallets, 0);
+  assert.deepEqual(result.holderAnalysis.failures, []);
+  assert.equal(progress.filter((entry) => entry.stage === 'wallet_profits').at(-1).completed, 3);
+  assert.deepEqual(progress.filter((entry) => entry.stage === 'wallet_profit_retries').at(-1), {
+    stage: 'wallet_profit_retries',
+    percent: 95,
+    completed: 3,
+    total: 3,
+    attempted: 3,
+    skipped: 0
+  });
+  assert.equal(progress.at(-1).stage, 'complete');
+});
+
+test('does not retry non-transient wallet-profit failures', async () => {
+  let calls = 0;
+  const result = await scanTokenHolders({
+    token: { address: token, manual: true },
+    config: config({ holderCandidateLimit: 1 }),
+    holderClient: {
+      fetchTopHolders: async () => ({
+        holders: [holder(walletA, 1)],
+        token: { holders: 500 },
+        snapshotAt: '2026-07-11T00:00:00.000Z'
+      })
+    },
+    debotClient: {
+      fetchTokenDetail: async () => tokenDetail(),
+      fetchWalletTokenProfit: async () => {
+        calls += 1;
+        const error = new Error('DeBot request failed with HTTP 422');
+        error.status = 422;
+        throw error;
+      }
+    }
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(result.scan.partial, true);
+  assert.deepEqual(result.holderAnalysis.failures, [{
+    address: walletA,
+    error: 'DeBot request failed with HTTP 422'
+  }]);
+});
+
+test('stops retrying queued failures when the forbidden probe is still globally blocked', async () => {
+  const calls = new Map();
+  const progress = [];
+  const blocked = () => {
+    const error = new Error('DeBot request failed with HTTP 403');
+    error.status = 403;
+    error.retryable = false;
+    return error;
+  };
+  const result = await scanTokenHolders({
+    token: { address: token, manual: true },
+    config: config({ holderCandidateLimit: 3, holderProfitConcurrency: 3 }),
+    holderClient: {
+      fetchTopHolders: async () => ({
+        holders: [holder(walletA, 1), holder(walletB, 2), holder(walletC, 3)],
+        token: { holders: 500 },
+        snapshotAt: '2026-07-11T00:00:00.000Z'
+      })
+    },
+    debotClient: {
+      fetchTokenDetail: async () => tokenDetail(),
+      fetchWalletTokenProfit: async (_tokenAddress, address) => {
+        calls.set(address, (calls.get(address) || 0) + 1);
+        throw blocked();
+      }
+    },
+    onProgress: (entry) => progress.push(entry)
+  });
+
+  assert.deepEqual(Object.fromEntries(calls), { [walletA]: 2, [walletB]: 1, [walletC]: 1 });
+  assert.equal(result.scan.partial, true);
+  assert.equal(result.scan.failedWallets, 3);
+  assert.equal(result.scan.debotAccessBlocked, true);
+  assert.match(result.scan.debotAccessBlockedReason, /HTTP 403/);
+  assert.equal(result.holderAnalysis.debotAccessBlocked, true);
+  assert.match(result.holderAnalysis.debotAccessBlockedReason, /HTTP 403/);
+  assert.deepEqual(result.holderAnalysis.failures.map((failure) => failure.address), [walletA, walletB, walletC]);
+  assert.deepEqual(progress.filter((entry) => entry.stage === 'wallet_profit_retries').at(-1), {
+    stage: 'wallet_profit_retries',
+    percent: 95,
+    completed: 3,
+    total: 3,
+    attempted: 1,
+    skipped: 2
+  });
+});
+
+test('records a global DeBot block while preserving mixed original wallet-profit failures', async () => {
+  const calls = new Map();
+  const result = await scanTokenHolders({
+    token: { address: token, manual: true },
+    config: config({ holderCandidateLimit: 2, holderProfitConcurrency: 2 }),
+    holderClient: {
+      fetchTopHolders: async () => ({
+        holders: [holder(walletA, 1), holder(walletB, 2)],
+        token: { holders: 500 },
+        snapshotAt: '2026-07-11T00:00:00.000Z'
+      })
+    },
+    debotClient: {
+      fetchTokenDetail: async () => tokenDetail(),
+      fetchWalletTokenProfit: async (_tokenAddress, address) => {
+        calls.set(address, (calls.get(address) || 0) + 1);
+        const status = address === walletA ? 403 : 429;
+        const error = new Error(`DeBot request failed with HTTP ${status}`);
+        error.status = status;
+        throw error;
+      }
+    }
+  });
+
+  assert.deepEqual(Object.fromEntries(calls), { [walletA]: 2, [walletB]: 1 });
+  assert.equal(result.scan.debotAccessBlocked, true);
+  assert.match(result.scan.debotAccessBlockedReason, /HTTP 403/);
+  assert.deepEqual(result.holderAnalysis.failures, [
+    { address: walletA, error: 'DeBot request failed with HTTP 403' },
+    { address: walletB, error: 'DeBot request failed with HTTP 429' }
+  ]);
+});
+
+test('propagates an abort raised during a wallet-profit retry', async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  await assert.rejects(scanTokenHolders({
+    token: { address: token, manual: true },
+    config: config({ holderCandidateLimit: 1 }),
+    signal: controller.signal,
+    holderClient: {
+      fetchTopHolders: async () => ({
+        holders: [holder(walletA, 1)],
+        token: { holders: 500 },
+        snapshotAt: '2026-07-11T00:00:00.000Z'
+      })
+    },
+    debotClient: {
+      fetchTokenDetail: async () => tokenDetail(),
+      fetchWalletTokenProfit: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('network timeout');
+        controller.abort();
+        throw new Error('fetch failed after abort');
+      }
+    }
+  }), (error) => error?.name === 'AbortError');
+  assert.equal(calls, 2);
 });
 
 test('uses a Base chain profile to exclude chain infrastructure and label holder evidence', async () => {

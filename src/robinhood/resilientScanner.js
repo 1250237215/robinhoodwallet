@@ -83,6 +83,13 @@ function fullyBlockedHolderAnalysis(result) {
   const failures = Array.isArray(analysis?.failures) ? analysis.failures : [];
   const candidates = Array.isArray(analysis?.candidates) ? analysis.candidates : [];
   if (!failures.length || candidates.some((candidate) => candidate?.profitState === 'complete')) return null;
+  if (analysis?.debotAccessBlocked === true) {
+    return String(
+      analysis.debotAccessBlockedReason ||
+      failures.find((failure) => /HTTP (?:401|403)/i.test(String(failure?.error || '')))?.error ||
+      'DeBot wallet-profit requests were blocked'
+    );
+  }
   const blockedFailures = failures.filter((failure) => {
     const error = new Error(String(failure?.error || ''));
     error.status = Number(failure?.status) || undefined;

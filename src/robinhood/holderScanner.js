@@ -2,6 +2,19 @@ import { ROBINHOOD_CHAIN, createRobinhoodConfig } from './config.js';
 import { deriveWalletAdmissionMultiple } from './analysis.js';
 
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
+const TRANSIENT_PROFIT_ERROR_CODES = new Set([
+  'EAI_AGAIN',
+  'ECONNABORTED',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ENETDOWN',
+  'ENETUNREACH',
+  'ENOTFOUND',
+  'ETIMEDOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_SOCKET'
+]);
 
 function normalizeAddress(value) {
   return String(value || '').toLowerCase();
@@ -65,6 +78,60 @@ async function mapLimit(items, concurrency, mapper) {
   });
   await Promise.all(workers);
   return results;
+}
+
+function requestErrorMessage(error) {
+  return error instanceof Error ? error.message : String(error || 'DeBot wallet profit request failed');
+}
+
+function requestErrorStatus(error) {
+  for (const value of [error?.status, error?.statusCode, error?.response?.status, error?.cause?.status]) {
+    const status = Number(value);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) return status;
+  }
+  const match = requestErrorMessage(error).match(/(?:HTTP|status(?:\s+code)?)\s*[:=]?\s*(\d{3})/i);
+  return match ? Number(match[1]) : null;
+}
+
+function walletProfitRetryKind(error) {
+  const status = requestErrorStatus(error);
+  if (status === 403) return 'forbidden';
+  if ([408, 429, 502, 503, 504].includes(status)) return 'transient';
+  if (status !== null) return null;
+
+  const name = String(error?.name || '');
+  const code = String(error?.code || error?.cause?.code || '').toUpperCase();
+  const message = requestErrorMessage(error);
+  const upperMessage = message.toUpperCase();
+  if (
+    name === 'TimeoutError' ||
+    TRANSIENT_PROFIT_ERROR_CODES.has(code) ||
+    [...TRANSIENT_PROFIT_ERROR_CODES].some((errorCode) => upperMessage.includes(errorCode))
+  ) return 'transient';
+  return /(?:fetch failed|failed to fetch|network(?: error| failure)?|socket|connection (?:closed|reset|refused)|timed?\s*out|timeout)/i.test(message)
+    ? 'transient'
+    : null;
+}
+
+function abortReason(signal, error) {
+  if (signal?.aborted) {
+    if (signal.reason instanceof Error) return signal.reason;
+    const aborted = new Error('Holder wallet profit analysis was aborted');
+    aborted.name = 'AbortError';
+    return aborted;
+  }
+  return error?.name === 'AbortError' ? error : null;
+}
+
+function failedCandidate(holder) {
+  return {
+    ...holder,
+    eligible: false,
+    ignoredReason: 'profit_unavailable',
+    candidateReason: 'top_holder',
+    profitState: 'failed',
+    confidence: 'low'
+  };
 }
 
 function mergeCandidate(holder, profit, tokenDetail, minimumEntryUsd, minimumHitMultiple, normalize = normalizeAddress) {
@@ -180,32 +247,24 @@ export async function scanTokenHolders({
     holders: holderSnapshot.holders.length
   });
   let completed = 0;
-  const failures = [];
-  const analyzed = await mapLimit(candidates, config.holderProfitConcurrency, async (holder) => {
+  const analyzeHolder = async (holder) => {
+    const profit = await debotClient.fetchWalletTokenProfit(tokenAddress, holder.address, { signal });
+    return mergeCandidate(
+      holder,
+      profit,
+      tokenDetail,
+      minimumEntryUsd,
+      config.defaultWinnerMultiple,
+      adapter.normalize
+    );
+  };
+  const outcomes = await mapLimit(candidates, config.holderProfitConcurrency, async (holder) => {
     try {
-      const profit = await debotClient.fetchWalletTokenProfit(tokenAddress, holder.address, { signal });
-      return mergeCandidate(
-        holder,
-        profit,
-        tokenDetail,
-        minimumEntryUsd,
-        config.defaultWinnerMultiple,
-        adapter.normalize
-      );
+      return { candidate: await analyzeHolder(holder), error: null };
     } catch (error) {
-      if (error?.name === 'AbortError') throw error;
-      failures.push({
-        address: holder.address,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      return {
-        ...holder,
-        eligible: false,
-        ignoredReason: 'profit_unavailable',
-        candidateReason: 'top_holder',
-        profitState: 'failed',
-        confidence: 'low'
-      };
+      const aborted = abortReason(signal, error);
+      if (aborted) throw aborted;
+      return { candidate: failedCandidate(holder), error };
     } finally {
       completed += 1;
       onProgress({
@@ -216,6 +275,70 @@ export async function scanTokenHolders({
       });
     }
   });
+  const retryTargets = outcomes
+    .map((outcome, index) => ({
+      index,
+      holder: candidates[index],
+      kind: outcome.error ? walletProfitRetryKind(outcome.error) : null
+    }))
+    .filter((target) => target.kind !== null);
+  let retryCompleted = 0;
+  let retryAttempted = 0;
+  let retrySkipped = 0;
+  let debotAccessBlocked = false;
+  let debotAccessBlockedReason = '';
+  const reportRetryProgress = () => onProgress({
+    stage: 'wallet_profit_retries',
+    percent: 95,
+    completed: retryCompleted,
+    total: retryTargets.length,
+    attempted: retryAttempted,
+    skipped: retrySkipped
+  });
+  const retryTarget = async (target) => {
+    const abortedBeforeRetry = abortReason(signal);
+    if (abortedBeforeRetry) throw abortedBeforeRetry;
+    if (debotAccessBlocked) {
+      retrySkipped += 1;
+      retryCompleted += 1;
+      reportRetryProgress();
+      return;
+    }
+    retryAttempted += 1;
+    const originalError = outcomes[target.index].error;
+    try {
+      outcomes[target.index] = { candidate: await analyzeHolder(target.holder), error: null };
+    } catch (error) {
+      const aborted = abortReason(signal, error);
+      if (aborted) throw aborted;
+      outcomes[target.index] = {
+        candidate: failedCandidate(target.holder),
+        error: target.kind === 'forbidden' ? originalError : error
+      };
+      if (target.kind === 'forbidden' || requestErrorStatus(error) === 403) {
+        debotAccessBlocked = true;
+        debotAccessBlockedReason = requestErrorMessage(
+          requestErrorStatus(error) === 403 ? error : originalError
+        );
+      }
+    } finally {
+      retryCompleted += 1;
+      reportRetryProgress();
+    }
+  };
+
+  // Probe forbidden responses one at a time. Unless a probe succeeds, open the
+  // circuit before the remaining failed wallets amplify a global challenge.
+  const forbiddenRetries = retryTargets.filter((target) => target.kind === 'forbidden');
+  const transientRetries = retryTargets.filter((target) => target.kind === 'transient');
+  for (const target of forbiddenRetries) await retryTarget(target);
+  const retryConcurrency = Math.min(2, Math.max(1, Number(config.holderProfitConcurrency) || 1));
+  await mapLimit(transientRetries, retryConcurrency, retryTarget);
+
+  const analyzed = outcomes.map((outcome) => outcome.candidate);
+  const failures = outcomes.flatMap((outcome, index) => outcome.error
+    ? [{ address: candidates[index].address, error: requestErrorMessage(outcome.error) }]
+    : []);
   const eligible = analyzed.filter((candidate) => candidate.eligible);
   const peakResult = await peakMarketCapPromise;
   const complete = failures.length === 0;
@@ -296,6 +419,8 @@ export async function scanTokenHolders({
     minimumEntryUsd,
     snapshotAt: holderSnapshot.snapshotAt,
     complete,
+    debotAccessBlocked,
+    debotAccessBlockedReason: debotAccessBlocked ? debotAccessBlockedReason : null,
     candidates: analyzed,
     failures
   };
@@ -341,6 +466,8 @@ export async function scanTokenHolders({
       eligibleWallets: eligible.length,
       ignoredBelowEntry: holderAnalysis.ignoredBelowEntry,
       failedWallets: failures.length,
+      debotAccessBlocked,
+      debotAccessBlockedReason: debotAccessBlocked ? debotAccessBlockedReason : null,
       minimumEntryUsd,
       parserConfidence: complete ? 'high' : 'medium'
     }

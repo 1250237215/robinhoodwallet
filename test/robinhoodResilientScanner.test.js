@@ -139,6 +139,46 @@ test('falls back when all Holder-profit requests were internally recorded as DeB
   assert.equal(result.holderAnalysis.partial, true);
 });
 
+test('falls back after a confirmed DeBot circuit break with mixed wallet-profit failures', async () => {
+  let onchainCalls = 0;
+  const scanner = createRobinhoodResilientScanner({
+    poolClient: { fetchPools: async () => dexScreenerPairs() },
+    rpc,
+    holderScanner: async () => ({
+      holderAnalysis: {
+        debotAccessBlocked: true,
+        debotAccessBlockedReason: 'DeBot request failed with HTTP 403',
+        candidates: [
+          { address: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', profitState: 'failed' },
+          { address: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', profitState: 'failed' }
+        ],
+        failures: [
+          {
+            address: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            error: 'DeBot request failed with HTTP 403'
+          },
+          {
+            address: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            error: 'DeBot request failed with HTTP 429'
+          }
+        ]
+      }
+    }),
+    onchainScanner: async () => {
+      onchainCalls += 1;
+      return { tokenPatch: {}, actions: [], scan: { complete: true } };
+    },
+    now: () => 1_700_000_100_000
+  });
+
+  const result = await scanner({ token: { address: token } });
+
+  assert.equal(onchainCalls, 1);
+  assert.equal(result.scan.fallbackFrom, 'debot');
+  assert.equal(result.scan.fallbackStatus, 403);
+  assert.match(result.scan.fallbackReason, /HTTP 403/);
+});
+
 test('caches an explicit DeBot block so queued scans do not repeatedly challenge the upstream', async () => {
   let holderCalls = 0;
   let onchainCalls = 0;

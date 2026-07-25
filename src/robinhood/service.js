@@ -898,7 +898,7 @@ export class RobinhoodService {
       token.scanStatus === 'failed' && !hasUsableHolderAnalysis(token.holderAnalysis)
     );
     const failedScans = hardFailedTokens.length;
-    const failedHolderWallets = tokens.reduce(
+    const failedHolderWallets = tokens.filter((token) => !hasStaleHolderCache(token)).reduce(
       (sum, token) => sum + Math.max(0, finiteNumber(token.holderAnalysis?.failedWallets) ?? 0),
       0
     );

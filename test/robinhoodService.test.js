@@ -920,6 +920,46 @@ test('keeps successful holder candidates when another profit lookup makes the sc
   assert.equal(dashboard.warnings.some((warning) => warning.includes('1 个候选地址')), true);
 });
 
+test('dashboard excludes historical stale-snapshot failures from the current failed-wallet warning', async (t) => {
+  const { service, store } = createService();
+  t.after(() => store.close());
+  store.upsertToken({
+    address: tokenA,
+    symbol: 'STALE',
+    name: 'Stale cached analysis',
+    manual: true,
+    scanStatus: 'partial',
+    holderAnalysis: {
+      ...profitableHolderAnalysis(),
+      complete: false,
+      failedWallets: 4,
+      stale: true,
+      cached: true,
+      staleAt: '2026-07-10T11:00:00.000Z',
+      staleError: 'DeBot request failed with HTTP 403'
+    }
+  });
+  store.upsertToken({
+    address: tokenB,
+    symbol: 'CURRENT',
+    name: 'Current partial analysis',
+    manual: true,
+    scanStatus: 'partial',
+    holderAnalysis: {
+      ...profitableHolderAnalysis({ address: walletB }),
+      complete: false,
+      failedWallets: 2
+    }
+  });
+
+  await service.start();
+
+  const dashboard = service.getDashboard({ tab: 'all' });
+  assert.equal(dashboard.warnings.some((warning) => warning.startsWith('1 个 CA 的最新重扫失败')), true);
+  assert.equal(dashboard.warnings.some((warning) => warning.includes('2 个候选地址')), true);
+  assert.equal(dashboard.warnings.some((warning) => warning.includes('6 个候选地址')), false);
+});
+
 test('keeps a complete cached Holder snapshot when a refresh only returns partial candidates', async (t) => {
   const previousHolderAnalysis = profitableHolderAnalysis();
   const partialHolderAnalysis = {
