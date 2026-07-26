@@ -1089,7 +1089,7 @@ test('social monitoring replaces the visible same-token aggregation panel with a
   assert.match(appJs, /state\.socialTransport === 'sse'/);
   assert.match(appJs, /'社媒实时'/);
   assert.match(appJs, /'社媒延迟'/);
-  assert.match(appJs, /SOCIAL_REALTIME_HEARTBEAT_MAX_AGE_MS = 20_000/);
+  assert.match(appJs, /SOCIAL_REALTIME_HEARTBEAT_MAX_AGE_MS = 45_000/);
   assert.match(appJs, /SSE 实时推送/);
   assert.match(stylesCss, /\.social-bridge-badge\[data-state="error"\]/);
   for (const [feed, label] of [['all', '全部'], ['featured', '精选'], ['my', '我的']]) {
