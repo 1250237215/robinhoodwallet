@@ -679,19 +679,18 @@
       }
       emit('heartbeat', {
         bridgeId: 'debot-browser-extension',
-        version: '1.1.0',
+        version: '1.1.1',
         sessionId: String(Date.now()),
         capabilities: ['posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1']
       });
       return { ok: true, followUp };
     } catch (error) {
       const errorType = coarseErrorType(error);
-      const analysisUnavailable = errorType === 'AUTH';
       emit('heartbeat', {
         bridgeId: 'debot-browser-extension',
-        version: '1.1.0',
-        capabilities: analysisUnavailable ? ['debot-analysis-v1', 'error'] : ['debot-analysis-v1'],
-        ...(analysisUnavailable ? { error: errorType } : {})
+        version: '1.1.1',
+        capabilities: ['debot-analysis-v1', 'error'],
+        error: errorType
       });
       return { ok: false, errorType, followUp };
     }
@@ -759,7 +758,7 @@
     throw new Error(`Unsupported command: ${command.type}`);
   }
 
-  function observeSocketFrame(frame) {
+  function observeSocketText(frame) {
     if (typeof frame !== 'string' || !frame.includes('social-') || !frame.includes('-twitter')) return;
     const arrayStart = frame.indexOf('[');
     if (arrayStart < 0) return;
@@ -777,6 +776,34 @@
     }
   }
 
+  async function socketFrameText(frame) {
+    const tag = Object.prototype.toString.call(frame);
+    const isBlob = (typeof Blob === 'function' && frame instanceof Blob) || tag === '[object Blob]';
+    if (isBlob && typeof frame?.text === 'function') return frame.text();
+
+    const isArrayBuffer = (typeof ArrayBuffer === 'function' && frame instanceof ArrayBuffer)
+      || tag === '[object ArrayBuffer]';
+    const isView = typeof ArrayBuffer === 'function'
+      && typeof ArrayBuffer.isView === 'function'
+      && ArrayBuffer.isView(frame);
+    if (!isArrayBuffer && !isView) return '';
+    if (typeof TextDecoder !== 'function') return '';
+    const bytes = isArrayBuffer
+      ? new Uint8Array(frame)
+      : new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength);
+    return new TextDecoder().decode(bytes);
+  }
+
+  function observeSocketFrame(frame) {
+    if (typeof frame === 'string') {
+      observeSocketText(frame);
+      return;
+    }
+    void socketFrameText(frame).then(observeSocketText).catch(() => {
+      // The five-second fallback poll covers unreadable binary frames.
+    });
+  }
+
   const NativeWebSocket = window.WebSocket;
   if (typeof NativeWebSocket === 'function') {
     window.WebSocket = new Proxy(NativeWebSocket, {
@@ -785,6 +812,16 @@
         socket.addEventListener('message', (event) => observeSocketFrame(event.data));
         return socket;
       }
+    });
+  }
+
+  const requestImmediatePoll = () => void fallbackPoll();
+  window.addEventListener('online', requestImmediatePoll);
+  window.addEventListener('pageshow', requestImmediatePoll);
+  window.addEventListener('focus', requestImmediatePoll);
+  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') requestImmediatePoll();
     });
   }
 

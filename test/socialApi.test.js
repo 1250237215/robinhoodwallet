@@ -58,7 +58,7 @@ test('unpaired social API stays publicly readable but rejects every write', asyn
 
 test('paired bridge authenticates heartbeat, ingestion, watchlist commands and acknowledgements', async (t) => {
   const token = 'test-device-token';
-  const { baseUrl } = await withSocialServer(t, { token });
+  const { baseUrl, socialService } = await withSocialServer(t, { token });
   const unauthorized = await fetch(`${baseUrl}/api/social/bridge/heartbeat`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -74,15 +74,36 @@ test('paired bridge authenticates heartbeat, ingestion, watchlist commands and a
   assert.equal(heartbeat.status, 200);
   assert.equal((await heartbeat.json()).bridge.state, 'online');
 
+  const incompleteHeartbeat = await fetch(`${baseUrl}/api/social/bridge/heartbeat`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({
+      bridgeId: 'chrome-main',
+      version: '1.1.0',
+      capabilities: ['debot-analysis-v1']
+    })
+  });
+  const incompleteBridge = (await incompleteHeartbeat.json()).bridge;
+  assert.equal(incompleteBridge.state, 'error');
+  assert.equal(incompleteBridge.online, false);
+  assert.equal(incompleteBridge.analysisOnline, true);
+  assert.ok(incompleteBridge.heartbeatAgeMs >= 0 && incompleteBridge.heartbeatAgeMs < 1_000);
+
   const failedHeartbeat = await fetch(`${baseUrl}/api/social/bridge/heartbeat`, {
     method: 'POST',
     headers: auth(token),
-    body: JSON.stringify({ bridgeId: 'chrome-main', version: '1.0.0', capabilities: ['error'] })
+    body: JSON.stringify({
+      bridgeId: 'chrome-main',
+      version: '1.1.1',
+      capabilities: ['debot-analysis-v1', 'error']
+    })
   });
   const failedBridge = (await failedHeartbeat.json()).bridge;
   assert.equal(failedHeartbeat.status, 200);
   assert.equal(failedBridge.state, 'error');
   assert.equal(failedBridge.online, false);
+  assert.equal(failedBridge.analysisOnline, true);
+  assert.deepEqual(socialService.claimDeBotJobs({ limit: 1 }).jobs, []);
   assert.equal((await (await fetch(`${baseUrl}/api/social/status`)).json()).bridge.state, 'error');
 
   const recoveredHeartbeat = await fetch(`${baseUrl}/api/social/bridge/heartbeat`, {
@@ -317,7 +338,7 @@ test('DeBot result endpoint enforces payload limits and stores only coarse remot
   await fetch(`${baseUrl}/api/social/bridge/heartbeat`, {
     method: 'POST',
     headers: auth(token),
-    body: JSON.stringify({ capabilities: ['debot-analysis-v1'] })
+    body: JSON.stringify({ capabilities: ['posts', 'debot-analysis-v1'] })
   });
 
   const pending = socialService.requestDeBot('debot.wallet_token_analysis.v1', {

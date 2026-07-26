@@ -212,9 +212,16 @@ function eventLinks(event, chainProfile = DEFAULT_CHAIN_PROFILE) {
   };
 }
 
-function publicEvent(event, chainProfile = DEFAULT_CHAIN_PROFILE) {
+function publicEvent(event, chainProfile = DEFAULT_CHAIN_PROFILE, annotation = null) {
+  const currentAnnotation = annotation && typeof annotation === 'object' ? annotation : null;
   return eventLinks({
     ...event,
+    ...(currentAnnotation ? {
+      walletAlias: String(currentAnnotation.alias || ''),
+      walletNote: String(currentAnnotation.note || '')
+    } : {
+      walletNote: String(event.walletNote || '')
+    }),
     blockTimestampUnix: Number(event.blockTimestamp),
     blockTimestamp: isoFromSeconds(event.blockTimestamp),
     detectedAtUnix: Number(event.detectedAt),
@@ -615,8 +622,16 @@ export class RobinhoodWalletMonitor {
   }
 
   getEvents({ after = 0, limit = 100 } = {}) {
-    return this.store.listMonitorEvents({ after, limit })
-      .map((event) => publicEvent(event, this.chainProfile));
+    const annotations = new Map();
+    return this.store.listMonitorEvents({ after, limit }).map((event) => {
+      if (!annotations.has(event.walletAddress)) {
+        annotations.set(
+          event.walletAddress,
+          this.store.getWalletAnnotation?.(event.walletAddress) || null
+        );
+      }
+      return publicEvent(event, this.chainProfile, annotations.get(event.walletAddress));
+    });
   }
 
   listBarkTargets() {
@@ -1483,7 +1498,7 @@ export class RobinhoodWalletMonitor {
         ...marketData
       });
       if (!result.inserted) continue;
-      const event = publicEvent(result.event, this.chainProfile);
+      const event = publicEvent(result.event, this.chainProfile, annotation);
       detected.push(event);
       this.health.eventsDetected += 1;
       if (lane === 'deep') this.health.deepEventsDetected += 1;

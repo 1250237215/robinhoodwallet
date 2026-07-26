@@ -119,24 +119,29 @@ function timingSafeStringEqual(left, right) {
 }
 
 function hasDeBotAnalysisCapability(connection) {
-  return connection.online && connection.capabilities.some(
-    (capability) => String(capability).trim().toLowerCase() === DEBOT_ANALYSIS_CAPABILITY
-  );
+  return connection.analysisOnline === true;
 }
 
 function connectionState(config, bridge, now) {
   const paired = Boolean(config.bridgeToken);
   const lastSeenAt = bridge.lastSeenAt;
-  const fresh = lastSeenAt !== null && now - lastSeenAt <= config.bridgeOfflineMs;
-  const reportedError = fresh && Array.isArray(bridge.capabilities) &&
-    bridge.capabilities.some((capability) => String(capability).trim().toLowerCase() === 'error');
+  const heartbeatAgeMs = lastSeenAt === null ? null : Math.max(0, now - lastSeenAt);
+  const fresh = heartbeatAgeMs !== null && heartbeatAgeMs <= config.bridgeOfflineMs;
+  const capabilities = Array.isArray(bridge.capabilities)
+    ? bridge.capabilities.map((capability) => String(capability).trim().toLowerCase())
+    : [];
+  const reportedError = fresh && (capabilities.includes('error') || !capabilities.includes('posts'));
   const online = paired && fresh && !reportedError;
+  const analysisOnline = paired && fresh && capabilities.includes(DEBOT_ANALYSIS_CAPABILITY);
   return {
     state: !paired ? 'unpaired' : reportedError ? 'error' : online ? 'online' : 'offline',
     paired,
     online,
+    analysisOnline,
+    fresh,
     readOnly: !paired,
     lastSeenAt,
+    heartbeatAgeMs,
     bridgeId: bridge.bridgeId,
     version: bridge.version,
     capabilities: bridge.capabilities

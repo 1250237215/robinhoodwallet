@@ -77,7 +77,8 @@ const SOCIAL_API_ROOT = `${APP_BASE}/api/social`;
 const SOCIAL_DEVICE_TOKEN_STORAGE_KEY = 'robinhood-social-device-token';
 const SOCIAL_SEARCH_DEBOUNCE_MS = 180;
 const SOCIAL_STREAM_RETRY_MS = 2_000;
-const SOCIAL_STATUS_REFRESH_MS = 10_000;
+const SOCIAL_STATUS_REFRESH_MS = 5_000;
+const SOCIAL_REALTIME_HEARTBEAT_MAX_AGE_MS = 20_000;
 let MONITOR_THRESHOLD_STORAGE_KEY = 'robinhood-monitor-threshold';
 const MONITOR_SOUNDS = new Set(['alarm', 'bell', 'electronic', 'glass']);
 const MONITOR_EVENT_TYPES = Object.freeze(['buy', 'sell', 'transfer', 'token_create']);
@@ -354,8 +355,11 @@ const state = {
   monitorBarkVolume: 5,
   monitorBarkTargets: [],
   monitorBarkBusy: new Set(),
+  monitorNoteEditor: null,
+  monitorNoteSessionSequence: 0,
   socialStarted: false,
   socialConnected: false,
+  socialTransport: 'idle',
   socialSequence: 0,
   socialEventSource: null,
   socialReconnectTimer: null,
@@ -781,6 +785,14 @@ function normalizeMonitorEvent(raw, current = null) {
   const source = raw && typeof raw === 'object' ? raw : {};
   const existing = current && typeof current === 'object' ? current : {};
   const pick = (keys, fallback = null) => firstValue(source, keys, firstValue(existing, keys, fallback));
+  const pickPresent = (keys, fallback = null) => {
+    for (const record of [source, existing]) {
+      for (const key of keys) {
+        if (Object.hasOwn(record, key) && record[key] !== null && record[key] !== undefined) return record[key];
+      }
+    }
+    return fallback;
+  };
   const pickNumber = (keys) => finiteNumber(...keys.map((key) => source[key]))
     ?? finiteNumber(...keys.map((key) => existing[key]));
   const id = pick(['id', 'eventId', 'event_id', 'sequence'], '');
@@ -794,7 +806,10 @@ function normalizeMonitorEvent(raw, current = null) {
     eventType,
     assetType: String(pick(['assetType', 'asset_type'], 'token') || 'token').toLowerCase(),
     walletAddress: normalizeAddress(pick(['walletAddress', 'wallet_address', 'wallet', 'address'])),
-    walletAlias: String(pick(['walletAlias', 'wallet_alias', 'alias', 'walletName'], '') || ''),
+    walletAlias: String(pickPresent(['walletAlias', 'wallet_alias', 'alias', 'walletName'], '') || ''),
+    walletNote: String(pickPresent(['walletNote', 'wallet_note', 'note'], '') || ''),
+    walletNoteKnown: ['walletNote', 'wallet_note', 'note'].some((key) => Object.hasOwn(source, key))
+      || existing.walletNoteKnown === true,
     tokenAddress: normalizeAddress(pick(['tokenAddress', 'token_address', 'token', 'contractAddress'])),
     tokenSymbol: String(pick(['tokenSymbol', 'token_symbol', 'symbol', 'ticker'], 'TOKEN') || 'TOKEN'),
     tokenName: String(pick(['tokenName', 'token_name', 'name'], '') || ''),
@@ -1332,10 +1347,18 @@ function visibleSocialPosts() {
 
 function renderSocialBridgeStatus() {
   const bridge = state.socialBridge || {};
+  const heartbeatAgeMs = finiteNumber(bridge.heartbeatAgeMs);
+  const heartbeatCurrent = heartbeatAgeMs !== null
+    ? heartbeatAgeMs <= SOCIAL_REALTIME_HEARTBEAT_MAX_AGE_MS
+    : Boolean(bridge.online);
+  const streamConnected = state.socialTransport === 'sse';
+  const streamLive = streamConnected && bridge.online && heartbeatCurrent;
   const stateName = !state.socialConnected
     ? 'loading'
     : bridge.state === 'error'
       ? 'error'
+      : bridge.online && !heartbeatCurrent
+        ? 'delayed'
       : bridge.online
       ? 'online'
       : bridge.paired
@@ -1343,16 +1366,25 @@ function renderSocialBridgeStatus() {
         : 'unpaired';
   elements.socialBridgeBadge.dataset.state = stateName;
   elements.socialBridgeLabel.textContent = stateName === 'loading'
-    ? state.socialStarted ? '正在连接' : '等待连接'
+    ? state.socialTransport === 'reconnecting' ? '正在重连' : state.socialStarted ? '正在连接' : '等待连接'
     : stateName === 'error'
       ? 'DeBot 异常'
+    : stateName === 'delayed'
+      ? '社媒延迟'
     : stateName === 'online'
-      ? 'DeBot 已连接'
+      ? streamLive ? '社媒实时' : state.socialTransport === 'reconnecting' ? '正在重连' : 'DeBot 已连接'
       : stateName === 'offline'
         ? 'DeBot 离线'
         : '等待配对';
   const lastSeen = bridge.lastSeenAt ? ` · ${formatMonitorAge(bridge.lastSeenAt)}` : '';
-  elements.socialMonitorSummary.textContent = `${formatInteger(state.socialCounts.posts ?? state.socialPosts.length)} 条消息 · ${formatInteger(state.socialCounts.watchlist ?? state.socialWatchlist.length)} 个账号${lastSeen}`;
+  const transport = streamLive
+    ? ' · SSE 实时推送'
+    : stateName === 'delayed'
+      ? ' · 桥接心跳延迟'
+      : state.socialTransport === 'reconnecting'
+        ? ' · 正在恢复实时流'
+        : streamConnected ? ' · SSE 已连接' : '';
+  elements.socialMonitorSummary.textContent = `${formatInteger(state.socialCounts.posts ?? state.socialPosts.length)} 条消息 · ${formatInteger(state.socialCounts.watchlist ?? state.socialWatchlist.length)} 个账号${lastSeen}${transport}`;
   elements.socialPairingRow.hidden = state.socialExtensionReady;
 }
 
@@ -1463,7 +1495,20 @@ function renderMonitorWindowLabels() {
 
 function renderMonitorEvents() {
   const events = state.monitorEvents;
+  const activeInput = document.activeElement?.closest?.('[data-monitor-note-input]');
+  const activeEditor = activeInput && state.monitorNoteEditor?.eventKey === activeInput.dataset.monitorNoteInput
+    ? {
+        eventKey: activeInput.dataset.monitorNoteInput,
+        selectionStart: activeInput.selectionStart,
+        selectionEnd: activeInput.selectionEnd,
+        scrollTop: activeInput.scrollTop
+      }
+    : null;
   elements.monitorFeedSummary.textContent = `${events.length} 条记录 · 按检测时间倒序 · 金额不限`;
+  if (activeEditor && state.monitorNoteEditor?.composing && !state.monitorNoteEditor.saving) {
+    state.monitorNoteEditor.value = activeInput.value;
+    return;
+  }
   if (!events.length) {
     elements.monitorEventFeed.innerHTML = `
       <div class="monitor-empty-state">
@@ -1478,7 +1523,13 @@ function renderMonitorEvents() {
   elements.monitorEventFeed.innerHTML = events.map((event) => {
     const eventKey = monitorEventKey(event);
     const isFresh = state.monitorFreshEventKeys.delete(eventKey);
-    const walletLabel = event.walletAlias || shortAddress(event.walletAddress);
+    const wallet = walletForAddress(event.walletAddress);
+    const walletLabel = String(event.walletNoteKnown ? event.walletAlias : wallet?.alias ?? event.walletAlias).trim()
+      || shortAddress(event.walletAddress);
+    const walletNote = String(event.walletNoteKnown ? event.walletNote : wallet?.note ?? event.walletNote ?? '').trim();
+    const noteEditor = state.monitorNoteEditor?.eventKey === eventKey
+      ? state.monitorNoteEditor
+      : null;
     const eventType = MONITOR_EVENT_TYPES.includes(event.eventType) ? event.eventType : 'buy';
     const symbol = event.tokenSymbol || (event.assetType === 'native' ? activeChain().nativeSymbol : 'TOKEN');
     const eventTime = event.blockTimestamp || event.detectedAt;
@@ -1513,7 +1564,16 @@ function renderMonitorEvents() {
             <span>${escapeHtml(event.tokenName || (event.tokenAddress ? shortAddress(event.tokenAddress) : symbol))}</span>
             ${event.recipient ? `<span title="${escapeHtml(event.recipient)}">接收方 ${escapeHtml(recipientLabel)}</span>` : ''}
             ${event.platform ? `<span title="${escapeHtml(event.platform)}">平台 ${escapeHtml(monitorPlatformLabel(event.platform))}</span>` : ''}
+            ${walletNote ? `<button class="monitor-note-chip" type="button" data-monitor-note-edit="${escapeHtml(event.walletAddress)}" data-monitor-note-event="${escapeHtml(eventKey)}" title="修改地址备注"><i data-lucide="sticky-note" aria-hidden="true"></i><span>${escapeHtml(walletNote)}</span></button>` : ''}
           </div>
+          ${noteEditor ? `
+            <form class="monitor-note-editor" data-monitor-note-form="${escapeHtml(eventKey)}" data-monitor-note-address="${escapeHtml(event.walletAddress)}">
+              <i data-lucide="sticky-note" aria-hidden="true"></i>
+              <textarea rows="1" maxlength="4000" placeholder="地址备注" aria-label="地址备注" data-monitor-note-input="${escapeHtml(eventKey)}" ${noteEditor.saving ? 'disabled' : ''}>${escapeHtml(noteEditor.value)}</textarea>
+              <button class="inline-icon-button" type="submit" title="保存备注" aria-label="保存备注" ${noteEditor.saving ? 'disabled' : ''}><i data-lucide="check" aria-hidden="true"></i></button>
+              <button class="inline-icon-button" type="button" data-monitor-note-cancel title="取消" aria-label="取消修改备注" ${noteEditor.saving ? 'disabled' : ''}><i data-lucide="x" aria-hidden="true"></i></button>
+            </form>
+          ` : ''}
         </div>
         <strong class="monitor-event-amount">${escapeHtml(formatMonitorAmount(event))}</strong>
         ${hasTokenMetrics ? `
@@ -1529,6 +1589,7 @@ function renderMonitorEvents() {
           </dl>
         ` : ''}
         <div class="monitor-event-links">
+          <button class="inline-icon-button monitor-note-button" type="button" data-monitor-note-edit="${escapeHtml(event.walletAddress)}" data-monitor-note-event="${escapeHtml(eventKey)}" title="${walletNote ? '修改备注' : '添加备注'}" aria-label="${walletNote ? '修改' : '添加'} ${escapeHtml(walletLabel)} 的备注"><i data-lucide="notebook-pen" aria-hidden="true"></i></button>
           <a class="inline-icon-button" href="${escapeHtml(walletUrl)}" target="_blank" rel="noopener noreferrer" title="DeBot 地址" aria-label="在 DeBot 查看地址"><i data-lucide="wallet" aria-hidden="true"></i></a>
           ${tokenUrl ? `<a class="inline-icon-button" href="${escapeHtml(tokenUrl)}" target="_blank" rel="noopener noreferrer" title="DeBot 代币" aria-label="在 DeBot 查看代币"><i data-lucide="coins" aria-hidden="true"></i></a>` : ''}
           ${transactionUrl ? `<a class="inline-icon-button" href="${escapeHtml(transactionUrl)}" target="_blank" rel="noopener noreferrer" title="Blockscout 交易" aria-label="在 Blockscout 查看交易"><i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a>` : ''}
@@ -1537,6 +1598,135 @@ function renderMonitorEvents() {
     `;
   }).join('');
   refreshIcons(elements.monitorEventFeed);
+  if (activeEditor && !state.monitorNoteEditor?.saving) {
+    requestAnimationFrame(() => {
+      if (state.monitorNoteEditor?.eventKey !== activeEditor.eventKey || state.monitorNoteEditor.saving) return;
+      const input = [...elements.monitorEventFeed.querySelectorAll('[data-monitor-note-input]')]
+        .find((candidate) => candidate.dataset.monitorNoteInput === activeEditor.eventKey);
+      if (!input) return;
+      input.focus({ preventScroll: true });
+      input.setSelectionRange(activeEditor.selectionStart, activeEditor.selectionEnd);
+      input.scrollTop = activeEditor.scrollTop;
+    });
+  }
+}
+
+function monitorEventByKey(eventKey) {
+  return state.monitorEvents.find((event) => monitorEventKey(event) === eventKey) || null;
+}
+
+function updateMonitorWalletAnnotation(address, annotation = {}) {
+  const normalized = normalizeAddress(address);
+  if (!normalized) return;
+  const hasAlias = Object.hasOwn(annotation, 'alias');
+  const hasNote = Object.hasOwn(annotation, 'note');
+  if (!hasAlias && !hasNote) return;
+  const alias = hasAlias ? String(annotation.alias || '') : null;
+  const note = hasNote ? String(annotation.note || '') : null;
+  state.monitorEvents = state.monitorEvents.map((event) => event.walletAddress === normalized ? {
+    ...event,
+    ...(hasAlias ? { walletAlias: alias } : {}),
+    ...(hasNote ? { walletNote: note, walletNoteKnown: true } : {})
+  } : event);
+  const updateWallets = (wallets) => Array.isArray(wallets) ? wallets.map((wallet) => (
+    normalizeAddress(wallet.address) === normalized
+      ? {
+          ...wallet,
+          ...(hasAlias ? { alias } : {}),
+          ...(hasNote ? { note } : {})
+        }
+      : wallet
+  )) : wallets;
+  if (state.data && Array.isArray(state.data.wallets)) {
+    state.data = { ...state.data, wallets: updateWallets(state.data.wallets) };
+  }
+  state.visibleWallets = updateWallets(state.visibleWallets);
+}
+
+function focusMonitorNoteEditor(eventKey) {
+  requestAnimationFrame(() => {
+    const input = [...elements.monitorEventFeed.querySelectorAll('[data-monitor-note-input]')]
+      .find((candidate) => candidate.dataset.monitorNoteInput === eventKey);
+    input?.focus();
+    input?.select();
+  });
+}
+
+async function openMonitorNoteEditor(button) {
+  const context = captureChainRequestContext();
+  const sessionId = ++state.monitorNoteSessionSequence;
+  const address = normalizeAddress(button?.dataset.monitorNoteEdit);
+  const eventKey = String(button?.dataset.monitorNoteEvent || '');
+  const monitorEvent = monitorEventByKey(eventKey);
+  if (!address || !monitorEvent || monitorEvent.walletAddress !== address) return;
+  const cachedWallet = walletForAddress(address);
+  let note = monitorEvent.walletNoteKnown
+    ? String(monitorEvent.walletNote || '')
+    : typeof cachedWallet?.note === 'string'
+      ? cachedWallet.note
+      : null;
+  if (note === null) {
+    button.disabled = true;
+    try {
+      const payload = await fetchChainJson(context, `/wallets/${encodeURIComponent(address)}`);
+      requireCurrentChainRequest(context);
+      const record = unwrapRecord(payload);
+      const wallet = record.wallet && typeof record.wallet === 'object' ? record.wallet : record;
+      note = String(wallet.note || '');
+      updateMonitorWalletAnnotation(address, wallet);
+      state.detailCache.set(address, payload);
+    } catch (error) {
+      if (chainRequestIsCurrent(context)) showToast(`读取备注失败：${error.message}`, 'error');
+      return;
+    } finally {
+      if (chainRequestIsCurrent(context)) button.disabled = false;
+    }
+  }
+  if (!chainRequestIsCurrent(context) || sessionId !== state.monitorNoteSessionSequence) return;
+  state.monitorNoteEditor = { address, eventKey, sessionId, value: note, saving: false, composing: false };
+  renderMonitorEvents();
+  focusMonitorNoteEditor(eventKey);
+}
+
+function cancelMonitorNoteEditor() {
+  state.monitorNoteEditor = null;
+  renderMonitorEvents();
+}
+
+async function saveMonitorNote(event) {
+  event.preventDefault();
+  const editor = state.monitorNoteEditor;
+  const form = event.target.closest('[data-monitor-note-form]');
+  if (!editor || form?.dataset.monitorNoteForm !== editor.eventKey || editor.saving) return;
+  const context = captureChainRequestContext();
+  const noteInput = form.querySelector('[data-monitor-note-input]');
+  const note = String(noteInput?.value ?? editor.value ?? '').trim();
+  const sessionId = editor.sessionId;
+  state.monitorNoteEditor = { ...editor, value: note, saving: true, composing: false };
+  renderMonitorEvents();
+  try {
+    const payload = await fetchChainJson(context, `/wallets/${encodeURIComponent(editor.address)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ note })
+    });
+    requireCurrentChainRequest(context);
+    const record = unwrapRecord(payload);
+    const wallet = record.wallet && typeof record.wallet === 'object' ? record.wallet : record;
+    const savedNote = typeof wallet.note === 'string' ? wallet.note : note;
+    updateMonitorWalletAnnotation(editor.address, { ...wallet, note: savedNote });
+    state.detailCache.set(editor.address, payload);
+    if (state.monitorNoteEditor?.sessionId === sessionId) state.monitorNoteEditor = null;
+    renderMonitorEvents();
+    showToast(savedNote ? '地址备注已保存' : '地址备注已清除');
+  } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
+    if (state.monitorNoteEditor?.sessionId === sessionId) {
+      state.monitorNoteEditor = { ...editor, value: note, saving: false, composing: false };
+      renderMonitorEvents();
+      focusMonitorNoteEditor(editor.eventKey);
+    }
+    showToast(`备注保存失败：${error.message}`, 'error');
+  }
 }
 
 function renderMonitorPage() {
@@ -1976,6 +2166,8 @@ function parseSocialStreamEvent(event) {
 function scheduleSocialReconnect(sequence) {
   clearTimeout(state.socialReconnectTimer);
   if (!socialLifecycleIsCurrent(sequence)) return;
+  state.socialTransport = 'reconnecting';
+  renderSocialBridgeStatus();
   state.socialReconnectTimer = setTimeout(async () => {
     state.socialReconnectTimer = null;
     if (!socialLifecycleIsCurrent(sequence)) return;
@@ -1991,6 +2183,7 @@ function connectSocialStream(sequence = state.socialSequence) {
   if (state.socialEventSource) state.socialEventSource.close();
   state.socialEventSource = null;
   if (!('EventSource' in window)) {
+    state.socialTransport = 'reconnecting';
     scheduleSocialReconnect(sequence);
     return;
   }
@@ -2000,6 +2193,7 @@ function connectSocialStream(sequence = state.socialSequence) {
   source.addEventListener('open', () => {
     if (!isCurrent()) return;
     state.socialConnected = true;
+    state.socialTransport = 'sse';
     renderSocialBridgeStatus();
   });
   source.addEventListener('snapshot', (event) => {
@@ -2008,6 +2202,7 @@ function connectSocialStream(sequence = state.socialSequence) {
   const applyChange = (event) => {
     if (!isCurrent()) return;
     state.socialConnected = true;
+    state.socialTransport = 'sse';
     applySocialChange(parseSocialStreamEvent(event));
   };
   for (const eventName of ['post.created', 'post.updated', 'post.deleted', 'post.restored', 'watchlist.updated']) {
@@ -2018,6 +2213,7 @@ function connectSocialStream(sequence = state.socialSequence) {
     source.close();
     state.socialEventSource = null;
     state.socialConnected = false;
+    state.socialTransport = 'reconnecting';
     renderSocialBridgeStatus();
     scheduleSocialReconnect(sequence);
   });
@@ -2026,6 +2222,7 @@ function connectSocialStream(sequence = state.socialSequence) {
 async function startSocialMonitor({ manual = false } = {}) {
   stopSocialMonitor();
   state.socialStarted = true;
+  state.socialTransport = 'connecting';
   const sequence = state.socialSequence;
   renderSocialMonitor();
   await loadSocialSnapshot({ quiet: !manual, expectedSequence: sequence });
@@ -2038,6 +2235,7 @@ function stopSocialMonitor() {
   state.socialSequence += 1;
   state.socialStarted = false;
   state.socialConnected = false;
+  state.socialTransport = 'idle';
   state.socialSearchQuery = elements.socialSearch.value;
   clearTimeout(state.socialSearchTimer);
   clearTimeout(state.socialReconnectTimer);
@@ -5088,6 +5286,7 @@ function resetChainState() {
   state.monitorAlertedTokens.clear();
   state.monitorBarkTargets = [];
   state.monitorBarkBusy.clear();
+  state.monitorNoteEditor = null;
   state.detailView = 'placeholder';
   state.detailAddress = '';
   state.loading = false;
@@ -5292,6 +5491,52 @@ elements.monitorBarkList.addEventListener('click', (event) => {
   const button = event.target.closest('[data-bark-action]');
   if (button) void runBarkAction(button);
 });
+elements.monitorEventFeed.addEventListener('click', (event) => {
+  const editButton = event.target.closest('[data-monitor-note-edit]');
+  if (editButton) {
+    void openMonitorNoteEditor(editButton);
+    return;
+  }
+  if (event.target.closest('[data-monitor-note-cancel]')) cancelMonitorNoteEditor();
+});
+elements.monitorEventFeed.addEventListener('input', (event) => {
+  const input = event.target.closest('[data-monitor-note-input]');
+  if (!input || state.monitorNoteEditor?.eventKey !== input.dataset.monitorNoteInput) return;
+  state.monitorNoteEditor.value = input.value;
+});
+elements.monitorEventFeed.addEventListener('compositionstart', (event) => {
+  const input = event.target.closest('[data-monitor-note-input]');
+  if (!input || state.monitorNoteEditor?.eventKey !== input.dataset.monitorNoteInput) return;
+  state.monitorNoteEditor.composing = true;
+});
+elements.monitorEventFeed.addEventListener('compositionend', (event) => {
+  const input = event.target.closest('[data-monitor-note-input]');
+  const editor = state.monitorNoteEditor;
+  if (!input || !editor || editor.eventKey !== input.dataset.monitorNoteInput) return;
+  editor.value = input.value;
+  editor.composing = false;
+  const sessionId = editor.sessionId;
+  requestAnimationFrame(() => {
+    if (state.monitorNoteEditor?.sessionId === sessionId && !state.monitorNoteEditor.composing) {
+      renderMonitorEvents();
+    }
+  });
+});
+elements.monitorEventFeed.addEventListener('keydown', (event) => {
+  const input = event.target.closest('[data-monitor-note-input]');
+  if (!input) return;
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    cancelMonitorNoteEditor();
+    return;
+  }
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    input.closest('form')?.requestSubmit();
+  }
+});
+elements.monitorEventFeed.addEventListener('submit', (event) => void saveMonitorNote(event));
 elements.socialRefreshButton.addEventListener('click', () => void loadSocialSnapshot());
 elements.socialManageButton.addEventListener('click', () => {
   const nextHidden = !elements.socialWatchlistManager.hidden;

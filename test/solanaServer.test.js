@@ -173,6 +173,7 @@ test('Solana API stays isolated and ingests authenticated Helius events idempote
   runtime.store.upsertWalletAnnotation({
     address: wallet,
     alias: 'Sol Core',
+    note: 'Initial Solana note',
     status: 'active',
     monitorRules: {
       buy: { enabled: true, sound: true, bark: false },
@@ -185,6 +186,10 @@ test('Solana API stays isolated and ingests authenticated Helius events idempote
   });
   const server = createSolanaStandaloneServer(runtime, { maxBodyBytes: 1_024 });
   const root = await listen(server);
+  const emittedEvents = [];
+  runtime.monitor.subscribe((message) => {
+    if (message.type === 'event') emittedEvents.push(message.data);
+  });
   await runtime.service.start();
   await runtime.monitor.start();
 
@@ -233,6 +238,9 @@ test('Solana API stays isolated and ingests authenticated Helius events idempote
     insertedEvents: 1,
     disabled: false
   });
+  assert.equal(emittedEvents.length, 1);
+  assert.equal(emittedEvents[0].walletAlias, 'Sol Core');
+  assert.equal(emittedEvents[0].walletNote, 'Initial Solana note');
 
   const duplicate = await fetch(`${root}/api/solana/monitor/webhook`, {
     method: 'POST',
@@ -252,12 +260,20 @@ test('Solana API stays isolated and ingests authenticated Helius events idempote
     0
   );
 
+  runtime.store.upsertWalletAnnotation({
+    address: wallet,
+    alias: 'Updated Sol Core',
+    note: 'Current Solana note',
+    updatedAt: 2
+  });
+
   const eventsResponse = await fetch(`${root}/api/solana/monitor/events`);
   const events = await eventsResponse.json();
   assert.equal(eventsResponse.status, 200);
   assert.equal(events.events.length, 1);
   assert.equal(events.events[0].walletAddress, wallet);
-  assert.equal(events.events[0].walletAlias, 'Sol Core');
+  assert.equal(events.events[0].walletAlias, 'Updated Sol Core');
+  assert.equal(events.events[0].walletNote, 'Current Solana note');
   assert.equal(events.events[0].tokenAddress, mint);
   assert.equal(events.events[0].debotAddressUrl, `https://debot.ai/address/solana/${wallet}`);
   assert.equal(events.events[0].debotTokenUrl, `https://debot.ai/token/solana/${mint}`);

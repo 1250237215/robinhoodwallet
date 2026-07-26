@@ -2958,12 +2958,14 @@ select:hover {
 }
 
 .social-bridge-badge[data-state="offline"],
+.social-bridge-badge[data-state="delayed"],
 .social-bridge-badge[data-state="unpaired"] {
   border-color: #dfcba4;
   color: #8a5d0d;
 }
 
 .social-bridge-badge[data-state="offline"] > span,
+.social-bridge-badge[data-state="delayed"] > span,
 .social-bridge-badge[data-state="unpaired"] > span {
   background: #bd8121;
 }
@@ -3893,6 +3895,86 @@ select:hover {
   white-space: nowrap;
 }
 
+.monitor-note-chip {
+  min-width: 0;
+  max-width: min(180px, 100%);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 4px;
+  border: 1px solid #c8d3cd;
+  border-radius: 3px;
+  background: #f3f7f5;
+  color: #39594a;
+  cursor: pointer;
+}
+
+.monitor-note-chip:hover {
+  border-color: #91ad9f;
+  background: #eaf2ee;
+}
+
+.monitor-note-chip svg {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+}
+
+.monitor-note-chip span {
+  overflow: hidden;
+  color: inherit;
+  font-size: 9px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-note-editor {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 11px minmax(0, 1fr) 24px 24px;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.monitor-note-editor > svg {
+  width: 11px;
+  height: 11px;
+  color: var(--muted);
+}
+
+.monitor-note-editor textarea {
+  min-width: 0;
+  height: 26px;
+  min-height: 26px;
+  max-height: 88px;
+  padding: 3px 6px;
+  border: 1px solid #9eb4a8;
+  border-radius: 3px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 10px;
+  line-height: 18px;
+  resize: vertical;
+}
+
+.monitor-note-editor textarea:focus {
+  border-color: var(--event-accent);
+  outline: 2px solid rgba(22, 131, 75, 0.16);
+  outline-offset: 0;
+}
+
+.monitor-note-editor .inline-icon-button {
+  width: 24px;
+  height: 24px;
+}
+
+.monitor-note-editor .inline-icon-button[type="submit"] {
+  border-color: #8bb59d;
+  color: #1f7444;
+}
+
 .monitor-event-amount {
   grid-column: 3;
   grid-row: 1;
@@ -3978,6 +4060,10 @@ select:hover {
 .monitor-event-links svg {
   width: 11px;
   height: 11px;
+}
+
+.monitor-event-links .monitor-note-button {
+  color: #3d6f58;
 }
 
 .monitor-panel-head .inline-icon-button {

@@ -157,9 +157,16 @@ function isoFromSeconds(value) {
   return Number.isFinite(seconds) ? new Date(seconds * 1_000).toISOString() : null;
 }
 
-function publicEvent(event) {
+function publicEvent(event, annotation = null) {
+  const currentAnnotation = annotation && typeof annotation === 'object' ? annotation : null;
   return {
     ...event,
+    ...(currentAnnotation ? {
+      walletAlias: String(currentAnnotation.alias || ''),
+      walletNote: String(currentAnnotation.note || '')
+    } : {
+      walletNote: String(event.walletNote || '')
+    }),
     chain: 'solana',
     blockTimestampUnix: Number(event.blockTimestamp),
     blockTimestamp: isoFromSeconds(event.blockTimestamp),
@@ -345,7 +352,16 @@ export class SolanaRuntimeMonitor {
   }
 
   getEvents({ after = 0, limit = 100 } = {}) {
-    return this.store.listMonitorEvents({ after, limit }).map(publicEvent);
+    const annotations = new Map();
+    return this.store.listMonitorEvents({ after, limit }).map((event) => {
+      if (!annotations.has(event.walletAddress)) {
+        annotations.set(
+          event.walletAddress,
+          this.store.getWalletAnnotation?.(event.walletAddress) || null
+        );
+      }
+      return publicEvent(event, annotations.get(event.walletAddress));
+    });
   }
 
   getClusters() {
@@ -511,7 +527,8 @@ export class SolanaRuntimeMonitor {
         } : candidate;
         const stored = this.store.insertMonitorEvent(enriched);
         if (!stored.inserted) continue;
-        const event = publicEvent(stored.event);
+        const annotation = this.store.getWalletAnnotation?.(stored.event.walletAddress) || null;
+        const event = publicEvent(stored.event, annotation);
         insertedEvents.push(event);
         this.#emit('event', event);
         if (event.barkAlert) {
@@ -588,12 +605,13 @@ export class SolanaRuntimeMonitor {
           eventIds: [...state.eventIds]
         });
         for (const event of updated) {
+          const annotation = this.store.getWalletAnnotation?.(event.walletAddress) || null;
           this.#emit('event_update', publicEvent({
             ...event,
             tokenSymbol: metrics.symbol || event.tokenSymbol,
             tokenName: metrics.name || event.tokenName,
             tokenDecimals: metrics.decimals ?? state.decimals ?? event.tokenDecimals
-          }));
+          }, annotation));
         }
         this.lastEnrichmentError = '';
       } catch (error) {

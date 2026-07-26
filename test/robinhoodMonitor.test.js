@@ -208,7 +208,7 @@ test('two consecutive ordinary RPC failures also activate protection', async () 
 
 test('monitors only confirmed non-excluded wallets, verifies swaps, and persists exact events', async () => {
   const store = createRobinhoodStore(':memory:');
-  store.upsertWalletAnnotation({ address: walletA, alias: 'VEX profit #2', status: 'active', createdAt: 1, updatedAt: 1 });
+  store.upsertWalletAnnotation({ address: walletA, alias: 'VEX profit #2', note: 'early buyer', status: 'active', createdAt: 1, updatedAt: 1 });
   store.upsertWalletAnnotation({ address: walletB, alias: 'excluded', status: 'excluded', createdAt: 1, updatedAt: 1 });
 
   let head = 100;
@@ -261,6 +261,7 @@ test('monitors only confirmed non-excluded wallets, verifies swaps, and persists
   assert.equal(snapshot.events.length, 1);
   assert.equal(snapshot.events[0].walletAddress, walletA);
   assert.equal(snapshot.events[0].walletAlias, 'VEX profit #2');
+  assert.equal(snapshot.events[0].walletNote, 'early buyer');
   assert.equal(snapshot.events[0].tokenSymbol, 'TINY');
   assert.equal(snapshot.events[0].tokenAmount, '0.000000000000000001');
   assert.equal(snapshot.events[0].blockTimestamp, '2033-05-18T03:33:20.000Z');
@@ -269,6 +270,11 @@ test('monitors only confirmed non-excluded wallets, verifies swaps, and persists
   assert.equal(snapshot.events[0].explorerTxUrl, `https://robinhoodchain.blockscout.com/tx/${txHash}`);
   assert.equal(snapshot.clusters[0].distinctWallets, 1);
   assert.equal(snapshot.clusters[0].triggered, false);
+
+  store.upsertWalletAnnotation({ address: walletA, alias: 'VEX 2', note: 'watch exits', updatedAt: 2 });
+  const refreshedSnapshot = monitor.getSnapshot();
+  assert.equal(refreshedSnapshot.events[0].walletAlias, 'VEX 2');
+  assert.equal(refreshedSnapshot.events[0].walletNote, 'watch exits');
 
   const duplicate = store.insertMonitorEvent({
     walletAddress: walletA,

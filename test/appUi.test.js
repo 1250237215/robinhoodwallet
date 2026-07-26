@@ -1086,6 +1086,11 @@ test('social monitoring replaces the visible same-token aggregation panel with a
   assert.match(indexHtml, /id="social-bridge-badge"[^>]*data-state="loading"/);
   assert.match(appJs, /bridge\.state === 'error'/);
   assert.match(appJs, /'DeBot 异常'/);
+  assert.match(appJs, /state\.socialTransport === 'sse'/);
+  assert.match(appJs, /'社媒实时'/);
+  assert.match(appJs, /'社媒延迟'/);
+  assert.match(appJs, /SOCIAL_REALTIME_HEARTBEAT_MAX_AGE_MS = 20_000/);
+  assert.match(appJs, /SSE 实时推送/);
   assert.match(stylesCss, /\.social-bridge-badge\[data-state="error"\]/);
   for (const [feed, label] of [['all', '全部'], ['featured', '精选'], ['my', '我的']]) {
     assert.match(indexHtml, new RegExp(`data-social-feed="${feed}"[^>]*>${label}<`));
@@ -1132,6 +1137,8 @@ test('social snapshot and SSE lifecycle stay pinned to the Robinhood host servic
   assert.match(appJs, /function socialLifecycleIsCurrent\(sequence\)/);
   assert.match(appJs, /state\.socialSnapshotAbortController\?\.abort\(\)/);
   assert.match(appJs, /source\.close\(\);[\s\S]{0,180}scheduleSocialReconnect\(sequence\)/);
+  assert.match(appJs, /state\.socialTransport = 'reconnecting'/);
+  assert.match(appJs, /state\.socialTransport = 'sse'/);
   assert.match(appJs, /clearTimeout\(state\.socialReconnectTimer\)/);
   assert.match(appJs, /clearInterval\(state\.socialStatusTimer\)/);
   assert.match(appJs, /void startSocialMonitor\(\{ manual \}\)/);
@@ -1197,6 +1204,34 @@ test('real-time token events upsert asynchronous market cap and token-age enrich
   assert.match(appJs, /event\.eventType === 'buy' \? '买入时币龄' : '事件时币龄'/);
   assert.match(appJs, /marketCap === null \? '待获取'/);
   assert.match(appJs, /tokenAge !== '待获取'/);
+});
+
+test('real-time feed supports immediate wallet-note editing without a full dashboard reload', () => {
+  assert.match(appJs, /walletNote: String\(pickPresent\(\['walletNote', 'wallet_note', 'note'\]/);
+  assert.match(appJs, /data-monitor-note-edit="\$\{escapeHtml\(event\.walletAddress\)\}"/);
+  assert.match(appJs, /data-monitor-note-form="\$\{escapeHtml\(eventKey\)\}"/);
+  assert.match(appJs, /maxlength="4000"/);
+  assert.match(appJs, /elements\.monitorEventFeed\.addEventListener\('submit', \(event\) => void saveMonitorNote\(event\)\)/);
+  const quickNoteSource = appJs.slice(
+    appJs.indexOf('function updateMonitorWalletAnnotation'),
+    appJs.indexOf('function renderMonitorPage')
+  );
+  assert.match(quickNoteSource, /fetchChainJson\(context, `\/wallets\/\$\{encodeURIComponent\(editor\.address\)\}`, \{[\s\S]*method: 'PATCH'/);
+  assert.match(quickNoteSource, /body: JSON\.stringify\(\{ note \}\)/);
+  assert.match(quickNoteSource, /state\.monitorEvents = state\.monitorEvents\.map/);
+  assert.match(quickNoteSource, /walletNoteKnown: true/);
+  assert.doesNotMatch(quickNoteSource, /loadData\(/);
+  assert.match(stylesCss, /\.monitor-note-editor \{[\s\S]*grid-template-columns: 11px minmax\(0, 1fr\) 24px 24px/);
+  assert.match(stylesCss, /\.monitor-note-chip \{[\s\S]*text-overflow|\.monitor-note-chip span \{[\s\S]*text-overflow: ellipsis/);
+  assert.match(appJs, /event\.isComposing \|\| event\.keyCode === 229/);
+  assert.match(appJs, /addEventListener\('compositionstart'/);
+  assert.match(appJs, /addEventListener\('compositionend'/);
+  assert.match(appJs, /state\.monitorNoteEditor\?\.composing[\s\S]*state\.monitorNoteEditor\.value = activeInput\.value;[\s\S]*return;/);
+  assert.match(appJs, /input\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(appJs, /input\.setSelectionRange\(activeEditor\.selectionStart, activeEditor\.selectionEnd\)/);
+  assert.match(appJs, /const pickPresent = \(keys, fallback = null\)/);
+  assert.match(quickNoteSource, /const sessionId = \+\+state\.monitorNoteSessionSequence/);
+  assert.match(quickNoteSource, /state\.monitorNoteEditor\?\.sessionId === sessionId/);
 });
 
 test('real-time feed uses a compact scan-friendly hierarchy, event colors and one-shot arrival emphasis', () => {

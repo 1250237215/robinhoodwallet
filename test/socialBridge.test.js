@@ -84,7 +84,7 @@ function jsonResponse(data) {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.1.0');
+  assert.equal(manifest.version, '1.1.1');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -275,6 +275,17 @@ test('analysis result outbox durably deduplicates claims and removes only acknow
 test('DeBot page bridge polls while hidden, consumes the expected channels and uses the observed API payloads', async () => {
   const window = new FakeWindow('https://debot.ai');
   window.WebSocket = FakeWebSocket;
+  const documentListeners = new Map();
+  const document = {
+    visibilityState: 'hidden',
+    addEventListener(type, listener) {
+      if (!documentListeners.has(type)) documentListeners.set(type, []);
+      documentListeners.get(type).push(listener);
+    },
+    dispatch(type) {
+      for (const listener of documentListeners.get(type) || []) listener({ type });
+    }
+  };
   const calls = [];
   const timers = new Map();
   let nextTimerId = 1;
@@ -315,6 +326,12 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   let fetchMode = 'ok';
   const fetchImpl = async (url, options = {}) => {
     calls.push({ url: String(url), options });
+    if (fetchMode === 'network') throw new TypeError('DeBot network unavailable');
+    if (fetchMode === 'timeout') {
+      const error = new Error('DeBot request timed out');
+      error.name = 'AbortError';
+      throw error;
+    }
     if (fetchMode === 'auth') {
       return {
         ok: false,
@@ -370,11 +387,15 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   };
   vm.runInNewContext(bridgeSource('debot-page.js'), {
     window,
-    document: { visibilityState: 'hidden' },
+    document,
     fetch: fetchImpl,
     setInterval: () => 1,
     setTimeout: setPageTimeout,
     clearTimeout: clearPageTimeout,
+    Blob,
+    ArrayBuffer,
+    Uint8Array,
+    TextDecoder,
     URLSearchParams,
     URL,
     console
@@ -413,8 +434,8 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.ok === false
       && message.payload.errorType === 'DEBOT')));
   const partialHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.deepEqual(Array.from(partialHeartbeat.payload.capabilities), ['debot-analysis-v1']);
-  assert.equal(Object.hasOwn(partialHeartbeat.payload, 'error'), false);
+  assert.deepEqual(Array.from(partialHeartbeat.payload.capabilities), ['debot-analysis-v1', 'error']);
+  assert.equal(partialHeartbeat.payload.error, 'DEBOT');
   const partialDelivery = window.messages.find((message) =>
     message.type === 'posts'
       && message.payload.posts.some((post) => post.externalId === 'partial-poll-document'));
@@ -427,6 +448,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
 
   fetchMode = 'deferred-featured';
   window.messages.length = 0;
+  calls.length = 0;
   window.dispatchMessage({
     source: 'debot-social-relay',
     type: 'force-poll',
@@ -439,6 +461,12 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     message.type === 'force-poll-result'
       && message.payload.requestId === 'page-deferred-featured-probe'), false);
   assert.equal(typeof resolveDeferredFeatured, 'function');
+  for (const type of ['online', 'pageshow', 'focus']) {
+    for (const listener of window.listeners.get(type) || []) listener({ type });
+  }
+  document.visibilityState = 'visible';
+  document.dispatch('visibilitychange');
+  assert.equal(calls.filter((call) => call.url.startsWith('/api/social/twitter/')).length, 3);
   resolveDeferredFeatured();
   await eventually(() => assert.ok(window.messages.some((message) =>
     message.type === 'force-poll-result'
@@ -453,6 +481,34 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     payload: { deliveryId: immediateDelivery.payload.deliveryId, ok: true }
   });
   fetchMode = 'ok';
+
+  calls.length = 0;
+  let expectedTimelineCalls = 0;
+  for (const type of ['online', 'pageshow', 'focus']) {
+    const heartbeatCount = window.messages.filter((message) => message.type === 'heartbeat').length;
+    for (const listener of window.listeners.get(type) || []) listener({ type });
+    expectedTimelineCalls += 3;
+    await eventually(() => assert.equal(
+      calls.filter((call) => call.url.startsWith('/api/social/twitter/')).length,
+      expectedTimelineCalls
+    ));
+    await eventually(() => assert.equal(
+      window.messages.filter((message) => message.type === 'heartbeat').length,
+      heartbeatCount + 1
+    ));
+  }
+  const heartbeatCount = window.messages.filter((message) => message.type === 'heartbeat').length;
+  document.visibilityState = 'visible';
+  document.dispatch('visibilitychange');
+  expectedTimelineCalls += 3;
+  await eventually(() => assert.equal(
+    calls.filter((call) => call.url.startsWith('/api/social/twitter/')).length,
+    expectedTimelineCalls
+  ));
+  await eventually(() => assert.equal(
+    window.messages.filter((message) => message.type === 'heartbeat').length,
+    heartbeatCount + 1
+  ));
 
   calls.length = 0;
   window.messages.length = 0;
@@ -497,6 +553,26 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     .filter((message) => message.type === 'posts')
     .find((message) => message.payload.posts[0].externalId === 'document-2');
   assert.deepEqual(Array.from(featured.payload.posts[0].feedSources), ['featured']);
+
+  const binaryPackets = [
+    ['document-blob', (text) => new Blob([text])],
+    ['document-array-buffer', (text) => new TextEncoder().encode(text).buffer],
+    ['document-typed-array', (text) => new TextEncoder().encode(text)]
+  ];
+  for (const [externalId, encode] of binaryPackets) {
+    const payload = {
+      ...incoming,
+      doc_id: externalId,
+      tweet: { ...incoming.tweet, tweet_id: `${externalId}-tweet` }
+    };
+    socket.receive(encode(`42${JSON.stringify([
+      'social-user-twitter',
+      { Payload: JSON.stringify({ data: payload }) }
+    ])}`));
+    await eventually(() => assert.ok(window.messages.some((message) =>
+      message.type === 'posts'
+        && message.payload.posts.some((post) => post.externalId === externalId))));
+  }
 
   const retryPayload = { ...incoming, doc_id: 'document-retry', tweet: { ...incoming.tweet, tweet_id: 'tweet-retry' } };
   socket.receive(`42${JSON.stringify([
@@ -570,21 +646,39 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     message.type === 'command-result' && message.payload.commandId === 11)));
   assert.equal(calls.some((call) => call.url === '/api/social/subscribe/remove'), false);
 
-  fetchMode = 'auth';
+  for (const [mode, errorType] of [['network', 'NETWORK'], ['timeout', 'TIMEOUT'], ['auth', 'AUTH']]) {
+    fetchMode = mode;
+    window.messages.length = 0;
+    window.dispatchMessage({
+      source: 'debot-social-relay',
+      type: 'force-poll',
+      requestId: `page-${mode}-probe`
+    });
+    await eventually(() => assert.ok(window.messages.some((message) =>
+      message.type === 'force-poll-result'
+        && message.payload.requestId === `page-${mode}-probe`
+        && message.payload.ok === false
+        && message.payload.errorType === errorType)));
+    const errorHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
+    assert.deepEqual(Array.from(errorHeartbeat.payload.capabilities), ['debot-analysis-v1', 'error']);
+    assert.equal(errorHeartbeat.payload.error, errorType);
+    assert.equal(JSON.stringify(errorHeartbeat).includes('must-not-leave-the-page'), false);
+  }
+
+  fetchMode = 'ok';
+  window.messages.length = 0;
   window.dispatchMessage({
     source: 'debot-social-relay',
     type: 'force-poll',
-    requestId: 'page-auth-probe'
+    requestId: 'page-recovery-probe'
   });
   await eventually(() => assert.ok(window.messages.some((message) =>
     message.type === 'force-poll-result'
-      && message.payload.requestId === 'page-auth-probe'
-      && message.payload.ok === false
-      && message.payload.errorType === 'AUTH')));
-  const errorHeartbeat = window.messages.findLast((message) =>
-    message.type === 'heartbeat' && message.payload.capabilities.includes('error'));
-  assert.equal(errorHeartbeat.payload.error, 'AUTH');
-  assert.equal(JSON.stringify(errorHeartbeat).includes('must-not-leave-the-page'), false);
+      && message.payload.requestId === 'page-recovery-probe'
+      && message.payload.ok === true)));
+  const recoveredHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
+  assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
+  assert.equal(Object.hasOwn(recoveredHeartbeat.payload, 'error'), false);
 });
 
 test('DeBot page bridge executes fixed analysis jobs with sanitized results and four-worker concurrency', async () => {
