@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 import { createRobinhoodStandaloneServer } from '../src/robinhoodServer.js';
+import { createSocialApiHandler } from '../src/social/http.js';
 import { createSocialService } from '../src/social/service.js';
 
 async function withSocialServer(t, { token = '' } = {}) {
@@ -37,6 +39,101 @@ async function withSocialServer(t, { token = '' } = {}) {
 
 function auth(token) {
   return { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+}
+
+class ControlledSseRequest extends EventEmitter {
+  constructor({ remoteAddress = '127.0.0.1', headers = {} } = {}) {
+    super();
+    this.method = 'GET';
+    this.headers = { ...headers };
+    this.socket = { remoteAddress };
+  }
+}
+
+class ControlledSseResponse extends EventEmitter {
+  constructor() {
+    super();
+    this.destroyed = false;
+    this.writableEnded = false;
+    this.statusCode = null;
+    this.headers = {};
+    this.chunks = [];
+    this.backpressured = false;
+  }
+
+  setHeader(name, value) {
+    this.headers[String(name).toLowerCase()] = String(value);
+  }
+
+  writeHead(statusCode, headers = {}) {
+    this.statusCode = statusCode;
+    for (const [name, value] of Object.entries(headers)) this.setHeader(name, value);
+  }
+
+  write(chunk) {
+    if (this.destroyed || this.writableEnded) throw new Error('response is closed');
+    this.chunks.push(String(chunk));
+    return !this.backpressured;
+  }
+
+  end(chunk = '') {
+    if (chunk) this.chunks.push(String(chunk));
+    this.writableEnded = true;
+  }
+
+  destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.emit('close');
+  }
+
+  text() {
+    return this.chunks.join('');
+  }
+}
+
+function createControlledSocialService() {
+  const changes = [];
+  const subscribers = new Set();
+  let latestChangeId = 0;
+  return {
+    store: {
+      getLatestChangeId() {
+        return latestChangeId;
+      }
+    },
+    getSnapshot() {
+      return { ok: true, posts: [], watchlist: [], latestChangeId };
+    },
+    listChanges({ after, limit }) {
+      return changes.filter((change) => change.id > after).slice(0, limit);
+    },
+    subscribe(listener) {
+      subscribers.add(listener);
+      return () => subscribers.delete(listener);
+    },
+    publish(type = 'post.created') {
+      latestChangeId += 1;
+      const change = { id: latestChangeId, type, post: { externalId: `event-${latestChangeId}` } };
+      changes.push(change);
+      for (const subscriber of [...subscribers]) subscriber(change);
+      return change;
+    },
+    get subscriberCount() {
+      return subscribers.size;
+    }
+  };
+}
+
+async function openControlledStream(handler, response = new ControlledSseResponse(), requestOptions = {}) {
+  const request = new ControlledSseRequest(requestOptions);
+  const handled = await handler(
+    request,
+    response,
+    new URL('http://127.0.0.1/api/social/stream')
+  );
+  assert.equal(handled, true);
+  return { request, response };
 }
 
 test('unpaired social API stays publicly readable but rejects every write', async (t) => {
@@ -147,6 +244,225 @@ test('paired bridge authenticates heartbeat, ingestion, watchlist commands and a
   assert.equal((await acknowledgement.json()).command.status, 'completed');
 });
 
+test('watchlist event preferences patch locally, allow empty values and publish only real changes', async (t) => {
+  const token = 'watch-event-device-token';
+  const { baseUrl, socialService } = await withSocialServer(t, { token });
+  const addedResponse = await fetch(`${baseUrl}/api/social/watchlist`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({ account: '@alice' })
+  });
+  const added = await addedResponse.json();
+  const entry = added.entries[0];
+  assert.equal(addedResponse.status, 202);
+  assert.deepEqual(entry.eventTypes, [
+    'post', 'reply', 'quote', 'repost', 'delete', 'follow', 'unfollow',
+    'profile_name', 'profile_avatar', 'profile_bio'
+  ]);
+  const command = socialService.claimCommands({ limit: 1 }).commands[0];
+  socialService.acknowledgeCommand(command.id, { success: true, remoteId: 'debot-alice' });
+  const before = socialService.store.listWatchlist()[0];
+  const cursorBefore = socialService.store.getLatestChangeId();
+  const published = [];
+  const unsubscribe = socialService.subscribe((change) => published.push(change));
+  t.after(unsubscribe);
+
+  const patchedResponse = await fetch(`${baseUrl}/api/social/watchlist/${entry.id}`, {
+    method: 'PATCH',
+    headers: auth(token),
+    body: JSON.stringify({ eventTypes: ['profile_bio', 'post', 'post'] })
+  });
+  const patched = await patchedResponse.json();
+  assert.equal(patchedResponse.status, 200);
+  assert.equal(patched.changed, true);
+  assert.deepEqual(patched.entry.eventTypes, ['post', 'profile_bio']);
+  assert.equal(patched.entry.syncStatus, before.syncStatus);
+  assert.equal(patched.entry.lastSyncedAt, before.lastSyncedAt);
+  assert.equal(patched.counts.pendingCommands, 0);
+  assert.equal(socialService.store.getLatestChangeId(), cursorBefore + 1);
+  assert.equal(published.length, 1);
+  assert.equal(published[0].type, 'watchlist.updated');
+
+  const idempotentResponse = await fetch(`${baseUrl}/api/social/watchlist/${entry.id}`, {
+    method: 'PATCH',
+    headers: auth(token),
+    body: JSON.stringify({ eventTypes: ['post', 'profile_bio'] })
+  });
+  const idempotent = await idempotentResponse.json();
+  assert.equal(idempotent.changed, false);
+  assert.equal(idempotent.change, null);
+  assert.equal(socialService.store.getLatestChangeId(), cursorBefore + 1);
+  assert.equal(published.length, 1);
+
+  const emptyResponse = await fetch(`${baseUrl}/api/social/watchlist/${entry.id}`, {
+    method: 'PATCH',
+    headers: auth(token),
+    body: JSON.stringify({ eventTypes: [] })
+  });
+  assert.deepEqual((await emptyResponse.json()).entry.eventTypes, []);
+
+  for (const eventTypes of ['post', ['unknown']]) {
+    const invalid = await fetch(`${baseUrl}/api/social/watchlist/${entry.id}`, {
+      method: 'PATCH',
+      headers: auth(token),
+      body: JSON.stringify({ eventTypes })
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal((await invalid.json()).code, 'INVALID_SOCIAL_DATA');
+  }
+  const missing = await fetch(`${baseUrl}/api/social/watchlist/999999`, {
+    method: 'PATCH',
+    headers: auth(token),
+    body: JSON.stringify({ eventTypes: ['post'] })
+  });
+  assert.equal(missing.status, 404);
+  assert.equal((await missing.json()).code, 'WATCHLIST_NOT_FOUND');
+});
+
+test('large watchlist reconciliation publishes every change beyond the store page limit', async (t) => {
+  const { socialService } = await withSocialServer(t, { token: 'large-watchlist-device-token' });
+  const published = [];
+  const unsubscribe = socialService.subscribe((change) => published.push(change));
+  t.after(unsubscribe);
+  const accounts = Array.from({ length: 1_005 }, (_, index) => ({
+    platform: 'twitter',
+    handle: `account_${String(index).padStart(4, '0')}`,
+    remoteId: String(index + 1)
+  }));
+
+  const result = socialService.reconcileWatchlist(accounts);
+
+  assert.equal(result.changes.length, accounts.length);
+  assert.equal(published.length, accounts.length);
+  assert.deepEqual(published.map((change) => change.id), result.changes.map((change) => change.id));
+  assert.equal(published.at(-1).id, socialService.store.getLatestChangeId());
+});
+
+test('watchlist snapshot API rejects legacy snapshots after a versioned bridge session', async (t) => {
+  const token = 'versioned-watchlist-device-token';
+  const { baseUrl } = await withSocialServer(t, { token });
+  const snapshotUrl = `${baseUrl}/api/social/bridge/watchlist/snapshot`;
+  const session = {
+    complete: true,
+    snapshotSessionId: 'chrome-session-current',
+    snapshotSessionStartedAt: Date.parse('2026-07-17T12:00:00Z')
+  };
+  const sendSnapshot = (body) => fetch(snapshotUrl, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify(body)
+  });
+
+  const first = await sendSnapshot({
+    ...session,
+    snapshotRevision: 1,
+    accounts: [{ handle: 'alice' }]
+  });
+  assert.equal(first.status, 200);
+  assert.equal((await first.json()).snapshot.accepted, true);
+
+  const second = await sendSnapshot({
+    ...session,
+    snapshotRevision: 2,
+    accounts: [{ handle: 'alice' }, { handle: 'bob' }]
+  });
+  assert.equal(second.status, 200);
+  assert.equal((await second.json()).snapshot.accepted, true);
+
+  const lateLegacy = await sendSnapshot({
+    complete: true,
+    accounts: [{ handle: 'alice' }]
+  });
+  assert.equal(lateLegacy.status, 200);
+  assert.deepEqual((await lateLegacy.json()).snapshot, {
+    accepted: false,
+    versioned: false,
+    reason: 'legacy-snapshot-after-versioned-session'
+  });
+
+  const watchlist = await (await fetch(`${baseUrl}/api/social/watchlist`)).json();
+  assert.deepEqual(watchlist.entries.map((entry) => entry.handle), ['alice', 'bob']);
+});
+
+test('snapshot includes only active personal watchlist posts before applying its limit', async (t) => {
+  const token = 'personal-snapshot-device-token';
+  const { baseUrl } = await withSocialServer(t, { token });
+  const addedResponse = await fetch(`${baseUrl}/api/social/watchlist`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({ account: { accountKey: 'alice-key', handle: 'alice' } })
+  });
+  const added = await addedResponse.json();
+  const watchlistId = added.entries[0].id;
+  const ingested = await fetch(`${baseUrl}/api/social/bridge/posts`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({
+      posts: [
+        {
+          source: 'twitter',
+          id: 'watched-older-post',
+          authorHandle: 'Alice',
+          text: 'personal monitored account',
+          publishedAt: '2026-07-17T12:00:00Z'
+        },
+        {
+          source: 'twitter',
+          id: 'noise-newer-post',
+          authorHandle: 'noise_account',
+          text: 'unrelated historical feed record',
+          publishedAt: '2026-07-17T12:01:00Z'
+        }
+      ]
+    })
+  });
+  assert.equal(ingested.status, 200);
+
+  let snapshot = await (await fetch(`${baseUrl}/api/social?postLimit=1`)).json();
+  assert.deepEqual(snapshot.posts.map((post) => post.externalId), ['watched-older-post']);
+
+  const emptyPreferences = await fetch(`${baseUrl}/api/social/watchlist/${watchlistId}`, {
+    method: 'PATCH',
+    headers: auth(token),
+    body: JSON.stringify({ eventTypes: [] })
+  });
+  assert.equal(emptyPreferences.status, 200);
+  snapshot = await (await fetch(`${baseUrl}/api/social?postLimit=1`)).json();
+  assert.deepEqual(snapshot.posts, []);
+
+  const postPreferences = await fetch(`${baseUrl}/api/social/watchlist/${watchlistId}`, {
+    method: 'PATCH',
+    headers: auth(token),
+    body: JSON.stringify({ eventTypes: ['post'] })
+  });
+  assert.equal(postPreferences.status, 200);
+  snapshot = await (await fetch(`${baseUrl}/api/social?postLimit=1`)).json();
+  assert.deepEqual(snapshot.posts.map((post) => post.externalId), ['watched-older-post']);
+
+  const removed = await fetch(`${baseUrl}/api/social/watchlist/${watchlistId}`, {
+    method: 'DELETE',
+    headers: auth(token)
+  });
+  assert.equal(removed.status, 202);
+  snapshot = await (await fetch(`${baseUrl}/api/social?postLimit=1`)).json();
+  assert.deepEqual(snapshot.posts, []);
+
+  const readded = await fetch(`${baseUrl}/api/social/watchlist`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({ account: { accountKey: 'alice-key', handle: 'alice' } })
+  });
+  assert.equal(readded.status, 202);
+  snapshot = await (await fetch(`${baseUrl}/api/social?postLimit=1`)).json();
+  assert.deepEqual(snapshot.posts.map((post) => post.externalId), ['watched-older-post']);
+
+  const fullHistory = await (await fetch(`${baseUrl}/api/social/posts?limit=10`)).json();
+  assert.deepEqual(
+    fullHistory.posts.map((post) => post.externalId).sort(),
+    ['noise-newer-post', 'watched-older-post'].sort()
+  );
+});
+
 test('social posts API persists merged feed membership and filters featured and my feeds', async (t) => {
   const token = 'feed-device-token';
   const { baseUrl } = await withSocialServer(t, { token });
@@ -190,7 +506,7 @@ test('social posts API persists merged feed membership and filters featured and 
   assert.equal((await invalid.json()).code, 'INVALID_SOCIAL_DATA');
 });
 
-test('social posts API filters non-tweet activity without blocking real tweets', async (t) => {
+test('social posts API persists validated relationship and profile activity', async (t) => {
   const token = 'relationship-device-token';
   const { baseUrl } = await withSocialServer(t, { token });
   const encodedUnfollow = Buffer.from('unfollow:star_okx:bankrbot').toString('base64url');
@@ -227,7 +543,17 @@ test('social posts API filters non-tweet activity without blocking real tweets',
           source: 'twitter',
           id: 'profile:star_okx:1785048000000',
           kind: 'profile',
-          authorHandle: 'star_okx'
+          authorHandle: 'star_okx',
+          profileChanges: ['avatar', 'name'],
+          profileDetail: {
+            name: { before: 'Star', after: 'Star_OKX' },
+            avatar: {
+              before: 'https://pbs.twimg.com/profile_images/old.jpg',
+              after: 'https://pbs.twimg.com/profile_images/new.jpg'
+            }
+          },
+          feedSource: 'my',
+          publishedAt: '2026-07-17T12:01:30Z'
         },
         {
           source: 'twitter',
@@ -245,30 +571,49 @@ test('social posts API filters non-tweet activity without blocking real tweets',
   assert.equal(response.status, 200);
   const ingestion = await response.json();
   assert.deepEqual(ingestion.summary, {
-    created: 1,
+    created: 4,
     updated: 0,
     deleted: 0,
     restored: 0,
     unchanged: 0,
-    filtered: 3
+    filtered: 0
   });
-  assert.deepEqual(ingestion.filtered.map((item) => item.reason), [
-    'non-tweet:unfollow',
-    'non-tweet:follow',
-    'non-tweet:profile'
-  ]);
+  assert.deepEqual(ingestion.filtered, []);
 
   const payload = await (await fetch(`${baseUrl}/api/social/posts?feedSource=my`)).json();
-  assert.deepEqual(payload.posts.map((post) => post.externalId), ['1900000000000000000']);
-  assert.equal(payload.posts[0].debotDiscoveredAt, discoveredAt);
-  assert.equal(payload.posts[0].discoveredAt, discoveredAt);
-  assert.equal(payload.posts[0].receivedAt, discoveredAt);
-  assert.equal(payload.posts[0].vpsIngestedAt >= discoveredAt, true);
-  assert.equal(payload.posts[0].ingestedAt, payload.posts[0].vpsIngestedAt);
-  assert.equal(payload.posts[0].storedAt, payload.posts[0].vpsIngestedAt);
+  assert.deepEqual(payload.posts.map((post) => post.kind), ['post', 'profile', 'follow', 'unfollow']);
+  const tweet = payload.posts.find((post) => post.kind === 'post');
+  assert.equal(tweet.debotDiscoveredAt, discoveredAt);
+  assert.equal(tweet.discoveredAt, discoveredAt);
+  assert.equal(tweet.receivedAt, discoveredAt);
+  assert.equal(tweet.vpsIngestedAt >= discoveredAt, true);
+  assert.equal(tweet.ingestedAt, tweet.vpsIngestedAt);
+  assert.equal(tweet.storedAt, tweet.vpsIngestedAt);
+  const profile = payload.posts.find((post) => post.kind === 'profile');
+  assert.deepEqual(profile.profileChanges, ['name', 'avatar']);
+  assert.deepEqual(profile.profileDetail.name, { before: 'Star', after: 'Star_OKX' });
+  assert.deepEqual(profile.profileDetail.avatar, {
+    before: 'https://pbs.twimg.com/profile_images/old.jpg',
+    after: 'https://pbs.twimg.com/profile_images/new.jpg'
+  });
 
   const searched = await (await fetch(`${baseUrl}/api/social/posts?q=bankrbot`)).json();
-  assert.deepEqual(searched.posts, []);
+  assert.deepEqual(searched.posts.map((post) => post.kind), ['unfollow']);
+
+  const unverifiedProfile = await fetch(`${baseUrl}/api/social/bridge/posts`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({
+      posts: [{
+        source: 'twitter',
+        id: 'profile:star_okx:1785049000000',
+        kind: 'profile',
+        authorHandle: 'star_okx'
+      }]
+    })
+  });
+  assert.equal(unverifiedProfile.status, 400);
+  assert.equal((await unverifiedProfile.json()).code, 'INVALID_SOCIAL_DATA');
 });
 
 test('DeBot analysis bridge uses bearer-only claims, inflight dedupe and short result caching', async (t) => {
@@ -476,6 +821,116 @@ test('DeBot result endpoint enforces payload limits and stores only coarse remot
   });
   assert.equal(bodyLimit.status, 413);
   assert.equal((await bodyLimit.json()).code, 'BODY_TOO_LARGE');
+});
+
+test('social SSE caps public connections and releases capacity after cleanup', async () => {
+  const socialService = createControlledSocialService();
+  const handler = createSocialApiHandler({ service: socialService, maxStreams: 2 });
+  const first = await openControlledStream(handler);
+  const second = await openControlledStream(handler);
+  assert.equal(first.response.statusCode, 200);
+  assert.equal(second.response.statusCode, 200);
+  assert.equal(socialService.subscriberCount, 2);
+
+  const rejected = await openControlledStream(handler);
+  assert.equal(rejected.response.statusCode, 503);
+  assert.equal(rejected.response.headers['retry-after'], '1');
+  assert.deepEqual(JSON.parse(rejected.response.text()), {
+    ok: false,
+    error: 'Too many active social streams; reconnect shortly',
+    code: 'SOCIAL_STREAM_CAPACITY',
+    retryable: true
+  });
+  assert.equal(socialService.subscriberCount, 2);
+
+  first.request.emit('close');
+  assert.equal(socialService.subscriberCount, 1);
+  const replacement = await openControlledStream(handler);
+  assert.equal(replacement.response.statusCode, 200);
+  assert.match(replacement.response.text(), /event: heartbeat/);
+  assert.equal(socialService.subscriberCount, 2);
+
+  handler.closeStreams();
+  assert.equal(socialService.subscriberCount, 0);
+  assert.match(second.response.text(), /retry: 1000/);
+  assert.match(replacement.response.text(), /retry: 1000/);
+});
+
+test('social SSE limits each proxy client without consuming capacity for other clients', async () => {
+  const socialService = createControlledSocialService();
+  const handler = createSocialApiHandler({
+    service: socialService,
+    maxStreams: 6,
+    maxStreamsPerClient: 2
+  });
+  const fromClient = (address) => ({ headers: { 'x-forwarded-for': address } });
+  const first = await openControlledStream(handler, new ControlledSseResponse(), fromClient('198.51.100.10'));
+  const second = await openControlledStream(handler, new ControlledSseResponse(), fromClient('198.51.100.10'));
+  const rejected = await openControlledStream(
+    handler,
+    new ControlledSseResponse(),
+    fromClient('203.0.113.99, 198.51.100.10')
+  );
+  assert.equal(rejected.response.statusCode, 503);
+  assert.equal(JSON.parse(rejected.response.text()).code, 'SOCIAL_STREAM_CLIENT_CAPACITY');
+
+  const otherClient = await openControlledStream(
+    handler,
+    new ControlledSseResponse(),
+    fromClient('198.51.100.11')
+  );
+  assert.equal(otherClient.response.statusCode, 200);
+
+  first.request.emit('close');
+  const replacement = await openControlledStream(
+    handler,
+    new ControlledSseResponse(),
+    fromClient('198.51.100.10')
+  );
+  assert.equal(replacement.response.statusCode, 200);
+  handler.closeStreams();
+  assert.equal(socialService.subscriberCount, 0);
+  assert.equal(second.response.writableEnded, true);
+});
+
+test('social SSE bounds each slow client without delaying healthy clients', async () => {
+  const socialService = createControlledSocialService();
+  const handler = createSocialApiHandler({
+    service: socialService,
+    maxStreams: 3,
+    maxPendingEvents: 2,
+    maxPendingBytes: 10_000
+  });
+  const slow = await openControlledStream(handler);
+  const fast = await openControlledStream(handler);
+
+  slow.response.backpressured = true;
+  socialService.publish();
+  socialService.publish();
+  socialService.publish();
+  assert.equal(slow.response.destroyed, false);
+  assert.equal((slow.response.text().match(/event: post\.created/g) || []).length, 1);
+  assert.equal((fast.response.text().match(/event: post\.created/g) || []).length, 3);
+
+  slow.response.backpressured = false;
+  slow.response.emit('drain');
+  assert.equal((slow.response.text().match(/event: post\.created/g) || []).length, 3);
+
+  slow.response.backpressured = true;
+  socialService.publish();
+  socialService.publish();
+  socialService.publish();
+  socialService.publish();
+  assert.equal(slow.response.destroyed, true);
+  assert.equal(socialService.subscriberCount, 1);
+  assert.equal((fast.response.text().match(/event: post\.created/g) || []).length, 7);
+  assert.match(fast.response.text(), /"externalId":"event-7"/);
+
+  const replacement = await openControlledStream(handler);
+  assert.equal(replacement.response.statusCode, 200);
+  assert.equal(socialService.subscriberCount, 2);
+  handler.closeStreams();
+  assert.equal(socialService.subscriberCount, 0);
 });
 
 test('social SSE sends an initial snapshot and live normalized changes', async (t) => {

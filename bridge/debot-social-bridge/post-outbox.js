@@ -2,8 +2,10 @@ const DEFAULT_STORAGE_KEY = 'debotSocialPostOutboxV1';
 const DEFAULT_MAX_RECORDS = 1_000;
 const DEFAULT_MAX_BYTES = 4 * 1024 * 1024;
 const DEFAULT_BATCH_LIMIT = 200;
-const SCHEMA_VERSION = 1;
-const TWEET_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete']);
+const SCHEMA_VERSION = 2;
+const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
+const PROFILE_CHANGE_TYPES = new Set(['name', 'avatar', 'bio']);
+const SOCIAL_HANDLE_PATTERN = /^[a-z0-9_]{1,15}$/i;
 
 function text(value, maximum) {
   return String(value ?? '').slice(0, maximum);
@@ -14,15 +16,44 @@ function number(value) {
   return Number.isFinite(result) ? result : 0;
 }
 
-function account(value) {
+function account(value, { includeUrl = false } = {}) {
   const item = value && typeof value === 'object' ? value : {};
   return {
     id: text(item.id, 240),
     handle: text(item.handle, 240),
     name: text(item.name, 500),
     avatarUrl: text(item.avatarUrl, 2_000),
-    followersCount: number(item.followersCount)
+    followersCount: number(item.followersCount),
+    ...(includeUrl ? { url: text(item.url, 2_000) } : {})
   };
+}
+
+function profileChanges(value) {
+  return [...new Set((Array.isArray(value) ? value : [])
+    .map((item) => text(item, 20).toLowerCase())
+    .filter((item) => PROFILE_CHANGE_TYPES.has(item)))];
+}
+
+function profileDetail(value, changes) {
+  const detail = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const normalized = {};
+  for (const change of changes) {
+    const maximum = change === 'bio' ? 10_000 : change === 'avatar' ? 2_000 : 500;
+    const item = detail[change] && typeof detail[change] === 'object' ? detail[change] : {};
+    normalized[change] = { before: text(item.before, maximum), after: text(item.after, maximum) };
+  }
+  return normalized;
+}
+
+function validPersistedPost(post) {
+  if (!post.source || !post.externalId || !SOCIAL_EVENT_KINDS.has(post.kind)) return false;
+  if (['follow', 'unfollow'].includes(post.kind)) {
+    return SOCIAL_HANDLE_PATTERN.test(post.author.handle) && SOCIAL_HANDLE_PATTERN.test(post.target?.handle || '');
+  }
+  if (post.kind === 'profile') {
+    return SOCIAL_HANDLE_PATTERN.test(post.author.handle) && post.profileChanges.length > 0;
+  }
+  return true;
 }
 
 // The outbox accepts sanitized posts, then projects them onto the same narrow
@@ -31,11 +62,18 @@ function account(value) {
 function persistedPost(value) {
   const post = value && typeof value === 'object' ? value : {};
   const author = post.author && typeof post.author === 'object' ? post.author : {};
+  const changes = post.kind === 'profile' ? profileChanges(post.profileChanges) : [];
   return {
     source: text(post.source, 40),
     externalId: text(post.externalId, 240),
     kind: text(post.kind, 20),
     author: account(author),
+    ...(['follow', 'unfollow'].includes(post.kind)
+      ? { target: account(post.target, { includeUrl: true }) }
+      : {}),
+    ...(post.kind === 'profile'
+      ? { profileChanges: changes, profileDetail: profileDetail(post.profileDetail, changes) }
+      : {}),
     content: text(post.content, 100_000),
     translatedContent: text(post.translatedContent, 100_000),
     url: text(post.url, 2_000),
@@ -131,7 +169,7 @@ function normalizeState(value) {
   for (const candidate of value.records) {
     if (!candidate || typeof candidate !== 'object') continue;
     const post = persistedPost(candidate.post);
-    if (!post.source || !post.externalId || !TWEET_KINDS.has(post.kind)) continue;
+    if (!validPersistedPost(post)) continue;
     const key = text(candidate.key, 160);
     if (!key || seenKeys.has(key)) continue;
     seenKeys.add(key);
@@ -214,8 +252,9 @@ export function createPostOutbox({
   }
 
   return Object.freeze({
-    enqueue(posts) {
+    enqueue(posts, { requireAll = false } = {}) {
       return serialize(async () => {
+        if (typeof requireAll !== 'boolean') throw new TypeError('requireAll must be a boolean');
         const input = Array.isArray(posts) ? posts : [posts];
         const state = await load();
         let added = 0;
@@ -223,40 +262,86 @@ export function createPostOutbox({
         let rejected = 0;
         let overflow = 0;
         const acceptedKeys = [];
+        const prepared = [];
+        const knownVersions = new Set(state.records.map((record) => (
+          `${record.source}\u001f${record.externalId}\u001f${record.fingerprint}`
+        )));
 
         for (const value of input) {
           const post = persistedPost(value);
-          if (!post.source || !post.externalId || !TWEET_KINDS.has(post.kind)) {
+          if (!validPersistedPost(post)) {
             rejected += 1;
             continue;
           }
           const fingerprint = lightweightHash(stableStringify(versionValue(post)));
-          const duplicate = state.records.some((record) => record.source === post.source
-            && record.externalId === post.externalId
-            && record.fingerprint === fingerprint);
-          if (duplicate) {
+          const versionKey = `${post.source}\u001f${post.externalId}\u001f${fingerprint}`;
+          if (knownVersions.has(versionKey)) {
             duplicates += 1;
             continue;
           }
-          const key = uniqueRecordKey(state, post, fingerprint);
+          knownVersions.add(versionKey);
+          prepared.push({ post, fingerprint });
+        }
+
+        const append = (target, { post, fingerprint }) => {
+          const key = uniqueRecordKey(target, post, fingerprint);
           const record = {
             key,
             source: post.source,
             externalId: post.externalId,
             fingerprint,
             enqueuedAt: Math.max(0, number(now())),
-            sequence: state.nextSequence,
+            sequence: target.nextSequence,
             post
           };
-          state.records.push(record);
-          if (state.records.length > resolvedMaxRecords || stateBytes(state) > resolvedMaxBytes) {
-            state.records.pop();
-            overflow += 1;
-            continue;
+          target.records.push(record);
+          target.nextSequence += 1;
+          return { key, fits: target.records.length <= resolvedMaxRecords && stateBytes(target) <= resolvedMaxBytes };
+        };
+
+        if (requireAll && prepared.length) {
+          const candidate = {
+            ...state,
+            records: state.records.slice()
+          };
+          const candidateKeys = [];
+          let fits = true;
+          for (const item of prepared) {
+            const appended = append(candidate, item);
+            candidateKeys.push(appended.key);
+            if (!appended.fits) {
+              fits = false;
+              break;
+            }
           }
-          state.nextSequence += 1;
-          acceptedKeys.push(key);
-          added += 1;
+          if (!fits) {
+            return {
+              added: 0,
+              duplicates,
+              rejected,
+              overflow: prepared.length,
+              queued: state.records.length,
+              bytes: stateBytes(state),
+              keys: [],
+              atomic: true
+            };
+          }
+          state.records = candidate.records;
+          state.nextSequence = candidate.nextSequence;
+          acceptedKeys.push(...candidateKeys);
+          added = prepared.length;
+        } else {
+          for (const item of prepared) {
+            const appended = append(state, item);
+            if (!appended.fits) {
+              state.records.pop();
+              state.nextSequence -= 1;
+              overflow += 1;
+              continue;
+            }
+            acceptedKeys.push(appended.key);
+            added += 1;
+          }
         }
 
         const bytes = stateBytes(state);
@@ -268,7 +353,8 @@ export function createPostOutbox({
           overflow,
           queued: state.records.length,
           bytes,
-          keys: acceptedKeys
+          keys: acceptedKeys,
+          atomic: requireAll
         };
       });
     },

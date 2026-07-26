@@ -1080,7 +1080,15 @@ test('monitoring prefers SSE event delivery and falls back to two-second increme
   assert.match(appJs, /state\.monitorEvents\.sort\(\(left, right\) => monitorEventTimestamp\(right\) - monitorEventTimestamp\(left\)\)/);
 });
 
-test('social monitoring replaces the visible same-token aggregation panel with a larger complete feed', () => {
+test('social monitoring is a personal-watchlist feed without global feed, source, or chain filters', () => {
+  const socialPanelHtml = indexHtml.slice(
+    indexHtml.indexOf('<section class="social-monitor-panel"'),
+    indexHtml.indexOf('<section class="monitor-feed-panel"')
+  );
+  const socialRenderSource = appJs.slice(
+    appJs.indexOf('function renderSocialFeed'),
+    appJs.indexOf('function renderSocialMonitor')
+  );
   assert.match(indexHtml, /id="social-monitor-panel"[^>]*aria-labelledby="social-monitor-title"/);
   assert.match(indexHtml, /id="social-monitor-title">社媒监控/);
   assert.match(indexHtml, /id="social-bridge-badge"[^>]*data-state="loading"/);
@@ -1092,12 +1100,10 @@ test('social monitoring replaces the visible same-token aggregation panel with a
   assert.match(appJs, /SOCIAL_REALTIME_HEARTBEAT_MAX_AGE_MS = 45_000/);
   assert.match(appJs, /SSE 实时推送/);
   assert.match(stylesCss, /\.social-bridge-badge\[data-state="error"\]/);
-  for (const [feed, label] of [['all', '全部'], ['featured', '精选'], ['my', '我的']]) {
-    assert.match(indexHtml, new RegExp(`data-social-feed="${feed}"[^>]*>${label}<`));
-  }
+  assert.doesNotMatch(socialPanelHtml, /data-social-feed=|id="social-(?:feed-tabs|platform-filter|chain-filter|source-filter)"/);
+  assert.doesNotMatch(appJs, /socialFeedTabs|socialFeedFilter|socialPlatformFilter|socialChainFilter/);
+  assert.doesNotMatch(socialRenderSource, /social-(?:source|chain)-chip|socialSourceLabel/);
   for (const id of [
-    'social-platform-filter',
-    'social-chain-filter',
     'social-search',
     'social-watchlist-manager',
     'social-watchlist-form',
@@ -1107,32 +1113,102 @@ test('social monitoring replaces the visible same-token aggregation panel with a
   ]) {
     assert.match(indexHtml, new RegExp(`id="${id}"`));
   }
-  assert.match(indexHtml, /value="twitter">推特</);
-  assert.match(indexHtml, /value="binance">币安广场</);
-  assert.match(indexHtml, /value="robinhood">Robinhood</);
-  assert.match(indexHtml, /value="base">Base</);
-  assert.match(indexHtml, /value="solana">Solana</);
-  assert.doesNotMatch(indexHtml, /id="monitor-cluster-(?:title|summary|list)"|60 秒同币聚合/);
+  assert.match(socialPanelHtml, /id="social-search"[^>]*placeholder="搜索个人监控账号或内容"[^>]*aria-label="搜索个人社媒监控"/);
+  assert.doesNotMatch(socialPanelHtml, /id="social-watchlist-platform"|<span>平台<\/span>|value="binance"/);
+  assert.match(appJs, /accounts: lines\.map\(\(handle\) => \(\{ handle, platform: 'twitter' \}\)\)/);
+  assert.doesNotMatch(socialPanelHtml, /value="(?:robinhood|base|solana)"/);
+  assert.doesNotMatch(indexHtml, /id="monitor-cluster-(?:title|summary|list)"|(?:2 分钟|60 秒)同币聚合/);
   assert.match(appJs, /socialMonitorPanel: document\.querySelector\('#social-monitor-panel'\)/);
   assert.match(appJs, /function renderSocialFeed\(\)/);
+  assert.match(appJs, /function socialWatchEntryForPost\(post\)[\s\S]*state\.socialWatchlist\.find/);
+  assert.match(appJs, /function visibleSocialPosts\(\)[\s\S]*if \(!isEnabledPersonalSocialEvent\(post\)\) return false/);
+  assert.match(appJs, /条个人动态/);
+  assert.match(appJs, /暂无个人监控动态/);
   assert.match(appJs, /post\.translatedContent/);
   assert.match(appJs, /post\.contractAddresses/);
   assert.match(appJs, /post\.media/);
   assert.match(stylesCss, /\.monitor-workspace \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(stylesCss, /\.social-feed \{[\s\S]*height: min\(820px, calc\(100vh - 118px\)\)/);
-  assert.match(stylesCss, /@media \(min-width: 961px\) and \(max-width: 1220px\)[\s\S]*\.social-monitor-toolbar \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(stylesCss, /\.social-monitor-toolbar \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(stylesCss, /@media \(min-width: 961px\) and \(max-width: 1220px\)[\s\S]*\.social-monitor-toolbar \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(stylesCss, /@media \(max-width: 960px\)[\s\S]*\.monitor-workspace \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.social-feed \{[\s\S]*height: 68svh/);
 });
 
-test('social feed defensively filters relationship and profile activity from snapshots and SSE', () => {
-  assert.match(appJs, /const SOCIAL_TWEET_KINDS = new Set\(\['post', 'reply', 'quote', 'repost', 'delete'\]\)/);
-  assert.match(appJs, /function isSocialTweet\(post\)/);
-  assert.match(appJs, /if \(!SOCIAL_TWEET_KINDS\.has\(kind\)\) return false/);
-  assert.match(appJs, /if \(socialActivityIdentity\(post\)\) return false/);
-  assert.match(appJs, /\^\(\?:follow\|unfollow\|profile\)\(\?:\:\|_\)/);
-  assert.equal((appJs.match(/if \(!isSocialTweet\(post\)\) continue/g) || []).length, 2);
-  assert.match(appJs, /function visibleSocialPosts\(\)[\s\S]*if \(!isSocialTweet\(post\)\) return false/);
+test('each watched account exposes ten independent behavior controls and preserves explicit opt-out', () => {
+  const eventTypes = [
+    'post',
+    'reply',
+    'quote',
+    'repost',
+    'delete',
+    'follow',
+    'unfollow',
+    'profile_name',
+    'profile_avatar',
+    'profile_bio'
+  ];
+  assert.match(indexHtml, /id="social-event-editor"[^>]*aria-labelledby="social-event-editor-title"/);
+  assert.match(indexHtml, /id="social-event-editor-form"/);
+  assert.match(indexHtml, /id="social-event-options"/);
+  for (const eventType of eventTypes) {
+    assert.match(indexHtml, new RegExp(`name="socialEventType" value="${eventType}"`));
+  }
+  assert.match(indexHtml, /id="social-event-select-all"[^>]*>全部选择</);
+  assert.match(indexHtml, /id="social-event-clear-all"[^>]*>全部关闭</);
+  assert.match(indexHtml, /id="social-event-editor-save"/);
+  assert.match(appJs, /const SOCIAL_EVENT_TYPES = Object\.freeze\(\[[\s\S]*'profile_bio'[\s\S]*\]\)/);
+  assert.match(appJs, /if \(!Array\.isArray\(value\)\) return \[\.\.\.SOCIAL_EVENT_TYPES\]/);
+  assert.match(appJs, /return SOCIAL_EVENT_TYPES\.filter\(\(item\) => requested\.has\(item\)\)/);
+  assert.match(appJs, /function isEnabledPersonalSocialEvent\(post\)[\s\S]*const watchEntry = socialWatchEntryForPost\(post\);[\s\S]*if \(!watchEntry\) return false/);
+  assert.match(appJs, /const enabled = new Set\(normalizedSocialEventTypes\(watchEntry\.eventTypes\)\);\s+return socialEventPreferenceKeys\(post\)\.some\(\(eventType\) => enabled\.has\(eventType\)\)/);
+  assert.match(appJs, /data-social-watchlist-edit="\$\{id\}"/);
+  assert.match(appJs, /openSocialEventEditor\(editButton\.dataset\.socialWatchlistEdit\)/);
+  assert.match(appJs, /setSocialEventEditorSelection\(SOCIAL_EVENT_TYPES\)/);
+  assert.match(appJs, /setSocialEventEditorSelection\(\[\]\)/);
+  assert.match(appJs, /runSocialWrite\('PATCH', `\/watchlist\/\$\{id\}`, \{ eventTypes \}\)/);
+  assert.match(appJs, /eventTypes\.length\s+\? `\$\{eventTypes\.length\} 项行为`\s+: '已暂停'/);
+  assert.match(stylesCss, /\.social-event-options \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.social-event-options \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.social-event-editor-actions \{[\s\S]*flex-direction: column/);
+});
+
+test('social feed validates and accurately renders relationship and profile activity from snapshots and SSE', () => {
+  const eventValidationSource = appJs.slice(
+    appJs.indexOf('function socialActivityIdentity'),
+    appJs.indexOf('function socialPostKey')
+  );
+  assert.match(appJs, /const SOCIAL_EVENT_KINDS = new Set\(\['post', 'reply', 'quote', 'repost', 'delete', 'follow', 'unfollow', 'profile'\]\)/);
+  assert.match(eventValidationSource, /const expectedActor = authorHandle\.toLowerCase\(\)/);
+  assert.match(eventValidationSource, /!expectedActor \|\| colon\[2\]\.toLowerCase\(\) === expectedActor/);
+  assert.match(eventValidationSource, /SOCIAL_HANDLE_PATTERN\.test\(targetHandle\)/);
+  assert.match(eventValidationSource, /if \(SOCIAL_ACTIVITY_KINDS\.has\(kind\)\) \{[\s\S]*SOCIAL_HANDLE_PATTERN\.test\(activity\.actorHandle\)[\s\S]*SOCIAL_HANDLE_PATTERN\.test\(activity\.targetHandle\)/);
+  assert.match(eventValidationSource, /if \(kind === 'profile'\) \{[\s\S]*SOCIAL_HANDLE_PATTERN\.test\(normalizeSocialHandle\(post\?\.author\?\.handle\)\)[\s\S]*socialProfileChanges\(post\)\.length > 0/);
+  assert.match(eventValidationSource, /if \(\/\^\(\?:follow\|unfollow\|profile\)\(\?:\:\|_\)\/i\.test\(externalId\)\) return false/);
+  assert.match(appJs, /const actionLabel = activity\.kind === 'follow' \? '关注了' : '取消关注了'/);
+  assert.match(appJs, /if \(!targetHandle\) return ''/);
+  assert.match(appJs, /data-profile-change="avatar"/);
+  assert.match(appJs, /<del>\$\{escapeHtml\(before \|\| '空'\)\}<\/del>/);
+  assert.match(appJs, /更新了账号资料/);
+  assert.equal((appJs.match(/if \(!isEnabledPersonalSocialEvent\(post\)\) continue/g) || []).length, 2);
+  assert.match(appJs, /function isEnabledPersonalSocialEvent\(post\)[\s\S]*if \(!isSocialEvent\(post\)\) return false/);
+  assert.match(appJs, /function visibleSocialPosts\(\)[\s\S]*if \(!isEnabledPersonalSocialEvent\(post\)\) return false/);
+  assert.match(appJs, /const SOCIAL_WATCHLIST_SNAPSHOT_RETRY_MS = Object\.freeze\(\[100, 2_000, 4_000, 8_000\]\)/);
+  assert.match(appJs, /socialDeferredPosts: new Map\(\)/);
+  assert.match(appJs, /if \(!watchEntry\) \{[\s\S]*state\.socialDeferredPosts\.set\(key,[\s\S]*SOCIAL_DEFERRED_POST_LIMIT/);
+  assert.match(appJs, /function flushDeferredSocialPosts\(\)[\s\S]*SOCIAL_DEFERRED_POST_MAX_AGE_MS[\s\S]*isEnabledPersonalSocialEvent\(deferred\.post\)/);
+  assert.match(appJs, /if \(!resetCursor && normalizedChangeId !== null && normalizedChangeId < state\.socialLatestChangeId\) \{[\s\S]*return false/);
+  const snapshotCoordinator = appJs.slice(
+    appJs.indexOf('function applySocialSnapshot'),
+    appJs.indexOf('function scheduleSocialWatchlistSnapshotRefresh')
+  );
+  assert.ok(snapshotCoordinator.indexOf('if (resetCursor) state.socialPosts = [];')
+    < snapshotCoordinator.indexOf('state.socialWatchlist = record.watchlist'));
+  assert.ok(snapshotCoordinator.indexOf('mergeSocialPosts(record.posts.map')
+    < snapshotCoordinator.indexOf('flushDeferredSocialPosts();'));
+  assert.match(appJs, /function scheduleSocialWatchlistSnapshotRefresh\(attempt = 0\)[\s\S]*loadSocialSnapshot\(\{ quiet: true, expectedSequence: sequence \}\)\.then\(\(loaded\)[\s\S]*scheduleSocialWatchlistSnapshotRefresh\(retryIndex \+ 1\)/);
+  assert.match(appJs, /change\.entityType === 'watchlist'[\s\S]*scheduleSocialWatchlistSnapshotRefresh\(\)/);
+  assert.match(appJs, /change\.entityType === 'watchlist'[\s\S]*flushDeferredSocialPosts\(\)/);
   assert.match(appJs, /if \(id !== null && id <= state\.socialLatestChangeId\) return/);
 });
 
@@ -1231,7 +1307,10 @@ test('social snapshot and SSE lifecycle stay pinned to the Robinhood host servic
   assert.match(appJs, /source\.addEventListener\('heartbeat'/);
   assert.doesNotMatch(appJs, /state\.socialReconnectTimer = setTimeout\(async \(\) => \{[\s\S]{0,240}loadSocialSnapshot/);
   assert.match(appJs, /state\.socialExtensionReady = message\.configured === true/);
-  assert.match(appJs, /if \(state\.socialExtensionReady\) return requestSocialExtension/);
+  assert.match(appJs, /state\.socialExtensionWritable = message\.writable === true/);
+  assert.match(appJs, /if \(!SOCIAL_WRITE_CONTEXT_ALLOWED\) throw new Error\('请通过 HTTPS 页面修改社媒监控名单'\)/);
+  assert.match(appJs, /if \(state\.socialExtensionReady && state\.socialExtensionWritable\) \{\s+return requestSocialExtension/);
+  assert.match(appJs, /window\.localStorage\.removeItem\(SOCIAL_DEVICE_TOKEN_STORAGE_KEY\)/);
   assert.match(appJs, /authorization: `Bearer \$\{token\}`/);
 });
 

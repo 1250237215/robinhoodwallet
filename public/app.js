@@ -75,6 +75,15 @@ const MONITOR_POLL_INTERVAL_MS = 2_000;
 const MONITOR_RECENT_REFRESH_MS = 10_000;
 const SOCIAL_API_ROOT = `${APP_BASE}/api/social`;
 const SOCIAL_DEVICE_TOKEN_STORAGE_KEY = 'robinhood-social-device-token';
+const SOCIAL_WRITE_CONTEXT_ALLOWED = window.location.protocol === 'https:'
+  || ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
+if (!SOCIAL_WRITE_CONTEXT_ALLOWED) {
+  try {
+    window.localStorage.removeItem(SOCIAL_DEVICE_TOKEN_STORAGE_KEY);
+  } catch {
+    // An unavailable storage backend cannot make an insecure page writable.
+  }
+}
 const SOCIAL_SEARCH_DEBOUNCE_MS = 180;
 const SOCIAL_STREAM_RETRY_MS = 2_000;
 const SOCIAL_STATUS_REFRESH_MS = 2_000;
@@ -83,7 +92,36 @@ const SOCIAL_SNAPSHOT_TIMEOUT_MS = 5_000;
 const SOCIAL_STREAM_STALE_MS = 35_000;
 const SOCIAL_RECOVERY_RETRY_MS = 3_000;
 const SOCIAL_REALTIME_HEARTBEAT_MAX_AGE_MS = 45_000;
-const SOCIAL_TWEET_KINDS = new Set(['post', 'reply', 'quote', 'repost', 'delete']);
+const SOCIAL_WATCHLIST_SNAPSHOT_RETRY_MS = Object.freeze([100, 2_000, 4_000, 8_000]);
+const SOCIAL_DEFERRED_POST_LIMIT = 500;
+const SOCIAL_DEFERRED_POST_MAX_AGE_MS = 2 * 60_000;
+const SOCIAL_EVENT_TYPES = Object.freeze([
+  'post',
+  'reply',
+  'quote',
+  'repost',
+  'delete',
+  'follow',
+  'unfollow',
+  'profile_name',
+  'profile_avatar',
+  'profile_bio'
+]);
+const SOCIAL_EVENT_TYPE_SET = new Set(SOCIAL_EVENT_TYPES);
+const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'quote', 'repost', 'delete', 'follow', 'unfollow', 'profile']);
+const SOCIAL_PROFILE_CHANGE_TYPES = new Set(['name', 'avatar', 'bio']);
+const SOCIAL_EVENT_TYPE_LABELS = Object.freeze({
+  post: '发帖',
+  reply: '回复',
+  quote: '引用',
+  repost: '转发',
+  delete: '删帖',
+  follow: '关注',
+  unfollow: '取消关注',
+  profile_name: '改名',
+  profile_avatar: '换头像',
+  profile_bio: '改简介'
+});
 let MONITOR_THRESHOLD_STORAGE_KEY = 'robinhood-monitor-threshold';
 const MONITOR_SOUNDS = new Set(['alarm', 'bell', 'electronic', 'glass']);
 const MONITOR_EVENT_TYPES = Object.freeze(['buy', 'sell', 'transfer', 'token_create']);
@@ -275,16 +313,12 @@ const elements = {
   socialBridgeLabel: document.querySelector('#social-bridge-label'),
   socialManageButton: document.querySelector('#social-manage-button'),
   socialRefreshButton: document.querySelector('#social-refresh-button'),
-  socialFeedTabs: document.querySelector('#social-feed-tabs'),
-  socialPlatformFilter: document.querySelector('#social-platform-filter'),
-  socialChainFilter: document.querySelector('#social-chain-filter'),
   socialSearch: document.querySelector('#social-search'),
   socialWatchlistManager: document.querySelector('#social-watchlist-manager'),
   socialManagerClose: document.querySelector('#social-manager-close'),
   socialWatchlistSummary: document.querySelector('#social-watchlist-summary'),
   socialWatchlistForm: document.querySelector('#social-watchlist-form'),
   socialWatchlistInput: document.querySelector('#social-watchlist-input'),
-  socialWatchlistPlatform: document.querySelector('#social-watchlist-platform'),
   socialWatchlistAdd: document.querySelector('#social-watchlist-add'),
   socialPairingRow: document.querySelector('#social-pairing-row'),
   socialPairingToken: document.querySelector('#social-pairing-token'),
@@ -293,6 +327,15 @@ const elements = {
   socialWatchlistSelectedCount: document.querySelector('#social-watchlist-selected-count'),
   socialWatchlistDelete: document.querySelector('#social-watchlist-delete'),
   socialWatchlist: document.querySelector('#social-watchlist'),
+  socialEventEditor: document.querySelector('#social-event-editor'),
+  socialEventEditorForm: document.querySelector('#social-event-editor-form'),
+  socialEventEditorTitle: document.querySelector('#social-event-editor-title'),
+  socialEventEditorClose: document.querySelector('#social-event-editor-close'),
+  socialEventEditorId: document.querySelector('#social-event-editor-id'),
+  socialEventOptions: document.querySelector('#social-event-options'),
+  socialEventSelectAll: document.querySelector('#social-event-select-all'),
+  socialEventClearAll: document.querySelector('#social-event-clear-all'),
+  socialEventEditorSave: document.querySelector('#social-event-editor-save'),
   socialFeed: document.querySelector('#social-feed'),
   monitorFeedSummary: document.querySelector('#monitor-feed-summary'),
   monitorEventFeed: document.querySelector('#monitor-event-feed'),
@@ -373,6 +416,7 @@ const state = {
   socialStatusRequestSequence: 0,
   socialStatusAbortController: null,
   socialSnapshotAbortController: null,
+  socialWatchlistSnapshotTimer: null,
   socialLatestChangeId: 0,
   socialStreamEpoch: '',
   socialLastStreamActivityAt: null,
@@ -380,18 +424,18 @@ const state = {
   socialRecoveryStartedAt: null,
   socialRecoveryTargetId: 0,
   socialPosts: [],
+  socialDeferredPosts: new Map(),
   socialWatchlist: [],
   socialBridge: { state: 'loading', paired: false, online: false, readOnly: true },
   socialBridgeObservedAt: null,
   socialCounts: {},
-  socialFeedFilter: 'all',
-  socialPlatformFilter: 'all',
-  socialChainFilter: 'all',
   socialSearchQuery: '',
   socialSearchTimer: null,
   socialSelectedWatchlist: new Set(),
   socialMutationBusy: false,
+  socialEditingWatchlistId: null,
   socialExtensionReady: false,
+  socialExtensionWritable: false,
   socialExtensionRequestSequence: 0,
   socialExtensionRequests: new Map(),
   detailView: 'placeholder',
@@ -1289,7 +1333,7 @@ function socialActivityIdentity(post) {
   const authorHandle = normalizeSocialHandle(post?.author?.handle);
   const expectedActor = authorHandle.toLowerCase();
   const candidate = decodeSocialActivityExternalId(post?.externalId);
-  const colon = candidate.match(/^(follow|unfollow):([a-z0-9_]{1,15}):([a-z0-9_]{1,15})$/i);
+  const colon = candidate.match(/^(follow|unfollow):([a-z0-9_]{1,15}):([a-z0-9_]{1,15})(?::\d{10,16})?$/i);
   if (colon && (!expectedActor || colon[2].toLowerCase() === expectedActor)) {
     return { kind: colon[1].toLowerCase(), actorHandle: colon[2], targetHandle: colon[3] };
   }
@@ -1313,16 +1357,71 @@ function socialActivityIdentity(post) {
   };
 }
 
-function isSocialTweet(post) {
+function socialProfileChanges(post) {
+  return [...new Set((Array.isArray(post?.profileChanges) ? post.profileChanges : [])
+    .map((value) => String(value || '').toLowerCase())
+    .filter((value) => SOCIAL_PROFILE_CHANGE_TYPES.has(value)))];
+}
+
+function normalizedSocialEventTypes(value) {
+  if (!Array.isArray(value)) return [...SOCIAL_EVENT_TYPES];
+  const requested = new Set(value.map((item) => String(item || '').toLowerCase()));
+  return SOCIAL_EVENT_TYPES.filter((item) => requested.has(item));
+}
+
+function socialWatchlistKey(platform, handle) {
+  const normalizedPlatform = String(platform || 'twitter').toLowerCase();
+  const normalizedHandle = normalizeSocialHandle(handle).toLowerCase();
+  return normalizedHandle ? `${normalizedPlatform}:${normalizedHandle}` : '';
+}
+
+function socialWatchEntryForPost(post) {
+  const key = socialWatchlistKey(post?.source, post?.author?.handle);
+  if (!key) return null;
+  return state.socialWatchlist.find((entry) => socialWatchlistKey(
+    entry?.platform,
+    entry?.accountKey || entry?.handle
+  ) === key) || null;
+}
+
+function socialEventPreferenceKeys(post) {
+  const kind = String(post?.deleted ? 'delete' : post?.kind || 'post').toLowerCase();
+  if (kind === 'profile') return socialProfileChanges(post).map((change) => `profile_${change}`);
+  return SOCIAL_EVENT_TYPE_SET.has(kind) ? [kind] : [];
+}
+
+function enabledSocialProfileChanges(post, watchEntry) {
+  const enabled = new Set(normalizedSocialEventTypes(watchEntry?.eventTypes));
+  return socialProfileChanges(post).filter((change) => enabled.has(`profile_${change}`));
+}
+
+function isSocialEvent(post) {
   if (!post || typeof post !== 'object') return false;
-  const kind = String(post.kind || (post.deleted ? 'delete' : 'post')).toLowerCase();
-  if (!SOCIAL_TWEET_KINDS.has(kind)) return false;
-  if (socialActivityIdentity(post)) return false;
+  const kind = String(post.deleted ? 'delete' : post.kind || 'post').toLowerCase();
+  if (!SOCIAL_EVENT_KINDS.has(kind)) return false;
   const externalId = String(post.externalId || post.id || '').trim();
   const decodedId = decodeSocialActivityExternalId(externalId);
+  const activity = socialActivityIdentity(post);
+  if (SOCIAL_ACTIVITY_KINDS.has(kind)) {
+    return Boolean(activity
+      && SOCIAL_HANDLE_PATTERN.test(activity.actorHandle)
+      && SOCIAL_HANDLE_PATTERN.test(activity.targetHandle));
+  }
+  if (kind === 'profile') {
+    return SOCIAL_HANDLE_PATTERN.test(normalizeSocialHandle(post?.author?.handle))
+      && socialProfileChanges(post).length > 0;
+  }
   if (/^(?:follow|unfollow|profile)(?::|_)/i.test(externalId)) return false;
   if (/^(?:follow|unfollow|profile)(?::|_)/i.test(decodedId)) return false;
   return true;
+}
+
+function isEnabledPersonalSocialEvent(post) {
+  if (!isSocialEvent(post)) return false;
+  const watchEntry = socialWatchEntryForPost(post);
+  if (!watchEntry) return false;
+  const enabled = new Set(normalizedSocialEventTypes(watchEntry.eventTypes));
+  return socialEventPreferenceKeys(post).some((eventType) => enabled.has(eventType));
 }
 
 function socialPostKey(post) {
@@ -1392,15 +1491,30 @@ function mergeSocialPosts(posts) {
   };
   const byKey = new Map();
   for (const post of state.socialPosts) {
-    if (!isSocialTweet(post)) continue;
+    if (!isEnabledPersonalSocialEvent(post)) continue;
     const key = socialPostKey(post);
     if (!key.endsWith(':')) byKey.set(key, mergeRecord(byKey.get(key), post));
   }
   let added = 0;
   for (const post of Array.isArray(posts) ? posts : []) {
-    if (!isSocialTweet(post)) continue;
+    if (!isSocialEvent(post)) continue;
     const key = socialPostKey(post);
     if (key.endsWith(':')) continue;
+    const watchEntry = socialWatchEntryForPost(post);
+    if (!watchEntry) {
+      const existing = state.socialDeferredPosts.get(key);
+      state.socialDeferredPosts.delete(key);
+      state.socialDeferredPosts.set(key, {
+        post: mergeRecord(existing?.post, post),
+        deferredAt: existing?.deferredAt || Date.now()
+      });
+      while (state.socialDeferredPosts.size > SOCIAL_DEFERRED_POST_LIMIT) {
+        state.socialDeferredPosts.delete(state.socialDeferredPosts.keys().next().value);
+      }
+      continue;
+    }
+    state.socialDeferredPosts.delete(key);
+    if (!isEnabledPersonalSocialEvent(post)) continue;
     if (!byKey.has(key)) added += 1;
     byKey.set(key, mergeRecord(byKey.get(key), post));
   }
@@ -1408,6 +1522,22 @@ function mergeSocialPosts(posts) {
     .sort((left, right) => Number(right.publishedAt || 0) - Number(left.publishedAt || 0) || Number(right.id || 0) - Number(left.id || 0))
     .slice(0, 500);
   return added;
+}
+
+function flushDeferredSocialPosts() {
+  const now = Date.now();
+  const ready = [];
+  for (const [key, deferred] of state.socialDeferredPosts) {
+    if (!deferred?.post || now - Number(deferred.deferredAt || 0) > SOCIAL_DEFERRED_POST_MAX_AGE_MS) {
+      state.socialDeferredPosts.delete(key);
+      continue;
+    }
+    const watchEntry = socialWatchEntryForPost(deferred.post);
+    if (!watchEntry) continue;
+    state.socialDeferredPosts.delete(key);
+    if (isEnabledPersonalSocialEvent(deferred.post)) ready.push(deferred.post);
+  }
+  return ready.length ? mergeSocialPosts(ready) : 0;
 }
 
 function applySocialWatchlistEntry(entry) {
@@ -1442,8 +1572,24 @@ function completeSocialRecovery(remoteLatestChangeId = state.socialLatestChangeI
 
 function applySocialSnapshot(payload, { resetCursor = false } = {}) {
   const record = unwrapRecord(payload || {});
+  const latestChangeId = finiteNumber(record.latestChangeId);
+  const normalizedChangeId = latestChangeId === null
+    ? null
+    : Math.max(0, Math.trunc(latestChangeId));
+  if (!resetCursor && normalizedChangeId !== null && normalizedChangeId < state.socialLatestChangeId) {
+    applySocialBridgeStatus(record.bridge);
+    state.socialConnected = record.ok !== false;
+    renderSocialBridgeStatus();
+    return false;
+  }
+  if (resetCursor) state.socialPosts = [];
+  if (Array.isArray(record.watchlist)) {
+    state.socialWatchlist = record.watchlist
+      .filter((entry) => entry?.desiredState !== 'removed')
+      .sort((left, right) => String(left.handle || '').localeCompare(String(right.handle || '')));
+    mergeSocialPosts([]);
+  }
   if (Array.isArray(record.posts)) {
-    if (resetCursor) state.socialPosts = [];
     const webReceivedAt = Date.now();
     mergeSocialPosts(record.posts.map((post) => ({
       ...post,
@@ -1451,16 +1597,10 @@ function applySocialSnapshot(payload, { resetCursor = false } = {}) {
       webReceiptMode: 'snapshot'
     })));
   }
-  if (Array.isArray(record.watchlist)) {
-    state.socialWatchlist = record.watchlist
-      .filter((entry) => entry?.desiredState !== 'removed')
-      .sort((left, right) => String(left.handle || '').localeCompare(String(right.handle || '')));
-  }
+  flushDeferredSocialPosts();
   applySocialBridgeStatus(record.bridge);
   if (record.counts && typeof record.counts === 'object') state.socialCounts = { ...record.counts };
-  const latestChangeId = finiteNumber(record.latestChangeId);
-  if (latestChangeId !== null) {
-    const normalizedChangeId = Math.max(0, Math.trunc(latestChangeId));
+  if (normalizedChangeId !== null) {
     state.socialLatestChangeId = resetCursor
       ? normalizedChangeId
       : Math.max(state.socialLatestChangeId, normalizedChangeId);
@@ -1470,6 +1610,26 @@ function applySocialSnapshot(payload, { resetCursor = false } = {}) {
   completeSocialRecovery(latestChangeId);
   state.socialConnected = record.ok !== false;
   renderSocialMonitor();
+  return true;
+}
+
+function scheduleSocialWatchlistSnapshotRefresh(attempt = 0) {
+  clearTimeout(state.socialWatchlistSnapshotTimer);
+  const sequence = state.socialSequence;
+  const retryIndex = Math.min(
+    Math.max(0, Number(attempt) || 0),
+    SOCIAL_WATCHLIST_SNAPSHOT_RETRY_MS.length - 1
+  );
+  state.socialWatchlistSnapshotTimer = setTimeout(() => {
+    state.socialWatchlistSnapshotTimer = null;
+    if (!socialLifecycleIsCurrent(sequence)) return;
+    void loadSocialSnapshot({ quiet: true, expectedSequence: sequence }).then((loaded) => {
+      if (loaded || !socialLifecycleIsCurrent(sequence)) return;
+      if (retryIndex + 1 < SOCIAL_WATCHLIST_SNAPSHOT_RETRY_MS.length) {
+        scheduleSocialWatchlistSnapshotRefresh(retryIndex + 1);
+      }
+    });
+  }, SOCIAL_WATCHLIST_SNAPSHOT_RETRY_MS[retryIndex]);
 }
 
 function applySocialChange(change) {
@@ -1489,26 +1649,25 @@ function applySocialChange(change) {
     }
   }
   if (change.entityType === 'watchlist' && change.data && applySocialWatchlistEntry(change.data)) {
+    mergeSocialPosts([]);
+    flushDeferredSocialPosts();
     state.socialCounts.watchlist = state.socialWatchlist.length;
     state.socialCounts.unsyncedWatchlist = state.socialWatchlist
       .filter((entry) => entry.syncStatus !== 'synced').length;
+    scheduleSocialWatchlistSnapshotRefresh();
   }
   completeSocialRecovery();
   renderSocialMonitor();
 }
 
-function socialSourceLabel(source) {
-  if (source === 'twitter') return '推特';
-  if (source === 'binance') return '币安广场';
-  return 'DeBot';
-}
-
-function socialKindLabel(post) {
+function socialKindLabel(post, profileChanges = socialProfileChanges(post)) {
   if (post?.deleted) return '删推';
   const kind = socialActivityIdentity(post)?.kind || post?.kind;
   if (kind === 'follow') return '关注';
   if (kind === 'unfollow') return '取消关注';
-  if (kind === 'profile') return '资料更新';
+  if (kind === 'profile') {
+    return profileChanges.map((change) => SOCIAL_EVENT_TYPE_LABELS[`profile_${change}`]).filter(Boolean).join(' + ') || '资料更新';
+  }
   if (kind === 'reply') return '回复';
   if (kind === 'quote') return '引用';
   if (kind === 'repost') return '转发';
@@ -1570,32 +1729,44 @@ function socialActivityMarkup(post) {
   const author = post.author || {};
   const actorLabel = String(author.name || (activity.actorHandle ? `@${activity.actorHandle}` : '该账号'));
   const actionLabel = activity.kind === 'follow' ? '关注了' : '取消关注了';
-  const fallbackLabel = activity.kind === 'follow' ? '关注动态' : '取消关注动态';
   const icon = activity.kind === 'follow' ? 'user-plus' : 'user-minus';
   const targetHandle = activity.targetHandle;
-  if (!targetHandle) {
-    return `<p class="social-activity-content"><i data-lucide="${icon}" aria-hidden="true"></i><strong>${escapeHtml(actorLabel)}</strong><span>${fallbackLabel}</span></p>`;
-  }
+  if (!targetHandle) return '';
   const targetUrl = `https://x.com/${encodeURIComponent(targetHandle)}`;
   return `<p class="social-activity-content"><i data-lucide="${icon}" aria-hidden="true"></i><strong>${escapeHtml(actorLabel)}</strong><span>${actionLabel}</span><a href="${escapeHtml(targetUrl)}" target="_blank" rel="noopener noreferrer">@${escapeHtml(targetHandle)}</a></p>`;
 }
 
-function socialProfileActivityMarkup(post) {
+function socialProfileActivityMarkup(post, changes = socialProfileChanges(post)) {
   if (String(post?.kind || '').toLowerCase() !== 'profile') return '';
+  if (!changes.length) return '';
   const author = post.author || {};
   const handle = normalizeSocialHandle(author.handle);
   const actorLabel = String(author.name || (handle ? `@${handle}` : '该账号'));
-  return `<p class="social-profile-activity"><i data-lucide="user" aria-hidden="true"></i><strong>${escapeHtml(actorLabel)}</strong><span>更新了账号资料</span></p>`;
+  const detail = post.profileDetail && typeof post.profileDetail === 'object' ? post.profileDetail : {};
+  const rows = changes.map((change) => {
+    const label = SOCIAL_EVENT_TYPE_LABELS[`profile_${change}`] || '资料变化';
+    const values = detail[change] && typeof detail[change] === 'object' ? detail[change] : {};
+    const before = String(values.before || '');
+    const after = String(values.after || '');
+    if (change === 'avatar') {
+      const beforeUrl = safeHttpUrl(before);
+      const afterUrl = safeHttpUrl(after);
+      const images = [beforeUrl, afterUrl].filter(Boolean)
+        .map((url) => `<img src="${escapeHtml(url)}" alt="" loading="lazy" />`).join('<i data-lucide="arrow-right" aria-hidden="true"></i>');
+      return `<div class="social-profile-change" data-profile-change="avatar"><b>${label}</b>${images ? `<span class="social-profile-avatars">${images}</span>` : ''}</div>`;
+    }
+    const valuesMarkup = before || after
+      ? `<span class="social-profile-values"><del>${escapeHtml(before || '空')}</del><i data-lucide="arrow-right" aria-hidden="true"></i><ins>${escapeHtml(after || '空')}</ins></span>`
+      : '';
+    return `<div class="social-profile-change" data-profile-change="${escapeHtml(change)}"><b>${escapeHtml(label)}</b>${valuesMarkup}</div>`;
+  }).join('');
+  return `<div class="social-profile-activity"><p><i data-lucide="user-round-cog" aria-hidden="true"></i><strong>${escapeHtml(actorLabel)}</strong><span>更新了账号资料</span></p>${rows}</div>`;
 }
 
 function visibleSocialPosts() {
   const query = state.socialSearchQuery.trim().toLowerCase();
   return state.socialPosts.filter((post) => {
-    if (!isSocialTweet(post)) return false;
-    if (state.socialPlatformFilter !== 'all' && post.source !== state.socialPlatformFilter) return false;
-    if (state.socialChainFilter !== 'all' && !(Array.isArray(post.chainTags) && post.chainTags.includes(state.socialChainFilter))) return false;
-    const feeds = socialFeedSources(post);
-    if (state.socialFeedFilter !== 'all' && !feeds.includes(state.socialFeedFilter)) return false;
+    if (!isEnabledPersonalSocialEvent(post)) return false;
     if (!query) return true;
     const activity = socialActivityIdentity(post);
     const searchable = [
@@ -1662,8 +1833,9 @@ function renderSocialBridgeStatus() {
       : state.socialTransport === 'reconnecting'
         ? ' · 正在恢复实时流'
         : streamConnected ? ' · SSE 已连接' : '';
-  elements.socialMonitorSummary.textContent = `${formatInteger(state.socialCounts.posts ?? state.socialPosts.length)} 条消息 · ${formatInteger(state.socialCounts.watchlist ?? state.socialWatchlist.length)} 个账号${lastSeen}${transport}`;
-  elements.socialPairingRow.hidden = state.socialExtensionReady;
+  elements.socialMonitorSummary.textContent = `${formatInteger(visibleSocialPosts().length)} 条个人动态 · ${formatInteger(state.socialWatchlist.length)} 个账号${lastSeen}${transport}`;
+  elements.socialPairingRow.hidden = !SOCIAL_WRITE_CONTEXT_ALLOWED
+    || (state.socialExtensionReady && state.socialExtensionWritable);
 }
 
 function renderSocialWatchlist() {
@@ -1687,37 +1859,48 @@ function renderSocialWatchlist() {
     const handle = String(entry.handle || entry.accountKey || 'unknown').replace(/^@/, '');
     const status = String(entry.syncStatus || 'pending');
     const statusLabel = status === 'synced' ? '已同步' : status === 'failed' ? '失败' : '待同步';
+    const eventTypes = normalizedSocialEventTypes(entry.eventTypes);
+    const eventSummary = eventTypes.length === SOCIAL_EVENT_TYPES.length
+      ? '全部行为'
+      : eventTypes.length
+        ? `${eventTypes.length} 项行为`
+        : '已暂停';
     return `
-      <label class="social-watchlist-item" data-social-watchlist-id="${id}">
+      <div class="social-watchlist-item" data-social-watchlist-id="${id}">
         <input type="checkbox" data-social-watchlist-select="${id}"${state.socialSelectedWatchlist.has(id) ? ' checked' : ''} />
         <span class="social-watchlist-avatar" aria-hidden="true">${escapeHtml(handle.slice(0, 2).toUpperCase())}</span>
-        <span class="social-watchlist-copy"><strong>${escapeHtml(entry.name || `@${handle}`)}</strong><span>@${escapeHtml(handle)} · ${escapeHtml(socialSourceLabel(entry.platform))}</span></span>
+        <span class="social-watchlist-copy"><strong>${escapeHtml(entry.name || `@${handle}`)}</strong><span>@${escapeHtml(handle)} · ${escapeHtml(eventSummary)}</span></span>
         <span class="social-sync-chip" data-state="${escapeHtml(status)}" title="${escapeHtml(entry.lastError || '')}">${statusLabel}</span>
-      </label>
+        <button class="inline-icon-button social-watchlist-edit" type="button" data-social-watchlist-edit="${id}" title="编辑 @${escapeHtml(handle)} 的监控行为" aria-label="编辑 @${escapeHtml(handle)} 的监控行为"${state.socialMutationBusy ? ' disabled' : ''}>
+          <i data-lucide="sliders-horizontal" aria-hidden="true"></i>
+        </button>
+      </div>
     `;
   }).join('');
+  refreshIcons(elements.socialWatchlist);
 }
 
 function renderSocialFeed() {
   const posts = visibleSocialPosts();
   if (!posts.length) {
-    elements.socialFeed.innerHTML = '<div class="monitor-empty-state"><i data-lucide="messages-square" aria-hidden="true"></i><strong>没有符合条件的消息</strong><span>等待 DeBot 新消息或调整筛选。</span></div>';
+    elements.socialFeed.innerHTML = '<div class="monitor-empty-state"><i data-lucide="messages-square" aria-hidden="true"></i><strong>暂无个人监控动态</strong><span>等待名单中的账号产生新动态。</span></div>';
     refreshIcons(elements.socialFeed);
     return;
   }
   elements.socialFeed.innerHTML = posts.map((post) => {
     const author = post.author || {};
+    const watchEntry = socialWatchEntryForPost(post);
+    const visibleProfileChanges = enabledSocialProfileChanges(post, watchEntry);
     const activity = socialActivityIdentity(post);
-    const kind = activity?.kind || String(post.kind || 'post').toLowerCase();
+    const kind = post.deleted ? 'delete' : activity?.kind || String(post.kind || 'post').toLowerCase();
     const activityMarkup = socialActivityMarkup(post);
-    const profileActivityMarkup = socialProfileActivityMarkup(post);
+    const profileActivityMarkup = socialProfileActivityMarkup(post, visibleProfileChanges);
     const nonPostActivity = Boolean(activity || profileActivityMarkup);
     const profileUrl = safeHttpUrl(socialProfileUrl(post));
     const postUrl = safeHttpUrl(post.url);
     const avatarUrl = safeHttpUrl(author.avatarUrl);
     const followers = finiteNumber(author.followers);
     const contracts = Array.isArray(post.contractAddresses) ? post.contractAddresses : [];
-    const chainTags = Array.isArray(post.chainTags) ? post.chainTags : [];
     const media = Array.isArray(post.media) ? post.media : [];
     const contractMarkup = contracts.map((contract) => {
       const address = String(contract?.address || contract || '');
@@ -1743,10 +1926,8 @@ function renderSocialFeed() {
                 ${profileUrl ? `<a href="${escapeHtml(profileUrl)}" target="_blank" rel="noopener noreferrer">@${escapeHtml(author.handle || '')}</a>` : ''}
               </div>
               <div class="social-post-meta">
-                <span class="social-source-chip" data-source="${escapeHtml(post.source || 'debot')}">${escapeHtml(socialSourceLabel(post.source))}</span>
-                <span class="social-post-kind">${escapeHtml(socialKindLabel(post))}</span>
+                <span class="social-post-kind">${escapeHtml(socialKindLabel(post, visibleProfileChanges))}</span>
                 ${followers !== null ? `<span>${escapeHtml(compactNumberFormatter.format(followers))} 粉丝</span>` : ''}
-                ${chainTags.map((chain) => `<span class="social-chain-chip" data-chain="${escapeHtml(chain)}">${escapeHtml(CHAIN_CONFIGS[chain]?.label || chain)}</span>`).join('')}
               </div>
             </div>
             <time class="social-post-time" datetime="${escapeHtml(String(post.publishedAt ?? ''))}" data-live-timestamp="${escapeHtml(String(post.publishedAt ?? ''))}" title="${escapeHtml(formatDateTime(post.publishedAt))}" aria-live="off">${escapeHtml(formatMonitorAge(post.publishedAt))}</time>
@@ -1754,8 +1935,8 @@ function renderSocialFeed() {
           ${socialLatencyMarkup(post)}
           ${activityMarkup || profileActivityMarkup || (post.content ? `<p class="social-post-content">${escapeHtml(post.content)}</p>` : '')}
           ${!nonPostActivity && post.translatedContent && post.translatedContent !== post.content ? `<p class="social-post-translation">${escapeHtml(post.translatedContent)}</p>` : ''}
-          ${contractMarkup ? `<div class="social-post-contracts">${contractMarkup}</div>` : ''}
-          ${mediaMarkup ? `<div class="social-post-media">${mediaMarkup}</div>` : ''}
+          ${!nonPostActivity && contractMarkup ? `<div class="social-post-contracts">${contractMarkup}</div>` : ''}
+          ${!nonPostActivity && mediaMarkup ? `<div class="social-post-media">${mediaMarkup}</div>` : ''}
           ${!nonPostActivity && postUrl ? `<footer class="social-post-footer"><a href="${escapeHtml(postUrl)}" target="_blank" rel="noopener noreferrer">查看原文<i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a></footer>` : ''}
         </div>
       </article>
@@ -2347,6 +2528,10 @@ function applyMonitorStreamEventUpdate(event) {
 
 function readSocialDeviceToken() {
   try {
+    if (!SOCIAL_WRITE_CONTEXT_ALLOWED) {
+      window.localStorage.removeItem(SOCIAL_DEVICE_TOKEN_STORAGE_KEY);
+      return '';
+    }
     return String(window.localStorage.getItem(SOCIAL_DEVICE_TOKEN_STORAGE_KEY) || '').trim();
   } catch {
     return '';
@@ -2355,6 +2540,14 @@ function readSocialDeviceToken() {
 
 function storeSocialDeviceToken(value) {
   const token = String(value || '').trim();
+  if (!SOCIAL_WRITE_CONTEXT_ALLOWED) {
+    try {
+      window.localStorage.removeItem(SOCIAL_DEVICE_TOKEN_STORAGE_KEY);
+    } catch {
+      // The insecure page remains read-only even when storage is unavailable.
+    }
+    throw new Error('社媒名单只能通过 HTTPS 页面修改');
+  }
   try {
     if (token) window.localStorage.setItem(SOCIAL_DEVICE_TOKEN_STORAGE_KEY, token);
     else window.localStorage.removeItem(SOCIAL_DEVICE_TOKEN_STORAGE_KEY);
@@ -2382,7 +2575,10 @@ function requestSocialExtension(method, path, body = null) {
 }
 
 async function runSocialWrite(method, path, body = null) {
-  if (state.socialExtensionReady) return requestSocialExtension(method, path, body);
+  if (!SOCIAL_WRITE_CONTEXT_ALLOWED) throw new Error('请通过 HTTPS 页面修改社媒监控名单');
+  if (state.socialExtensionReady && state.socialExtensionWritable) {
+    return requestSocialExtension(method, path, body);
+  }
   const token = readSocialDeviceToken();
   if (!token) throw new Error('请先连接 DeBot 桥接器或保存设备配对密钥');
   return fetchJson(`${SOCIAL_API_ROOT}${path}`, {
@@ -2398,6 +2594,8 @@ function socialLifecycleIsCurrent(sequence) {
 
 async function loadSocialSnapshot({ quiet = false, expectedSequence = state.socialSequence } = {}) {
   if (!socialLifecycleIsCurrent(expectedSequence)) return false;
+  clearTimeout(state.socialWatchlistSnapshotTimer);
+  state.socialWatchlistSnapshotTimer = null;
   state.socialSnapshotAbortController?.abort();
   const controller = new AbortController();
   state.socialSnapshotAbortController = controller;
@@ -2410,8 +2608,7 @@ async function loadSocialSnapshot({ quiet = false, expectedSequence = state.soci
   try {
     const payload = await fetchJson(`${SOCIAL_API_ROOT}?postLimit=100`, { signal: controller.signal });
     if (!socialLifecycleIsCurrent(expectedSequence) || state.socialSnapshotAbortController !== controller) return false;
-    applySocialSnapshot(payload);
-    return true;
+    return applySocialSnapshot(payload);
   } catch (error) {
     if ((error?.name === 'AbortError' && !timedOut) || !socialLifecycleIsCurrent(expectedSequence)) return false;
     state.socialConnected = false;
@@ -2612,9 +2809,11 @@ function stopSocialMonitor() {
   state.socialSearchQuery = elements.socialSearch.value;
   clearTimeout(state.socialSearchTimer);
   clearTimeout(state.socialReconnectTimer);
+  clearTimeout(state.socialWatchlistSnapshotTimer);
   clearInterval(state.socialStatusTimer);
   state.socialSearchTimer = null;
   state.socialReconnectTimer = null;
+  state.socialWatchlistSnapshotTimer = null;
   state.socialStatusTimer = null;
   state.socialStatusAbortController?.abort();
   state.socialStatusAbortController = null;
@@ -2624,6 +2823,7 @@ function stopSocialMonitor() {
   state.socialRecoveryBusy = false;
   state.socialRecoveryStartedAt = null;
   state.socialRecoveryTargetId = 0;
+  state.socialDeferredPosts.clear();
   state.socialSnapshotAbortController?.abort();
   state.socialSnapshotAbortController = null;
   if (state.socialEventSource) state.socialEventSource.close();
@@ -2637,12 +2837,11 @@ async function addSocialWatchAccounts(event) {
     .map((value) => value.trim())
     .filter(Boolean);
   if (!lines.length) return;
-  const platform = elements.socialWatchlistPlatform.value;
   state.socialMutationBusy = true;
   renderSocialWatchlist();
   try {
     const payload = await runSocialWrite('POST', '/watchlist/batch', {
-      accounts: lines.map((handle) => ({ handle, platform }))
+      accounts: lines.map((handle) => ({ handle, platform: 'twitter' }))
     });
     elements.socialWatchlistInput.value = '';
     if (Array.isArray(payload.entries)) {
@@ -2654,6 +2853,63 @@ async function addSocialWatchAccounts(event) {
     showToast(`加入社媒监控失败：${error.message}`, 'error');
   } finally {
     state.socialMutationBusy = false;
+    renderSocialWatchlist();
+  }
+}
+
+function setSocialEventEditorSelection(eventTypes) {
+  const enabled = new Set(normalizedSocialEventTypes(eventTypes));
+  elements.socialEventOptions.querySelectorAll('input[name="socialEventType"]').forEach((input) => {
+    input.checked = enabled.has(input.value);
+  });
+}
+
+function openSocialEventEditor(id) {
+  const numericId = Number(id);
+  const entry = state.socialWatchlist.find((item) => Number(item.id) === numericId);
+  if (!entry || !Number.isSafeInteger(numericId)) return;
+  const handle = String(entry.handle || entry.accountKey || '').replace(/^@/, '');
+  state.socialEditingWatchlistId = numericId;
+  elements.socialEventEditorId.value = String(numericId);
+  elements.socialEventEditorTitle.textContent = `@${handle}`;
+  setSocialEventEditorSelection(entry.eventTypes);
+  elements.socialEventEditorSave.disabled = state.socialMutationBusy;
+  elements.socialEventEditor.showModal();
+  refreshIcons(elements.socialEventEditor);
+}
+
+function closeSocialEventEditor() {
+  state.socialEditingWatchlistId = null;
+  elements.socialEventEditorId.value = '';
+  if (elements.socialEventEditor.open) elements.socialEventEditor.close();
+}
+
+async function saveSocialEventPreferences(event) {
+  event.preventDefault();
+  const id = Number(elements.socialEventEditorId.value || state.socialEditingWatchlistId);
+  if (!Number.isSafeInteger(id)) return;
+  const eventTypes = SOCIAL_EVENT_TYPES.filter((eventType) => elements.socialEventOptions
+    .querySelector(`input[name="socialEventType"][value="${eventType}"]`)?.checked);
+  state.socialMutationBusy = true;
+  elements.socialEventEditorSave.disabled = true;
+  renderSocialWatchlist();
+  try {
+    const payload = await runSocialWrite('PATCH', `/watchlist/${id}`, { eventTypes });
+    if (payload?.entry) applySocialWatchlistEntry(payload.entry);
+    else {
+      const entry = state.socialWatchlist.find((item) => Number(item.id) === id);
+      if (entry) entry.eventTypes = [...eventTypes];
+    }
+    mergeSocialPosts([]);
+    await loadSocialSnapshot({ quiet: true });
+    closeSocialEventEditor();
+    renderSocialMonitor();
+    showToast('账号行为监控已保存');
+  } catch (error) {
+    showToast(`保存账号行为失败：${error.message}`, 'error');
+  } finally {
+    state.socialMutationBusy = false;
+    elements.socialEventEditorSave.disabled = false;
     renderSocialWatchlist();
   }
 }
@@ -5930,25 +6186,6 @@ elements.socialManagerClose.addEventListener('click', () => {
   elements.socialWatchlistManager.hidden = true;
   elements.socialManageButton.setAttribute('aria-expanded', 'false');
 });
-elements.socialFeedTabs.addEventListener('click', (event) => {
-  const button = event.target.closest('[data-social-feed]');
-  if (!button) return;
-  state.socialFeedFilter = button.dataset.socialFeed;
-  elements.socialFeedTabs.querySelectorAll('[data-social-feed]').forEach((candidate) => {
-    const active = candidate === button;
-    candidate.classList.toggle('is-active', active);
-    candidate.setAttribute('aria-selected', String(active));
-  });
-  renderSocialFeed();
-});
-elements.socialPlatformFilter.addEventListener('change', () => {
-  state.socialPlatformFilter = elements.socialPlatformFilter.value;
-  renderSocialFeed();
-});
-elements.socialChainFilter.addEventListener('change', () => {
-  state.socialChainFilter = elements.socialChainFilter.value;
-  renderSocialFeed();
-});
 elements.socialSearch.addEventListener('input', () => {
   clearTimeout(state.socialSearchTimer);
   state.socialSearchTimer = setTimeout(() => {
@@ -5983,7 +6220,20 @@ elements.socialWatchlist.addEventListener('change', (event) => {
   else state.socialSelectedWatchlist.delete(id);
   renderSocialWatchlist();
 });
+elements.socialWatchlist.addEventListener('click', (event) => {
+  const editButton = event.target.closest('[data-social-watchlist-edit]');
+  if (!editButton) return;
+  openSocialEventEditor(editButton.dataset.socialWatchlistEdit);
+});
 elements.socialWatchlistDelete.addEventListener('click', () => void deleteSelectedSocialWatchAccounts());
+elements.socialEventEditorForm.addEventListener('submit', (event) => void saveSocialEventPreferences(event));
+elements.socialEventEditorClose.addEventListener('click', closeSocialEventEditor);
+elements.socialEventSelectAll.addEventListener('click', () => setSocialEventEditorSelection(SOCIAL_EVENT_TYPES));
+elements.socialEventClearAll.addEventListener('click', () => setSocialEventEditorSelection([]));
+elements.socialEventEditor.addEventListener('close', () => {
+  state.socialEditingWatchlistId = null;
+  elements.socialEventEditorId.value = '';
+});
 
 window.addEventListener('message', (event) => {
   if (event.source !== window || event.origin !== window.location.origin) return;
@@ -5991,6 +6241,7 @@ window.addEventListener('message', (event) => {
   if (!message || message.source !== 'robinhood-social-bridge') return;
   if (message.type === 'ready') {
     state.socialExtensionReady = message.configured === true;
+    state.socialExtensionWritable = message.writable === true;
     renderSocialBridgeStatus();
     return;
   }

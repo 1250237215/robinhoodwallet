@@ -243,8 +243,17 @@ export function createSocialService({ config, store = null, now = () => Date.now
   }
 
   function publishAfter(latestBefore) {
-    const changes = activeStore.listChanges({ after: latestBefore, limit: 1_000 });
-    for (const change of changes) publish(change);
+    const latestTarget = activeStore.getLatestChangeId();
+    const changes = [];
+    let cursor = Math.max(0, Number(latestBefore) || 0);
+    while (cursor < latestTarget) {
+      const batch = activeStore.listChanges({ after: cursor, limit: 1_000 })
+        .filter((change) => change.id <= latestTarget);
+      if (!batch.length) break;
+      for (const change of batch) publish(change);
+      changes.push(...batch);
+      cursor = batch.at(-1).id;
+    }
     return changes;
   }
 
@@ -271,7 +280,7 @@ export function createSocialService({ config, store = null, now = () => Date.now
         status: 'ready',
         bridge: service.getConnection(),
         counts: activeStore.getCounts(),
-        posts: activeStore.listPosts({ limit: postLimit }),
+        posts: activeStore.listPosts({ limit: postLimit, watchlistOnly: true }),
         watchlist: activeStore.listWatchlist(),
         latestChangeId: activeStore.getLatestChangeId(),
         retention: { days: config.retentionDays },
@@ -294,6 +303,12 @@ export function createSocialService({ config, store = null, now = () => Date.now
         commands: results.map((result) => result.command).filter(Boolean),
         counts: activeStore.getCounts()
       };
+    },
+    updateWatchAccountEventTypes(id, eventTypes) {
+      const latestBefore = activeStore.getLatestChangeId();
+      const result = activeStore.updateWatchAccountEventTypes(id, eventTypes);
+      publishAfter(latestBefore);
+      return result ? { ok: true, ...result, counts: activeStore.getCounts() } : null;
     },
     removeWatchAccount(id) {
       const latestBefore = activeStore.getLatestChangeId();
@@ -333,9 +348,9 @@ export function createSocialService({ config, store = null, now = () => Date.now
         serverTime: now()
       };
     },
-    reconcileWatchlist(accounts) {
+    reconcileWatchlist(accounts, snapshotMetadata = {}) {
       const latestBefore = activeStore.getLatestChangeId();
-      const result = activeStore.reconcileRemoteWatchlist(accounts);
+      const result = activeStore.reconcileRemoteWatchlist(accounts, snapshotMetadata);
       publishAfter(latestBefore);
       return { ok: true, ...result, counts: activeStore.getCounts() };
     },

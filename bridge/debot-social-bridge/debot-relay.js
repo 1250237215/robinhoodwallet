@@ -21,17 +21,25 @@ function postToPage(type, value = {}) {
   window.postMessage({ source: RELAY_SOURCE, type, ...value }, window.location.origin);
 }
 
-function acknowledgePostDelivery(deliveryId, ok) {
+function acknowledgePostDelivery(deliveryId, result = null) {
   if (!deliveryId) return;
-  postToPage('posts-delivery-result', { payload: { deliveryId, ok: ok === true } });
+  const durable = result?.ok === true && result.payload?.durable === true;
+  postToPage('posts-delivery-result', {
+    payload: {
+      deliveryId,
+      ok: durable,
+      durable,
+      backpressured: result?.payload?.backpressured === true
+    }
+  });
 }
 
 function forwardPosts(payload) {
   const deliveryId = String(payload?.deliveryId || '');
   void sendToBackground('posts', payload).then((result) => {
-    acknowledgePostDelivery(deliveryId, result?.ok === true && result.payload?.durable === true);
+    acknowledgePostDelivery(deliveryId, result);
   }).catch(() => {
-    acknowledgePostDelivery(deliveryId, false);
+    acknowledgePostDelivery(deliveryId);
   });
 }
 

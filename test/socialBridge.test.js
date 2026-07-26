@@ -86,10 +86,165 @@ function jsonResponse(data) {
   };
 }
 
+function timelinePost(id, text = `timeline post ${id}`) {
+  return {
+    doc_id: String(id),
+    platform: 0,
+    user: { id: 'timeline-author', username: 'timeline_user', name: 'Timeline User' },
+    tweet: { tweet_id: String(id), text, date: 1_784_300_000 }
+  };
+}
+
+function createTimelineBridgeHarness(initialHandler, {
+  now = 1_784_300_100_000,
+  initialWatchlistHandler = async () => ({ list: [], total: 0 }),
+  autoAcknowledge = false
+} = {}) {
+  const window = new FakeWindow('https://debot.ai');
+  window.WebSocket = FakeWebSocket;
+  const calls = [];
+  const watchlistCalls = [];
+  const intervals = [];
+  const acknowledgedDeliveries = new Set();
+  let handler = initialHandler;
+  let watchlistHandler = initialWatchlistHandler;
+  let clock = now;
+  let forcePollSequence = 0;
+  let timerSequence = 0;
+  const acknowledgeDelivery = (deliveryId, {
+    durable = true,
+    backpressured = false
+  } = {}) => {
+    const resolvedDeliveryId = String(deliveryId || '');
+    if (!resolvedDeliveryId) return;
+    if (durable) acknowledgedDeliveries.add(resolvedDeliveryId);
+    window.dispatchMessage({
+      source: 'debot-social-relay',
+      type: 'posts-delivery-result',
+      payload: {
+        deliveryId: resolvedDeliveryId,
+        ok: durable,
+        durable,
+        backpressured
+      }
+    });
+  };
+  if (autoAcknowledge) {
+    window.addEventListener('message', (event) => {
+      const message = event.data;
+      if (!message || message.source !== 'debot-social-page' || message.type !== 'posts') return;
+      const deliveryId = String(message.payload?.deliveryId || '');
+      if (!deliveryId || acknowledgedDeliveries.has(deliveryId)) return;
+      acknowledgeDelivery(deliveryId);
+    });
+  }
+  const NativeDate = Date;
+  class HarnessDate extends NativeDate {
+    constructor(...args) {
+      super(...(args.length ? args : [clock]));
+    }
+
+    static now() {
+      return clock;
+    }
+
+    static parse(value) {
+      return NativeDate.parse(value);
+    }
+  }
+
+  const fetchImpl = async (url, options = {}) => {
+    const requestUrl = String(url);
+    if (requestUrl.startsWith('/api/social/twitter/timeline?')) {
+      const parsed = new URL(requestUrl, 'https://debot.ai');
+      const call = {
+        url: requestUrl,
+        cursor: parsed.searchParams.get('cursor') || '',
+        configIds: parsed.searchParams.get('config_ids') || '',
+        options
+      };
+      calls.push(call);
+      return jsonResponse(await handler(call));
+    }
+    if (requestUrl.startsWith('/api/social/subscribe/list?')) {
+      const parsed = new URL(requestUrl, 'https://debot.ai');
+      const call = {
+        url: requestUrl,
+        page: Number(parsed.searchParams.get('page')),
+        options
+      };
+      watchlistCalls.push(call);
+      return jsonResponse(await watchlistHandler(call));
+    }
+    throw new Error(`Unexpected DeBot endpoint: ${requestUrl}`);
+  };
+
+  vm.runInNewContext(bridgeSource('debot-page.js'), {
+    window,
+    document: { visibilityState: 'hidden', addEventListener() {} },
+    fetch: fetchImpl,
+    setInterval(callback, delay) {
+      intervals.push({ callback, delay });
+      return intervals.length;
+    },
+    setTimeout() {
+      timerSequence += 1;
+      return timerSequence;
+    },
+    clearTimeout() {},
+    Blob,
+    ArrayBuffer,
+    Uint8Array,
+    TextDecoder,
+    URLSearchParams,
+    URL,
+    Date: HarnessDate,
+    console
+  }, { filename: 'debot-page.js' });
+
+  return {
+    window,
+    calls,
+    intervals,
+    timelineCalls() {
+      return calls.slice();
+    },
+    watchlistCalls() {
+      return watchlistCalls.slice();
+    },
+    setHandler(value) {
+      handler = value;
+    },
+    setWatchlistHandler(value) {
+      watchlistHandler = value;
+    },
+    advance(milliseconds) {
+      clock += milliseconds;
+    },
+    acknowledgeDelivery,
+    acknowledgeAll() {
+      for (const message of window.messages.filter((entry) => entry.type === 'posts')) {
+        const deliveryId = String(message.payload?.deliveryId || '');
+        if (!deliveryId || acknowledgedDeliveries.has(deliveryId)) continue;
+        acknowledgeDelivery(deliveryId);
+      }
+    },
+    async forcePoll(label = 'timeline') {
+      forcePollSequence += 1;
+      const requestId = `${label}-${forcePollSequence}`;
+      window.dispatchMessage({ source: 'debot-social-relay', type: 'force-poll', requestId });
+      await eventually(() => assert.ok(window.messages.some((message) =>
+        message.type === 'force-poll-result' && message.payload.requestId === requestId)));
+      return window.messages.findLast((message) =>
+        message.type === 'force-poll-result' && message.payload.requestId === requestId).payload;
+    }
+  };
+}
+
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.1.3');
+  assert.equal(manifest.version, '1.2.0');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -108,8 +263,15 @@ test('extension manifest, configuration and scripts are valid and narrowly scope
   const backgroundSource = bridgeSource('background.js');
   assert.match(pageSource, /const PRIMARY_POLL_INTERVAL_MS = 2_000/);
   assert.match(pageSource, /const PRIMARY_API_TIMEOUT_MS = 3_500/);
+  assert.match(pageSource, /const TIMELINE_PAGE_SIZE = 50/);
+  assert.match(pageSource, /const TIMELINE_CATCHUP_PAGES_PER_POLL = 3/);
+  assert.match(pageSource, /const TIMELINE_CATCHUP_MAX_PAGES = 100/);
+  assert.match(pageSource, /const WATCHLIST_PAGE_SIZE = 500/);
+  assert.match(pageSource, /const WATCHLIST_MAX_PAGES = 10/);
   assert.match(pageSource, /const DELIVERY_TIMEOUT_MS = 2_000/);
-  assert.match(pageSource, /timeoutMs: feedSource === 'my' \? PRIMARY_API_TIMEOUT_MS : API_TIMEOUT_MS/);
+  assert.match(pageSource, /async function fetchPersonalTimelinePage\(configIds = \[\], cursor = ''\)/);
+  assert.match(pageSource, /timeoutMs: PRIMARY_API_TIMEOUT_MS/);
+  assert.doesNotMatch(pageSource, /social\/twitter\/(?:hot|all)\/timeline/);
   assert.match(backgroundSource, /const POST_UPLOAD_REQUEST_TIMEOUT_MS = 2_000/);
   assert.match(backgroundSource, /timeoutMs: POST_UPLOAD_REQUEST_TIMEOUT_MS/);
 
@@ -285,7 +447,7 @@ test('analysis result outbox durably deduplicates claims and removes only acknow
   ]);
 });
 
-test('social post outbox accepts only tweet activity and preserves first discovery time', async () => {
+test('social post outbox accepts validated social activity and preserves first discovery time', async () => {
   const stored = {};
   const storage = {
     async get(key) {
@@ -318,29 +480,63 @@ test('social post outbox accepts only tweet activity and preserves first discove
   assert.equal(duplicate.duplicates, 1);
   assert.equal((await outbox.readBatch()).records[0].post.discoveredAt, 1_000);
 
-  const rejected = await outbox.enqueue([
-    { source: 'twitter', externalId: 'follow-one', kind: 'follow' },
-    { source: 'twitter', externalId: 'unfollow-one', kind: 'unfollow' },
-    { source: 'twitter', externalId: 'profile-one', kind: 'profile' },
+  const activity = await outbox.enqueue([
+    {
+      source: 'twitter',
+      externalId: 'follow:alice:bob',
+      kind: 'follow',
+      author: { handle: 'alice' },
+      target: { handle: 'bob' },
+      sourceUpdatedAt: 1_100
+    },
+    {
+      source: 'twitter',
+      externalId: 'unfollow:alice:bob',
+      kind: 'unfollow',
+      author: { handle: 'alice' },
+      target: { handle: 'bob' },
+      sourceUpdatedAt: 1_200
+    },
+    {
+      source: 'twitter',
+      externalId: 'profile:alice:1300',
+      kind: 'profile',
+      author: { handle: 'alice' },
+      profileChanges: ['name', 'avatar', 'bio'],
+      profileDetail: {
+        name: { before: 'Alice', after: 'Alice 2' },
+        avatar: { before: 'old.png', after: 'new.png' },
+        bio: { before: 'old', after: 'new' }
+      },
+      sourceUpdatedAt: 1_300
+    },
+    { source: 'twitter', externalId: 'follow-incomplete', kind: 'follow', author: { handle: 'alice' } },
+    { source: 'twitter', externalId: 'profile-incomplete', kind: 'profile', author: { handle: 'alice' } },
     { source: 'twitter', externalId: 'unknown-one', kind: '' }
   ]);
-  assert.equal(rejected.rejected, 4);
-  assert.equal(rejected.queued, 1);
+  assert.equal(activity.added, 3);
+  assert.equal(activity.rejected, 3);
+  assert.equal(activity.queued, 4);
+  assert.deepEqual(
+    (await outbox.readBatch()).records.map((record) => record.post.kind),
+    ['post', 'follow', 'unfollow', 'profile']
+  );
   assert.deepEqual(POST_UPLOAD_RETRY_DELAYS_MS, [2_000, 4_000, 8_000]);
   assert.deepEqual([0, 1, 2, 3].map(postUploadRetryDelay), [2_000, 4_000, 8_000, null]);
 
   stored.debotSocialPostOutboxV1.records.push({
-    key: 'legacy-follow',
+    key: 'invalid-legacy-follow',
     source: 'twitter',
     externalId: 'follow:alice:bob',
     fingerprint: 'legacy',
     enqueuedAt: 1,
-    sequence: 2,
+    sequence: 5,
     post: { source: 'twitter', externalId: 'follow:alice:bob', kind: 'follow' }
   });
-  stored.debotSocialPostOutboxV1.nextSequence = 3;
-  assert.equal((await outbox.stats()).queued, 1);
-  assert.equal(stored.debotSocialPostOutboxV1.records.some((record) => record.key === 'legacy-follow'), false);
+  stored.debotSocialPostOutboxV1.nextSequence = 6;
+  assert.equal((await outbox.stats()).queued, 4);
+  assert.equal(stored.debotSocialPostOutboxV1.schemaVersion, 2);
+  assert.equal(stored.debotSocialPostOutboxV1.records.some((record) => record.key === 'invalid-legacy-follow'), false);
 });
 
 test('DeBot page bridge polls while hidden, consumes the expected channels and uses the observed API payloads', async () => {
@@ -382,19 +578,14 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     hot_subscribe_id: 7,
     monitor_level: 'high'
   };
-  const partialPollPost = {
-    doc_id: 'partial-poll-document',
+  const personalPollPost = {
+    doc_id: '1900000000000000001',
     platform: 0,
-    user: { id: 'partial-author', username: 'partial_author', name: 'Partial Author', followers_count: 10 },
-    tweet: { tweet_id: 'partial-poll-tweet', text: 'Main timeline survived', date: 1_784_300_001 }
-  };
-  const immediatePollPost = {
-    ...partialPollPost,
-    doc_id: 'immediate-poll-document',
-    tweet: { ...partialPollPost.tweet, tweet_id: 'immediate-poll-tweet', text: 'Optional feed cannot delay this' }
+    user: { id: 'personal-author', username: 'personal_author', name: 'Personal Author', followers_count: 10 },
+    tweet: { tweet_id: '1900000000000000001', text: 'Personal timeline survived', date: 1_784_300_001 }
   };
   let subscribedAccounts = [account];
-  let resolveDeferredFeatured = null;
+  let preserveRemovedAccounts = false;
   let resolveDeferredPrimary = null;
   let fetchMode = 'ok';
   const fetchImpl = async (url, options = {}) => {
@@ -413,22 +604,6 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
           return { code: 401, message: 'authorization: Bearer must-not-leave-the-page' };
         }
       };
-    }
-    if (fetchMode === 'partial'
-      && String(url).startsWith('/api/social/twitter/hot/timeline?')) {
-      return {
-        ok: false,
-        status: 503,
-        async json() {
-          return { code: 503, message: 'featured timeline unavailable' };
-        }
-      };
-    }
-    if (fetchMode === 'deferred-featured'
-      && String(url).startsWith('/api/social/twitter/hot/timeline?')) {
-      return new Promise((resolve) => {
-        resolveDeferredFeatured = () => resolve(jsonResponse({ feeds: [] }));
-      });
     }
     if (fetchMode === 'deferred-primary'
       && String(url).startsWith('/api/social/twitter/timeline?')) {
@@ -454,12 +629,14 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     }
     if (url === '/api/social/subscribe/remove') {
       const ids = new Set(JSON.parse(options.body).config_ids);
-      subscribedAccounts = subscribedAccounts.filter((value) => !ids.has(value.config_id));
+      if (!preserveRemovedAccounts) {
+        subscribedAccounts = subscribedAccounts.filter((value) => !ids.has(value.config_id));
+      }
       return jsonResponse({ success: true });
     }
-    if (['partial', 'deferred-featured'].includes(fetchMode)
+    if (fetchMode === 'personal-post'
       && String(url).startsWith('/api/social/twitter/timeline?')) {
-      return jsonResponse({ feeds: [fetchMode === 'partial' ? partialPollPost : immediatePollPost] });
+      return jsonResponse({ feeds: [personalPollPost] });
     }
     if (String(url).startsWith('/api/social/twitter/')) return jsonResponse({ feeds: [] });
     throw new Error(`Unexpected DeBot endpoint: ${url}`);
@@ -486,13 +663,13 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   await eventually(() => assert.ok(window.messages.some((message) => message.type === 'heartbeat')));
   assert.ok(calls.some((call) => call.url.startsWith('/api/social/subscribe/list?keyword=&page=1&page_size=500')));
   assert.ok(calls.some((call) => call.url.startsWith('/api/social/twitter/timeline?')));
-  assert.ok(calls.some((call) => call.url.startsWith('/api/social/twitter/hot/timeline?')));
-  assert.ok(calls.some((call) => call.url.startsWith('/api/social/twitter/all/timeline?')));
+  assert.equal(calls.some((call) => call.url.startsWith('/api/social/twitter/hot/timeline?')), false);
+  assert.equal(calls.some((call) => call.url.startsWith('/api/social/twitter/all/timeline?')), false);
   assert.equal(calls
     .filter((call) => call.url.startsWith('/api/social/twitter/'))
     .every((call) => new URL(call.url, 'https://debot.ai').searchParams.get('tw_types')
-      === 'tweet|retweet|quote|delTweet|reply'), true);
-  assert.deepEqual(intervals.map((interval) => interval.delay), [2_000, 15_000, 30_000]);
+      === 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow'), true);
+  assert.deepEqual(intervals.map((interval) => interval.delay), [2_000, 30_000]);
   assert.equal(calls.every((call) => call.options.credentials === 'include'), true);
 
   window.dispatchMessage({
@@ -505,68 +682,32 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.requestId === 'page-probe-1'
       && message.payload.ok === true)));
 
-  fetchMode = 'partial';
+  fetchMode = 'personal-post';
   window.messages.length = 0;
   window.dispatchMessage({
     source: 'debot-social-relay',
     type: 'force-poll',
-    requestId: 'page-partial-probe'
+    requestId: 'page-personal-probe'
   });
   await eventually(() => assert.ok(window.messages.some((message) =>
     message.type === 'posts'
-      && message.payload.posts.some((post) => post.externalId === 'partial-poll-document'))));
+      && message.payload.posts.some((post) => post.externalId === '1900000000000000001'))));
   await eventually(() => assert.ok(window.messages.some((message) =>
     message.type === 'force-poll-result'
-      && message.payload.requestId === 'page-partial-probe'
+      && message.payload.requestId === 'page-personal-probe'
       && message.payload.ok === true)));
-  const partialHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.deepEqual(Array.from(partialHeartbeat.payload.capabilities), [
+  const personalHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
+  assert.deepEqual(Array.from(personalHeartbeat.payload.capabilities), [
     'posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1'
   ]);
-  assert.equal(partialHeartbeat.payload.error, undefined);
-  const partialDelivery = window.messages.find((message) =>
+  assert.equal(personalHeartbeat.payload.error, undefined);
+  const personalDelivery = window.messages.find((message) =>
     message.type === 'posts'
-      && message.payload.posts.some((post) => post.externalId === 'partial-poll-document'));
+      && message.payload.posts.some((post) => post.externalId === '1900000000000000001'));
   window.dispatchMessage({
     source: 'debot-social-relay',
     type: 'posts-delivery-result',
-    payload: { deliveryId: partialDelivery.payload.deliveryId, ok: true }
-  });
-  fetchMode = 'ok';
-
-  fetchMode = 'deferred-featured';
-  window.messages.length = 0;
-  calls.length = 0;
-  intervals.find((interval) => interval.delay === 15_000).callback();
-  await eventually(() => assert.equal(typeof resolveDeferredFeatured, 'function'));
-  window.dispatchMessage({
-    source: 'debot-social-relay',
-    type: 'force-poll',
-    requestId: 'page-deferred-featured-probe'
-  });
-  await eventually(() => assert.ok(window.messages.some((message) =>
-    message.type === 'posts'
-      && message.payload.posts.some((post) => post.externalId === 'immediate-poll-document'))));
-  await eventually(() => assert.equal(window.messages.some((message) =>
-    message.type === 'force-poll-result'
-      && message.payload.requestId === 'page-deferred-featured-probe'
-      && message.payload.ok === true), true));
-  const unblockedHeartbeatCount = window.messages.filter((message) => message.type === 'heartbeat').length;
-  for (const listener of window.listeners.get('online') || []) listener({ type: 'online' });
-  await eventually(() => assert.equal(
-    window.messages.filter((message) => message.type === 'heartbeat').length,
-    unblockedHeartbeatCount + 1
-  ));
-  assert.equal(calls.filter((call) => call.url.startsWith('/api/social/twitter/')).length, 4);
-  resolveDeferredFeatured();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  const immediateDelivery = window.messages.find((message) =>
-    message.type === 'posts'
-      && message.payload.posts.some((post) => post.externalId === 'immediate-poll-document'));
-  window.dispatchMessage({
-    source: 'debot-social-relay',
-    type: 'posts-delivery-result',
-    payload: { deliveryId: immediateDelivery.payload.deliveryId, ok: true }
+    payload: { deliveryId: personalDelivery.payload.deliveryId, ok: true }
   });
   fetchMode = 'ok';
 
@@ -615,13 +756,13 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   window.messages.length = 0;
   const socket = new window.WebSocket('wss://debot.ai/social');
   const incoming = {
-    doc_id: 'document-1',
+    doc_id: '1900000000000000100',
     platform: 0,
     sub_token: 'must-not-leave-the-page',
     authorization: 'Bearer must-not-leave-the-page',
     cookie: 'session=must-not-leave-the-page',
     user: { id: 'user-1', username: 'alice', name: 'Alice', followers_count: 123 },
-    tweet: { tweet_id: 'tweet-1', text: 'Robinhood CA', date: 1_784_300_000 },
+    tweet: { tweet_id: '1900000000000000100', text: 'Robinhood CA', date: 1_784_300_000 },
     mentioned_ca: [{ ca_address: '0x1111111111111111111111111111111111111111', chain: 'robinhood' }]
   };
   socket.receive(`42${JSON.stringify([
@@ -629,7 +770,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     { Payload: JSON.stringify({ data: incoming }) }
   ])}`);
   const myPosts = window.messages.find((message) => message.type === 'posts');
-  assert.equal(myPosts.payload.posts[0].externalId, 'document-1');
+  assert.equal(myPosts.payload.posts[0].externalId, '1900000000000000100');
   assert.deepEqual(Array.from(myPosts.payload.posts[0].feedSources), ['my']);
   assert.equal(Object.hasOwn(myPosts.payload.posts[0], 'raw'), false);
   assert.equal(JSON.stringify(myPosts).includes('must-not-leave-the-page'), false);
@@ -649,42 +790,171 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const firstDiscoveredAt = myPosts.payload.posts[0].discoveredAt;
   assert.equal(Number.isSafeInteger(firstDiscoveredAt), true);
   await new Promise((resolve) => setTimeout(resolve, 5));
+  const beforeHotChannel = window.messages.filter((message) => message.type === 'posts').length;
   socket.receive(`42${JSON.stringify([
     'social-hot-twitter',
     { Payload: JSON.stringify({ data: incoming }) }
   ])}`);
-  const mergedFeedDelivery = window.messages
+  assert.equal(window.messages.filter((message) => message.type === 'posts').length, beforeHotChannel);
+  assert.equal(myPosts.payload.posts[0].discoveredAt, firstDiscoveredAt);
+
+  const sendPersonalActivity = (data) => socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    { Payload: JSON.stringify({ data }) }
+  ])}`);
+  const deliveryFor = (externalId) => window.messages
     .filter((message) => message.type === 'posts')
-    .findLast((message) => message.payload.posts[0].externalId === 'document-1');
-  assert.deepEqual(Array.from(mergedFeedDelivery.payload.posts[0].feedSources), ['featured', 'my']);
-  assert.equal(mergedFeedDelivery.payload.posts[0].discoveredAt, firstDiscoveredAt);
-  window.dispatchMessage({
+    .findLast((message) => message.payload.posts.some((post) => post.externalId === externalId));
+  const acknowledge = (delivery) => window.dispatchMessage({
     source: 'debot-social-relay',
     type: 'posts-delivery-result',
-    payload: { deliveryId: mergedFeedDelivery.payload.deliveryId, ok: true }
+    payload: { deliveryId: delivery.payload.deliveryId, ok: true }
   });
 
-  const nonTweetCount = window.messages.filter((message) => message.type === 'posts').length;
-  const nonTweetEvents = [
+  const followPayload = {
+    doc_id: 'Zm9sbG93OnN0YXJfb2t4OmVuem9pbnNpZGVlOjE3ODQzMDAwMDIwMDA',
+    platform: 0,
+    event_type: 'tweet_user_follow',
+    save_time: 1_784_300_002,
+    user: { id: 'star-id', username: 'star_okx', followers_count: 234_880 },
+    follow: {
+      id: 'enzo-id',
+      profile_info: {
+        Username: 'enzoinsidee',
+        Name: 'Enzo',
+        Stats: { Followers: 88 }
+      },
+      cookie: 'target-secret-must-not-leave'
+    },
+    tweet: { tweet_id: 'stale-tweet-must-not-change-follow-kind', text: 'stale content' }
+  };
+  sendPersonalActivity(followPayload);
+  const followExternalId = 'follow:star_okx:enzoinsidee:1784300002000';
+  const followDelivery = deliveryFor(followExternalId);
+  assert.ok(followDelivery);
+  const follow = followDelivery.payload.posts[0];
+  assert.equal(follow.kind, 'follow');
+  assert.equal(follow.author.handle, 'star_okx');
+  assert.equal(follow.target.handle, 'enzoinsidee');
+  assert.equal(follow.target.name, 'Enzo');
+  assert.equal(follow.target.followersCount, 88);
+  assert.equal(JSON.stringify(follow).includes('target-secret-must-not-leave'), false);
+  acknowledge(followDelivery);
+
+  const unfollowPayload = {
+    doc_id: 'dW5mb2xsb3c6c3Rhcl9va3g6YmFua3Jib3Q6MTc4NDMwMDAwMzAwMA',
+    platform: 0,
+    event_type: 'tweet_user_unfollow',
+    save_time: 1_784_300_003,
+    user: { username: 'star_okx' },
+    follow: { username: 'bankrbot', name: 'BankrBot' }
+  };
+  sendPersonalActivity(unfollowPayload);
+  const unfollowDelivery = deliveryFor('unfollow:star_okx:bankrbot:1784300003000');
+  assert.ok(unfollowDelivery);
+  assert.equal(unfollowDelivery.payload.posts[0].kind, 'unfollow');
+  assert.equal(unfollowDelivery.payload.posts[0].target.handle, 'bankrbot');
+  acknowledge(unfollowDelivery);
+
+  const profilePayload = {
+    doc_id: 'profile-event-one',
+    platform: 0,
+    event_type: 'tweet_user_profile',
+    save_time: 1_784_300_004,
+    user: { username: 'alice' },
+    profile: {
+      is_name_changed: true,
+      is_image_changed: 1,
+      is_bio_changed: 'true',
+      old_name: 'Alice',
+      new_name: 'Alice 2',
+      old_image: 'https://old.example/alice.png',
+      new_image: 'https://new.example/alice.png',
+      old_bio: 'old bio',
+      new_bio: 'new bio'
+    }
+  };
+  sendPersonalActivity(profilePayload);
+  const profileDelivery = deliveryFor('profile:alice:1784300004000');
+  assert.ok(profileDelivery);
+  const profile = profileDelivery.payload.posts[0];
+  assert.equal(profile.kind, 'profile');
+  assert.deepEqual(Array.from(profile.profileChanges), ['name', 'avatar', 'bio']);
+  assert.equal(profile.profileDetail.name.before, 'Alice');
+  assert.equal(profile.profileDetail.name.after, 'Alice 2');
+  assert.equal(profile.profileDetail.avatar.after, 'https://new.example/alice.png');
+  assert.equal(profile.profileDetail.bio.after, 'new bio');
+  acknowledge(profileDelivery);
+
+  const firstFollowOccurrenceCount = window.messages.filter((message) =>
+    message.type === 'posts'
+      && message.payload.posts.some((post) => post.externalId.startsWith('follow:star_okx:enzoinsidee:'))).length;
+  sendPersonalActivity({
+    ...followPayload,
+    doc_id: 'Zm9sbG93OnN0YXJfb2t4OmVuem9pbnNpZGVlOjE3ODQzMDAwMDUwMDA',
+    save_time: 1_784_300_005
+  });
+  assert.equal(window.messages.filter((message) =>
+    message.type === 'posts'
+      && message.payload.posts.some((post) => post.externalId.startsWith('follow:star_okx:enzoinsidee:'))).length,
+    firstFollowOccurrenceCount + 1);
+  const secondFollowDelivery = deliveryFor('follow:star_okx:enzoinsidee:1784300005000');
+  assert.equal(secondFollowDelivery.payload.posts[0].sourceUpdatedAt, 1_784_300_005_000);
+  acknowledge(secondFollowDelivery);
+
+  const rejectedActivityCount = window.messages.filter((message) => message.type === 'posts').length;
+  const rejectedActivities = [
     {
-      doc_id: 'Zm9sbG93OnN0YXJfb2t4OmVuem9pbnNpZGVl',
+      doc_id: 'follow-missing-target',
       platform: 0,
-      event_type: 'follow',
-      user: { username: 'star_okx' },
-      target_user: { username: 'enzoinsidee' },
-      tweet: { tweet_id: 'stale-tweet-must-not-change-follow-kind', text: 'stale content' }
+      event_type: 'tweet_user_follow',
+      save_time: 1_784_300_010,
+      user: { username: 'alice' }
     },
     {
-      doc_id: 'dW5mb2xsb3c6c3Rhcl9va3g6YmFua3Jib3Q',
+      doc_id: 'unfollow-missing-author',
       platform: 0,
-      event_type: 'unfollow',
-      user: { username: 'star_okx' },
-      target_user: { username: 'bankrbot' }
+      event_type: 'tweet_user_unfollow',
+      save_time: 1_784_300_011,
+      follow: { username: 'bob' }
     },
-    { doc_id: 'rename-event', tw_type: 'reName', user: { username: 'alice' } },
-    { doc_id: 'avatar-event', tw_type: 'reImage', user: { username: 'alice' } },
-    { doc_id: 'avatar-event-alias', event_type: 'reAvatar', user: { username: 'alice' } },
-    { doc_id: 'description-event', tw_type: 'reDescription', user: { username: 'alice' } },
+    {
+      doc_id: 'follow:bob:carol',
+      platform: 0,
+      event_type: 'tweet_user_follow',
+      save_time: 1_784_300_012,
+      user: { username: 'alice' },
+      follow: { username: 'carol' }
+    },
+    {
+      doc_id: 'follow:alice:bob',
+      platform: 0,
+      event_type: 'tweet_user_follow',
+      save_time: 1_784_300_013,
+      user: { username: 'alice' },
+      follow: { username: 'carol' }
+    },
+    {
+      doc_id: 'profile-without-change',
+      platform: 0,
+      event_type: 'tweet_user_profile',
+      save_time: 1_784_300_014,
+      user: { username: 'alice' },
+      profile: { old_name: 'Alice', new_name: 'Alice' }
+    },
+    { doc_id: 'rename-without-values', tw_type: 'reName', save_time: 1_784_300_015, user: { username: 'alice' } },
+    { doc_id: 'avatar-without-values', tw_type: 'reImage', save_time: 1_784_300_016, user: { username: 'alice' } },
+    { doc_id: 'bio-without-values', tw_type: 'reDescription', save_time: 1_784_300_017, user: { username: 'alice' } },
+    {
+      doc_id: 'post-without-tweet-id!',
+      user: { username: 'alice' },
+      tweet: { text: 'missing tweet id', date: 1_784_300_018 }
+    },
+    {
+      doc_id: '1900000000000000190',
+      user: { username: 'alice' },
+      tweet: { tweet_id: '1900000000000000190', text: 'missing published evidence' }
+    },
     { doc_id: 'unknown-activity', event_type: 'list_update', user: { username: 'alice' } },
     {
       doc_id: 'unknown-stale-text',
@@ -697,46 +967,57 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       event_type: 'list_update',
       user: { username: 'alice' },
       target_user: { username: 'bob' },
-      tweet: { tweet_id: 'cached-tweet', text: 'cached text', date: 1_784_300_000 }
+      tweet: { tweet_id: '1900000000000000191', text: 'cached text', date: 1_784_300_000 }
+    },
+    {
+      ...incoming,
+      doc_id: '1900000000000000192',
+      event_type: 'list_update',
+      tweet: { ...incoming.tweet, tweet_id: '1900000000000000192' }
     }
   ];
-  for (const event of nonTweetEvents) {
-    socket.receive(`42${JSON.stringify([
-      'social-user-twitter',
-      { Payload: JSON.stringify({ data: event }) }
-    ])}`);
-  }
-  assert.equal(window.messages.filter((message) => message.type === 'posts').length, nonTweetCount);
+  for (const event of rejectedActivities) sendPersonalActivity(event);
+  assert.equal(window.messages.filter((message) => message.type === 'posts').length, rejectedActivityCount);
 
-  socket.receive(`42${JSON.stringify([
-    'social-user-twitter',
+  const unstableActivities = [
     {
-      Payload: JSON.stringify({
-        data: {
-          ...incoming,
-          doc_id: 'unknown-metadata-real-tweet',
-          type: 'twitter-event-v2',
-          tweet: { ...incoming.tweet, tweet_id: 'unknown-metadata-tweet' }
-        }
-      })
+      doc_id: 'relationship-without-stable-time!',
+      event_type: 'tweet_user_follow',
+      user: { username: 'alice' },
+      follow: { username: 'bob' }
+    },
+    {
+      doc_id: 'profile-without-stable-time!',
+      event_type: 'tweet_user_profile',
+      user: { username: 'alice' },
+      profile: { is_name_changed: true, old_name: 'Alice', new_name: 'Alice 2' }
     }
-  ])}`);
-  const forwardCompatibleTweet = window.messages
-    .filter((message) => message.type === 'posts')
-    .findLast((message) => message.payload.posts[0].externalId === 'unknown-metadata-real-tweet');
-  assert.equal(forwardCompatibleTweet.payload.posts[0].kind, 'post');
-  window.dispatchMessage({
-    source: 'debot-social-relay',
-    type: 'posts-delivery-result',
-    payload: { deliveryId: forwardCompatibleTweet.payload.deliveryId, ok: true }
-  });
+  ];
+  const beforeUnstableActivities = window.messages.filter((message) => message.type === 'posts').length;
+  for (const event of unstableActivities) {
+    sendPersonalActivity(event);
+    sendPersonalActivity(event);
+  }
+  assert.equal(window.messages.filter((message) => message.type === 'posts').length, beforeUnstableActivities);
 
+  const statusUrlOnlyId = '1900000000000000193';
+  sendPersonalActivity({
+    doc_id: statusUrlOnlyId,
+    user: { username: 'alice' },
+    tweet: {
+      tweet_id: statusUrlOnlyId,
+      text: 'status URL is valid publication evidence',
+      link: `https://x.com/alice/status/${statusUrlOnlyId}`
+    }
+  });
+  assert.equal(deliveryFor(statusUrlOnlyId).payload.posts[0].kind, 'post');
+  acknowledge(deliveryFor(statusUrlOnlyId));
 
   for (const [externalId, tweetOverrides, expectedKind, expectedDeleted] of [
-    ['reply-event', { is_reply: true }, 'reply', false],
-    ['quote-event', { is_quote: true }, 'quote', false],
-    ['repost-event', { is_retweet: true }, 'repost', false],
-    ['delete-event', { tweet_type: 'delete_post' }, 'delete', true]
+    ['1900000000000000201', { is_reply: true }, 'reply', false],
+    ['1900000000000000202', { is_quote: true }, 'quote', false],
+    ['1900000000000000203', { is_retweet: true }, 'repost', false],
+    ['1900000000000000204', { tweet_type: 'delete_post' }, 'delete', true]
   ]) {
     socket.receive(`42${JSON.stringify([
       'social-user-twitter',
@@ -757,27 +1038,35 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       .payload.posts[0];
     assert.equal(normalized.kind, expectedKind);
     assert.equal(normalized.deleted, expectedDeleted);
+    acknowledge(deliveryFor(externalId));
   }
 
+  const beforeSecondHotChannel = window.messages.filter((message) => message.type === 'posts').length;
   socket.receive(`42${JSON.stringify([
     'social-hot-twitter',
-    { Payload: JSON.stringify({ data: { ...incoming, doc_id: 'document-2' } }) }
+    {
+      Payload: JSON.stringify({
+        data: {
+          ...incoming,
+          doc_id: '1900000000000000300',
+          tweet: { ...incoming.tweet, tweet_id: '1900000000000000300' }
+        }
+      })
+    }
   ])}`);
-  const featured = window.messages
-    .filter((message) => message.type === 'posts')
-    .find((message) => message.payload.posts[0].externalId === 'document-2');
-  assert.deepEqual(Array.from(featured.payload.posts[0].feedSources), ['featured']);
+  assert.equal(window.messages.filter((message) => message.type === 'posts').length, beforeSecondHotChannel);
+  assert.equal(deliveryFor('1900000000000000300'), undefined);
 
   const binaryPackets = [
-    ['document-blob', (text) => new Blob([text])],
-    ['document-array-buffer', (text) => new TextEncoder().encode(text).buffer],
-    ['document-typed-array', (text) => new TextEncoder().encode(text)]
+    ['1900000000000000401', (text) => new Blob([text])],
+    ['1900000000000000402', (text) => new TextEncoder().encode(text).buffer],
+    ['1900000000000000403', (text) => new TextEncoder().encode(text)]
   ];
   for (const [externalId, encode] of binaryPackets) {
     const payload = {
       ...incoming,
       doc_id: externalId,
-      tweet: { ...incoming.tweet, tweet_id: `${externalId}-tweet` }
+      tweet: { ...incoming.tweet, tweet_id: externalId }
     };
     socket.receive(encode(`42${JSON.stringify([
       'social-user-twitter',
@@ -786,26 +1075,51 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     await eventually(() => assert.ok(window.messages.some((message) =>
       message.type === 'posts'
         && message.payload.posts.some((post) => post.externalId === externalId))));
+    acknowledge(deliveryFor(externalId));
   }
 
-  const retryPayload = { ...incoming, doc_id: 'document-retry', tweet: { ...incoming.tweet, tweet_id: 'tweet-retry' } };
+  const retryExternalId = '1900000000000000500';
+  const retryPayload = {
+    ...incoming,
+    doc_id: retryExternalId,
+    tweet: { ...incoming.tweet, tweet_id: retryExternalId }
+  };
   socket.receive(`42${JSON.stringify([
     'social-user-twitter',
     { Payload: JSON.stringify({ data: retryPayload }) }
   ])}`);
   const firstRetry = window.messages
     .filter((message) => message.type === 'posts')
-    .find((message) => message.payload.posts[0].externalId === 'document-retry');
+    .find((message) => message.payload.posts[0].externalId === retryExternalId);
   window.dispatchMessage({
     source: 'debot-social-relay',
     type: 'posts-delivery-result',
     payload: { deliveryId: firstRetry.payload.deliveryId, ok: false }
   });
   const beforeRetry = window.messages.filter((message) =>
-    message.type === 'posts' && message.payload.posts[0].externalId === 'document-retry').length;
+    message.type === 'posts' && message.payload.posts[0].externalId === retryExternalId).length;
   runPageTimer(2_000);
   assert.equal(window.messages.filter((message) =>
-    message.type === 'posts' && message.payload.posts[0].externalId === 'document-retry').length, beforeRetry + 1);
+    message.type === 'posts' && message.payload.posts[0].externalId === retryExternalId).length, beforeRetry + 1);
+  const secondRetry = deliveryFor(retryExternalId);
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'posts-delivery-result',
+    payload: { deliveryId: secondRetry.payload.deliveryId, ok: false }
+  });
+  runPageTimer(4_000);
+  assert.equal(window.messages.filter((message) =>
+    message.type === 'posts' && message.payload.posts[0].externalId === retryExternalId).length, beforeRetry + 2);
+  const thirdRetry = deliveryFor(retryExternalId);
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'posts-delivery-result',
+    payload: { deliveryId: thirdRetry.payload.deliveryId, ok: false }
+  });
+  runPageTimer(8_000);
+  assert.equal(window.messages.filter((message) =>
+    message.type === 'posts' && message.payload.posts[0].externalId === retryExternalId).length, beforeRetry + 3);
+  acknowledge(deliveryFor(retryExternalId));
 
   calls.length = 0;
   window.dispatchMessage({
@@ -837,6 +1151,8 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   });
   await eventually(() => assert.ok(window.messages.some((message) =>
     message.type === 'command-result' && message.payload.commandId === 8)));
+  assert.equal(window.messages.find((message) =>
+    message.type === 'command-result' && message.payload.commandId === 8).payload.verifiedAbsent, true);
   const remove = calls.find((call) => call.url === '/api/social/subscribe/remove');
   assert.deepEqual(JSON.parse(remove.options.body), { config_ids: [42] });
 
@@ -859,6 +1175,27 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   await eventually(() => assert.ok(window.messages.some((message) =>
     message.type === 'command-result' && message.payload.commandId === 11)));
   assert.equal(calls.some((call) => call.url === '/api/social/subscribe/remove'), false);
+
+  subscribedAccounts.push({
+    platform: 0,
+    monitor_object: 'stubborn',
+    config_name: 'Stubborn',
+    config_id: 44
+  });
+  preserveRemovedAccounts = true;
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'command',
+    command: { id: 12, type: 'watchlist.delete', payload: { platform: 'twitter', handle: 'stubborn', remoteId: '44' } }
+  });
+  await eventually(() => assert.ok(window.messages.some((message) =>
+    message.type === 'command-result'
+      && message.payload.commandId === 12
+      && message.payload.success === false)));
+  const rejectedRemoval = window.messages.find((message) =>
+    message.type === 'command-result' && message.payload.commandId === 12);
+  assert.match(rejectedRemoval.payload.error, /still contains the deleted account/);
+  preserveRemovedAccounts = false;
 
   for (const [mode, errorType] of [['network', 'NETWORK'], ['timeout', 'TIMEOUT'], ['auth', 'AUTH']]) {
     fetchMode = mode;
@@ -893,6 +1230,837 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const recoveredHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
   assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
   assert.equal(Object.hasOwn(recoveredHeartbeat.payload, 'error'), false);
+});
+
+test('personal timeline delivers the newest page without waiting for encoded cursor recovery', async () => {
+  const newestId = '1910000000000000001';
+  const recoveredId = '1910000000000000002';
+  const encodedCursor = 'cursor with /+?=&%';
+  let rejectHistory = null;
+  const harness = createTimelineBridgeHarness(async ({ cursor }) => {
+    if (!cursor) {
+      return { feeds: [timelinePost(newestId)], has_more: true, next_cursor: encodedCursor };
+    }
+    if (cursor === encodedCursor) {
+      return new Promise((_resolve, reject) => {
+        rejectHistory = reject;
+      });
+    }
+    throw new Error(`Unexpected cursor: ${cursor}`);
+  }, { autoAcknowledge: true });
+
+  await eventually(() => assert.equal(typeof rejectHistory, 'function'));
+  const firstDeliveryIndex = harness.window.messages.findIndex((message) =>
+    message.type === 'posts' && message.payload.posts.some((post) => post.externalId === newestId));
+  const firstHeartbeatIndex = harness.window.messages.findIndex((message) => message.type === 'heartbeat');
+  assert.ok(firstDeliveryIndex >= 0);
+  assert.ok(firstHeartbeatIndex > firstDeliveryIndex);
+  assert.equal(harness.window.messages.some((message) =>
+    message.type === 'heartbeat' && message.payload.capabilities.includes('error')), false);
+
+  const encodedCall = harness.timelineCalls().find((call) => call.cursor === encodedCursor);
+  assert.ok(encodedCall.url.includes('cursor=cursor+with+%2F%2B%3F%3D%26%25'));
+  const resultWhileHistoryPending = await harness.forcePoll('history-pending');
+  assert.equal(resultWhileHistoryPending.ok, true);
+  assert.equal(typeof rejectHistory, 'function');
+
+  rejectHistory(new TypeError('older page network failure'));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(harness.window.messages.some((message) =>
+    message.type === 'heartbeat' && message.payload.capabilities.includes('error')), false);
+
+  harness.setHandler(async ({ cursor }) => {
+    if (!cursor) {
+      return { feeds: [timelinePost(newestId)], has_more: true, next_cursor: encodedCursor };
+    }
+    if (cursor === encodedCursor) {
+      return { feeds: [timelinePost(recoveredId)], has_more: false, next_cursor: '' };
+    }
+    throw new Error(`Unexpected cursor: ${cursor}`);
+  });
+  assert.equal((await harness.forcePoll('history-recovery')).ok, true);
+  await eventually(() => assert.ok(harness.window.messages.some((message) =>
+    message.type === 'posts' && message.payload.posts.some((post) => post.externalId === recoveredId))));
+  assert.equal(harness.timelineCalls().filter((call) => call.cursor === encodedCursor).length, 2);
+  assert.equal(harness.window.messages.filter((message) =>
+    message.type === 'heartbeat' && message.payload.capabilities.includes('error')).length, 0);
+});
+
+test('personal timeline advances catch-up only after each page is durably queued', async () => {
+  const ids = [
+    '1910000000000000051',
+    '1910000000000000052',
+    '1910000000000000053'
+  ];
+  const harness = createTimelineBridgeHarness(async ({ cursor }) => {
+    if (!cursor) return { feeds: [timelinePost(ids[0])], has_more: true, next_cursor: 'durable-older-1' };
+    if (cursor === 'durable-older-1') {
+      return { feeds: [timelinePost(ids[1])], has_more: true, next_cursor: 'durable-older-2' };
+    }
+    if (cursor === 'durable-older-2') {
+      return { feeds: [timelinePost(ids[2])], has_more: false, next_cursor: '' };
+    }
+    throw new Error(`Unexpected durable-gate cursor: ${cursor}`);
+  });
+  const deliveryFor = (externalId) => harness.window.messages.find((message) =>
+    message.type === 'posts' && message.payload.posts.some((post) => post.externalId === externalId));
+
+  await eventually(() => assert.ok(deliveryFor(ids[0])));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(harness.timelineCalls().map((call) => call.cursor), ['']);
+
+  const firstDeliveryId = deliveryFor(ids[0]).payload.deliveryId;
+  harness.acknowledgeDelivery(firstDeliveryId, { durable: false, backpressured: true });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(harness.timelineCalls().map((call) => call.cursor), ['']);
+
+  harness.acknowledgeDelivery(firstDeliveryId);
+  await eventually(() => assert.ok(deliveryFor(ids[1])));
+  assert.deepEqual(harness.timelineCalls().map((call) => call.cursor), ['', 'durable-older-1']);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(harness.timelineCalls().some((call) => call.cursor === 'durable-older-2'), false);
+
+  const historicalDeliveryId = deliveryFor(ids[1]).payload.deliveryId;
+  harness.acknowledgeDelivery(historicalDeliveryId, { durable: false, backpressured: true });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(harness.timelineCalls().some((call) => call.cursor === 'durable-older-2'), false);
+
+  harness.acknowledgeDelivery(historicalDeliveryId);
+  await eventually(() => assert.ok(deliveryFor(ids[2])));
+  assert.deepEqual(harness.timelineCalls().map((call) => call.cursor), [
+    '', 'durable-older-1', 'durable-older-2'
+  ]);
+  harness.acknowledgeDelivery(deliveryFor(ids[2]).payload.deliveryId);
+});
+
+test('personal timeline recovers when has_more omits its required cursor', async () => {
+  const recoveredId = '1910000000000000101';
+  const harness = createTimelineBridgeHarness(async () => ({
+    feeds: [timelinePost(recoveredId)],
+    has_more: true,
+    next_cursor: ''
+  }));
+
+  await eventually(() => assert.ok(harness.window.messages.some((message) =>
+    message.type === 'heartbeat'
+      && message.payload.capabilities.includes('error')
+      && message.payload.error === 'DEBOT')));
+  assert.equal(harness.window.messages.some((message) => message.type === 'posts'), false);
+
+  harness.setHandler(async () => ({ feeds: [timelinePost(recoveredId)], has_more: false, next_cursor: '' }));
+  const recovered = await harness.forcePoll('missing-cursor-recovery');
+  assert.equal(recovered.ok, true);
+  assert.ok(harness.window.messages.some((message) =>
+    message.type === 'posts' && message.payload.posts.some((post) => post.externalId === recoveredId)));
+  const latestHeartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
+  assert.equal(latestHeartbeat.payload.capabilities.includes('error'), false);
+});
+
+test('personal timeline recovery does not let a newer WebSocket event hide an older missed page', async () => {
+  const baselineId = '1910000000000000150';
+  const socketId = '1910000000000000151';
+  const missedId = '1910000000000000152';
+  const harness = createTimelineBridgeHarness(async () => ({
+    feeds: [timelinePost(baselineId)],
+    has_more: false,
+    next_cursor: ''
+  }), { autoAcknowledge: true });
+
+  await eventually(() => assert.ok(harness.window.messages.some((message) =>
+    message.type === 'posts' && message.payload.posts.some((post) => post.externalId === baselineId))));
+  harness.acknowledgeAll();
+  harness.advance(1_000);
+
+  let rejectFailedPoll = null;
+  harness.setHandler(async ({ cursor }) => {
+    assert.equal(cursor, '');
+    return new Promise((_resolve, reject) => {
+      rejectFailedPoll = reject;
+    });
+  });
+  const failedPoll = harness.forcePoll('outage-race');
+  await eventually(() => assert.equal(typeof rejectFailedPoll, 'function'));
+
+  const socket = new harness.window.WebSocket('wss://debot.ai/social');
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    { Payload: JSON.stringify({ data: timelinePost(socketId) }) }
+  ])}`);
+  await eventually(() => assert.ok(harness.window.messages.some((message) =>
+    message.type === 'posts' && message.payload.posts.some((post) => post.externalId === socketId))));
+  harness.acknowledgeAll();
+
+  rejectFailedPoll(new TypeError('primary timeline outage'));
+  assert.equal((await failedPoll).ok, false);
+  harness.setHandler(async ({ cursor }) => {
+    if (!cursor) {
+      return { feeds: [timelinePost(socketId)], has_more: true, next_cursor: 'outage-older-1' };
+    }
+    if (cursor === 'outage-older-1') {
+      return { feeds: [timelinePost(missedId)], has_more: true, next_cursor: 'outage-older-2' };
+    }
+    if (cursor === 'outage-older-2') {
+      return { feeds: [timelinePost(baselineId)], has_more: false, next_cursor: '' };
+    }
+    throw new Error(`Unexpected cursor: ${cursor}`);
+  });
+
+  assert.equal((await harness.forcePoll('outage-recovery')).ok, true);
+  await eventually(() => assert.ok(harness.window.messages.some((message) =>
+    message.type === 'posts' && message.payload.posts.some((post) => post.externalId === missedId))));
+  assert.deepEqual(harness.timelineCalls().slice(-3).map((call) => call.cursor), [
+    '', 'outage-older-1', 'outage-older-2'
+  ]);
+});
+
+test('personal timeline catch-up continues three pages at a time and stops at a reconnect boundary', async () => {
+  const ids = Array.from({ length: 6 }, (_, index) => (1910000000000000200n + BigInt(index)).toString());
+  const harness = createTimelineBridgeHarness(async ({ cursor }) => {
+    if (!cursor) return { feeds: [timelinePost(ids[0])], has_more: true, next_cursor: 'older-1' };
+    const page = Number(cursor.replace('older-', ''));
+    if (page >= 1 && page <= 4) {
+      return { feeds: [timelinePost(ids[page])], has_more: true, next_cursor: `older-${page + 1}` };
+    }
+    if (page === 5) return { feeds: [timelinePost(ids[5])], has_more: false, next_cursor: '' };
+    throw new Error(`Unexpected cursor: ${cursor}`);
+  }, { autoAcknowledge: true });
+
+  await eventually(() => assert.equal(harness.timelineCalls().length, 4));
+  assert.deepEqual(harness.timelineCalls().map((call) => call.cursor), ['', 'older-1', 'older-2', 'older-3']);
+  assert.equal(harness.window.messages.some((message) =>
+    message.type === 'posts' && message.payload.posts.some((post) => post.externalId === ids[0])), true);
+  harness.acknowledgeAll();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal((await harness.forcePoll('continue-cursor')).ok, true);
+  await eventually(() => assert.equal(harness.timelineCalls().length, 7));
+  assert.deepEqual(harness.timelineCalls().map((call) => call.cursor), [
+    '', 'older-1', 'older-2', 'older-3', '', 'older-4', 'older-5'
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  harness.acknowledgeAll();
+
+  const stableCallCount = harness.timelineCalls().length;
+  const stablePostCount = harness.window.messages.filter((message) => message.type === 'posts').length;
+  assert.equal((await harness.forcePoll('stable-first-page')).ok, true);
+  assert.deepEqual(harness.timelineCalls().slice(stableCallCount).map((call) => call.cursor), ['']);
+  assert.equal(harness.window.messages.filter((message) => message.type === 'posts').length, stablePostCount);
+
+  harness.acknowledgeAll();
+  const reconnectCallCount = harness.timelineCalls().length;
+  const reconnectHeartbeatCount = harness.window.messages.filter((message) => message.type === 'heartbeat').length;
+  const reconnectPostCount = harness.window.messages.filter((message) => message.type === 'posts').length;
+  harness.advance(7_000);
+  for (const listener of harness.window.listeners.get('online') || []) listener({ type: 'online' });
+  await eventually(() => assert.equal(harness.timelineCalls().length, reconnectCallCount + 1));
+  await eventually(() => assert.equal(
+    harness.window.messages.filter((message) => message.type === 'heartbeat').length,
+    reconnectHeartbeatCount + 1
+  ));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(harness.timelineCalls().slice(reconnectCallCount).map((call) => call.cursor), ['']);
+  assert.equal(harness.window.messages.filter((message) => message.type === 'posts').length, reconnectPostCount);
+
+  const deliveredIds = harness.window.messages
+    .filter((message) => message.type === 'posts')
+    .flatMap((message) => message.payload.posts.map((post) => post.externalId));
+  for (const id of ids) assert.equal(deliveredIds.filter((value) => value === id).length, 1);
+});
+
+test('personal timeline freezes its healthy boundary before outage WebSocket deliveries', async () => {
+  const boundaryId = '1910000000000000301';
+  const socketId = '1910000000000000302';
+  const gapId = '1910000000000000303';
+  let phase = 'healthy';
+  const harness = createTimelineBridgeHarness(async ({ cursor }) => {
+    if (phase === 'offline') throw new TypeError('timeline offline');
+    if (phase === 'healthy') {
+      if (cursor) throw new Error(`Unexpected healthy cursor: ${cursor}`);
+      return { feeds: [timelinePost(boundaryId)], has_more: false, next_cursor: '' };
+    }
+    if (!cursor) {
+      return { feeds: [timelinePost(socketId)], has_more: true, next_cursor: 'outage-gap-2' };
+    }
+    if (cursor === 'outage-gap-2') {
+      return {
+        feeds: [timelinePost(gapId), timelinePost(boundaryId)],
+        has_more: true,
+        next_cursor: 'outage-gap-3'
+      };
+    }
+    if (cursor === 'outage-gap-3') {
+      throw new Error('Catch-up continued after reaching the frozen healthy boundary');
+    }
+    throw new Error(`Unexpected recovery cursor: ${cursor}`);
+  });
+
+  await eventually(() => assert.equal(harness.timelineCalls().length, 1));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  harness.acknowledgeAll();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  phase = 'offline';
+  harness.advance(7_000);
+  const outage = await harness.forcePoll('freeze-healthy-boundary');
+  assert.equal(outage.ok, false);
+  assert.equal(outage.errorType, 'NETWORK');
+
+  harness.advance(1_000);
+  const socket = new harness.window.WebSocket('wss://debot.ai/social');
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    { Payload: JSON.stringify({ data: timelinePost(socketId) }) }
+  ])}`);
+  await eventually(() => assert.ok(harness.window.messages.some((message) =>
+    message.type === 'posts'
+      && message.payload.posts.some((post) => post.externalId === socketId))));
+  harness.acknowledgeAll();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const callsBeforeFocus = harness.timelineCalls().length;
+  const heartbeatsBeforeFocus = harness.window.messages.filter((message) => message.type === 'heartbeat').length;
+  harness.advance(7_000);
+  for (const listener of harness.window.listeners.get('focus') || []) listener({ type: 'focus' });
+  await eventually(() => assert.equal(harness.timelineCalls().length, callsBeforeFocus + 1));
+  await eventually(() => assert.equal(
+    harness.window.messages.filter((message) => message.type === 'heartbeat').length,
+    heartbeatsBeforeFocus + 1
+  ));
+  assert.equal(harness.window.messages.findLast((message) => message.type === 'heartbeat').payload.error, 'NETWORK');
+
+  phase = 'recovered';
+  const recoveryCallIndex = harness.timelineCalls().length;
+  assert.equal((await harness.forcePoll('recover-past-websocket-item')).ok, true);
+  await eventually(() => assert.ok(harness.timelineCalls().some((call) => call.cursor === 'outage-gap-2')));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(
+    harness.timelineCalls().slice(recoveryCallIndex).map((call) => call.cursor),
+    ['', 'outage-gap-2']
+  );
+  assert.equal(harness.timelineCalls().some((call) => call.cursor === 'outage-gap-3'), false);
+
+  const deliveredIds = harness.window.messages
+    .filter((message) => message.type === 'posts')
+    .flatMap((message) => message.payload.posts.map((post) => post.externalId));
+  for (const id of [boundaryId, socketId, gapId]) {
+    assert.equal(deliveredIds.filter((value) => value === id).length, 1, id);
+  }
+});
+
+test('a changed personal watchlist forces catch-up with an empty prior-account boundary', async () => {
+  const oldBoundaryId = '1910000000000000401';
+  const newAccountHistoryId = '1910000000000000402';
+  let timelinePhase = 'healthy';
+  let watchlistPhase = 'empty';
+  const harness = createTimelineBridgeHarness(async ({ cursor }) => {
+    if (timelinePhase === 'offline') throw new TypeError('timeline offline');
+    if (timelinePhase === 'healthy') {
+      return { feeds: [timelinePost(oldBoundaryId)], has_more: false, next_cursor: '' };
+    }
+    if (!cursor) {
+      return { feeds: [timelinePost(oldBoundaryId)], has_more: true, next_cursor: 'new-account-2' };
+    }
+    if (cursor === 'new-account-2') {
+      return { feeds: [timelinePost(newAccountHistoryId)], has_more: false, next_cursor: '' };
+    }
+    throw new Error(`Unexpected changed-watchlist cursor: ${cursor}`);
+  }, {
+    initialWatchlistHandler: async () => watchlistPhase === 'empty'
+      ? { list: [], total: 0 }
+      : {
+          list: [{
+            platform: 0,
+            monitor_object: 'new_account',
+            config_name: 'New Account',
+            config_id: 42
+          }],
+          total: 1
+        },
+    autoAcknowledge: true
+  });
+
+  await eventually(() => assert.equal(harness.timelineCalls().length, 1));
+  await eventually(() => assert.equal(harness.watchlistCalls().length, 2));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  harness.acknowledgeAll();
+
+  timelinePhase = 'offline';
+  harness.advance(7_000);
+  assert.equal((await harness.forcePoll('old-account-outage')).ok, false);
+
+  const callsBeforeRefresh = harness.timelineCalls().length;
+  const errorHeartbeatsBeforeRefresh = harness.window.messages.filter((message) =>
+    message.type === 'heartbeat' && message.payload.capabilities.includes('error')).length;
+  watchlistPhase = 'changed';
+  harness.advance(31_000);
+  harness.intervals.find((interval) => interval.delay === 30_000).callback();
+  await eventually(() => assert.ok(harness.window.messages.some((message) =>
+    message.type === 'watchlist'
+      && message.payload.accounts.some((account) => account.remoteId === '42'))));
+  await eventually(() => assert.equal(harness.timelineCalls().length, callsBeforeRefresh + 1));
+  await eventually(() => assert.equal(
+    harness.window.messages.filter((message) =>
+      message.type === 'heartbeat' && message.payload.capabilities.includes('error')).length,
+    errorHeartbeatsBeforeRefresh + 1
+  ));
+
+  timelinePhase = 'recovered';
+  const recoveryCallIndex = harness.timelineCalls().length;
+  assert.equal((await harness.forcePoll('new-account-empty-boundary')).ok, true);
+  await eventually(() => assert.ok(harness.timelineCalls().some((call) => call.cursor === 'new-account-2')));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const recoveryCalls = harness.timelineCalls().slice(recoveryCallIndex);
+  assert.deepEqual(recoveryCalls.map((call) => call.cursor), ['', 'new-account-2']);
+  assert.equal(recoveryCalls.every((call) => call.configIds === '42'), true);
+  assert.ok(harness.window.messages.some((message) =>
+    message.type === 'posts'
+      && message.payload.posts.some((post) => post.externalId === newAccountHistoryId)));
+});
+
+test('DeBot social timestamps normalize seconds through nanoseconds to epoch milliseconds', async () => {
+  const expected = 1_784_300_123_456;
+  const samples = [
+    ['1910000000000000501', '1784300123.456'],
+    ['1910000000000000502', '1784300123456'],
+    ['1910000000000000503', '1784300123456000'],
+    ['1910000000000000504', '1784300123456000000']
+  ];
+  const harness = createTimelineBridgeHarness(async () => ({ feeds: [], has_more: false, next_cursor: '' }));
+  await eventually(() => assert.equal(harness.timelineCalls().length, 1));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const socket = new harness.window.WebSocket('wss://debot.ai/social');
+  for (const [externalId, sourceTime] of samples) {
+    socket.receive(`42${JSON.stringify([
+      'social-user-twitter',
+      {
+        Payload: JSON.stringify({
+          data: {
+            doc_id: externalId,
+            platform: 0,
+            user: { id: 'timestamp-user', username: 'timestamp_user' },
+            tweet: { tweet_id: externalId, text: sourceTime, date: sourceTime }
+          }
+        })
+      }
+    ])}`);
+    await eventually(() => assert.ok(harness.window.messages.some((message) =>
+      message.type === 'posts'
+        && message.payload.posts.some((post) => post.externalId === externalId))));
+    const post = harness.window.messages
+      .filter((message) => message.type === 'posts')
+      .flatMap((message) => message.payload.posts)
+      .find((item) => item.externalId === externalId);
+    assert.equal(post.publishedAt, expected, sourceTime);
+    assert.equal(post.sourceUpdatedAt, expected, sourceTime);
+    harness.acknowledgeAll();
+  }
+});
+
+test('a REST timeline observation enriches an acknowledged WebSocket post with URL and media', async () => {
+  const externalId = '1910000000000000601';
+  const publishedAt = 1_784_300_123;
+  let restEnrichment = false;
+  const enrichedUrl = `https://x.com/enriched_user/status/${externalId}`;
+  const imageUrl = 'https://cdn.example/enriched-post.jpg';
+  const harness = createTimelineBridgeHarness(async () => ({
+    feeds: restEnrichment
+      ? [{
+          doc_id: externalId,
+          platform: 0,
+          user: {
+            id: 'enriched-user-id',
+            username: 'enriched_user',
+            name: 'Enriched User',
+            avatar: 'https://cdn.example/enriched-avatar.jpg'
+          },
+          tweet: {
+            tweet_id: externalId,
+            text: 'same post content',
+            date: publishedAt,
+            link: enrichedUrl,
+            media: [{ type: 'image', url: imageUrl }]
+          }
+        }]
+      : [],
+    has_more: false,
+    next_cursor: ''
+  }));
+  await eventually(() => assert.equal(harness.timelineCalls().length, 1));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const socket = new harness.window.WebSocket('wss://debot.ai/social');
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    {
+      Payload: JSON.stringify({
+        data: {
+          doc_id: externalId,
+          platform: 0,
+          user: { id: 'enriched-user-id' },
+          tweet: { tweet_id: externalId, text: 'same post content', date: publishedAt }
+        }
+      })
+    }
+  ])}`);
+  await eventually(() => assert.equal(harness.window.messages.filter((message) =>
+    message.type === 'posts'
+      && message.payload.posts.some((post) => post.externalId === externalId)).length, 1));
+  const simplePost = harness.window.messages
+    .find((message) => message.type === 'posts'
+      && message.payload.posts.some((post) => post.externalId === externalId))
+    .payload.posts.find((post) => post.externalId === externalId);
+  assert.equal(simplePost.url, '');
+  assert.equal(simplePost.media.length, 0);
+  harness.acknowledgeAll();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  restEnrichment = true;
+  assert.equal((await harness.forcePoll('rest-enrichment')).ok, true);
+  await eventually(() => assert.equal(harness.window.messages.filter((message) =>
+    message.type === 'posts'
+      && message.payload.posts.some((post) => post.externalId === externalId)).length, 2));
+  const enrichedPost = harness.window.messages
+    .filter((message) => message.type === 'posts'
+      && message.payload.posts.some((post) => post.externalId === externalId))
+    .at(-1).payload.posts.find((post) => post.externalId === externalId);
+  assert.equal(enrichedPost.author.handle, 'enriched_user');
+  assert.equal(enrichedPost.author.name, 'Enriched User');
+  assert.equal(enrichedPost.url, enrichedUrl);
+  assert.deepEqual(Array.from(enrichedPost.media, (item) => ({ type: item.type, url: item.url })), [
+    { type: 'image', url: imageUrl }
+  ]);
+  assert.equal(enrichedPost.discoveredAt, simplePost.discoveredAt);
+});
+
+test('personal timeline catch-up stops after one hundred historical pages', async () => {
+  const firstId = 1910000000000001000n;
+  let phase = 'infinite';
+  const harness = createTimelineBridgeHarness(async ({ cursor }) => {
+    if (phase === 'offline') throw new TypeError('timeline offline after truncation');
+    if (phase === 'finite') {
+      if (cursor) throw new Error(`Unexpected finite cursor: ${cursor}`);
+      return {
+        feeds: [timelinePost((firstId + 1_000n).toString())],
+        has_more: false,
+        next_cursor: ''
+      };
+    }
+    if (!cursor) {
+      return { feeds: [timelinePost(firstId.toString())], has_more: true, next_cursor: 'cap-1' };
+    }
+    const page = Number(cursor.replace('cap-', ''));
+    return {
+      feeds: [timelinePost((firstId + BigInt(page)).toString())],
+      has_more: true,
+      next_cursor: `cap-${page + 1}`
+    };
+  }, { autoAcknowledge: true });
+
+  await eventually(() => assert.equal(harness.timelineCalls().filter((call) => call.cursor).length, 3));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  let poll = 0;
+  while (harness.timelineCalls().filter((call) => call.cursor).length < 100) {
+    const before = harness.timelineCalls().filter((call) => call.cursor).length;
+    assert.equal((await harness.forcePoll(`page-cap-${poll}`)).ok, true);
+    const expected = Math.min(100, before + 3);
+    await eventually(() => assert.equal(
+      harness.timelineCalls().filter((call) => call.cursor).length,
+      expected
+    ));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    poll += 1;
+    assert.ok(poll <= 34);
+  }
+
+  const historicalCalls = harness.timelineCalls().filter((call) => call.cursor);
+  assert.equal(historicalCalls.length, 100);
+  assert.equal(historicalCalls.at(-1).cursor, 'cap-100');
+  assert.equal(historicalCalls.some((call) => call.cursor === 'cap-101'), false);
+  assert.equal(harness.timelineCalls().filter((call) => !call.cursor).length, 34);
+  await eventually(() => assert.ok(harness.window.messages.some((message) =>
+    message.type === 'heartbeat' && message.payload.capabilities.includes('catchup-truncated'))));
+  const truncatedHeartbeat = harness.window.messages.findLast((message) =>
+    message.type === 'heartbeat' && message.payload.capabilities.includes('catchup-truncated'));
+  assert.equal(truncatedHeartbeat.payload.capabilities.includes('posts'), true);
+  assert.equal(truncatedHeartbeat.payload.capabilities.includes('error'), false);
+  assert.equal(Object.hasOwn(truncatedHeartbeat.payload, 'error'), false);
+
+  const beforeStablePoll = harness.timelineCalls().length;
+  assert.equal((await harness.forcePoll('after-page-cap')).ok, true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(harness.timelineCalls().slice(beforeStablePoll).map((call) => call.cursor), ['']);
+  const persistentWarningHeartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
+  assert.equal(persistentWarningHeartbeat.payload.capabilities.includes('catchup-truncated'), true);
+  assert.equal(persistentWarningHeartbeat.payload.capabilities.includes('error'), false);
+
+  phase = 'offline';
+  assert.equal((await harness.forcePoll('truncated-reconnect-failure')).ok, false);
+  phase = 'finite';
+  assert.equal((await harness.forcePoll('complete-truncated-recovery')).ok, true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal((await harness.forcePoll('after-complete-recovery')).ok, true);
+  const clearedHeartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
+  assert.equal(clearedHeartbeat.payload.capabilities.includes('catchup-truncated'), false);
+  assert.equal(clearedHeartbeat.payload.capabilities.includes('error'), false);
+  assert.equal(Object.hasOwn(clearedHeartbeat.payload, 'error'), false);
+});
+
+test('DeBot page bridge fully paginates personal watchlists and refuses a truncated ten-page snapshot', async () => {
+  const accountRow = (index, overrides = {}) => ({
+    platform: 0,
+    monitor_object: `account_${index}`,
+    config_name: `Account ${index}`,
+    config_id: index + 1,
+    ...overrides
+  });
+
+  async function runScenario({ truncated }) {
+    const window = new FakeWindow('https://debot.ai');
+    const calls = [];
+    const firstPage = Array.from({ length: 500 }, (_, index) => accountRow(index));
+    const secondPage = [accountRow(500)];
+    const fetchImpl = async (url, options = {}) => {
+      const requestUrl = String(url);
+      calls.push({ url: requestUrl, options });
+      if (requestUrl.startsWith('/api/social/twitter/timeline?')) return jsonResponse({ feeds: [] });
+      if (requestUrl.startsWith('/api/social/subscribe/list?')) {
+        const page = Number(new URL(requestUrl, 'https://debot.ai').searchParams.get('page'));
+        if (truncated) {
+          const offset = (page - 1) * 500;
+          return jsonResponse({
+            list: Array.from({ length: 500 }, (_, index) => accountRow(offset + index)),
+            total: 5_001
+          });
+        }
+        return jsonResponse({ list: page === 1 ? firstPage : secondPage, total: 501 });
+      }
+      throw new Error(`Unexpected DeBot endpoint: ${requestUrl}`);
+    };
+
+    vm.runInNewContext(bridgeSource('debot-page.js'), {
+      window,
+      document: { visibilityState: 'hidden', addEventListener() {} },
+      fetch: fetchImpl,
+      setInterval: () => 1,
+      setTimeout,
+      clearTimeout,
+      Blob,
+      ArrayBuffer,
+      Uint8Array,
+      TextDecoder,
+      URLSearchParams,
+      URL,
+      console
+    }, { filename: 'debot-page.js' });
+    return { window, calls };
+  }
+
+  const complete = await runScenario({ truncated: false });
+  await eventually(() => assert.ok(
+    complete.window.messages.some((message) => message.type === 'watchlist'),
+    JSON.stringify(complete.calls.map((call) => call.url))
+  ));
+  const completePages = complete.calls
+    .filter((call) => call.url.startsWith('/api/social/subscribe/list?'))
+    .map((call) => Number(new URL(call.url, 'https://debot.ai').searchParams.get('page')));
+  assert.deepEqual(completePages, [1, 2]);
+  const snapshot = complete.window.messages.find((message) => message.type === 'watchlist').payload.accounts;
+  assert.equal(snapshot.length, 501);
+  assert.equal(snapshot.find((account) => account.accountKey === 'account_499').name, 'Account 499');
+  assert.equal(snapshot.find((account) => account.accountKey === 'account_500').remoteId, '501');
+  await eventually(() => assert.ok(complete.calls.some((call) => {
+    if (!call.url.startsWith('/api/social/twitter/timeline?')) return false;
+    const configIds = new URL(call.url, 'https://debot.ai').searchParams.get('config_ids') || '';
+    return configIds.split('|').length === 501 && configIds.startsWith('1|') && configIds.endsWith('|501');
+  })));
+
+  const truncated = await runScenario({ truncated: true });
+  await eventually(() => assert.equal(
+    truncated.calls.filter((call) => call.url.startsWith('/api/social/subscribe/list?')).length,
+    10
+  ), 3_000);
+  const truncatedPages = truncated.calls
+    .filter((call) => call.url.startsWith('/api/social/subscribe/list?'))
+    .map((call) => Number(new URL(call.url, 'https://debot.ai').searchParams.get('page')));
+  assert.deepEqual(truncatedPages, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.equal(truncated.calls.some((call) => call.url.includes('page=11')), false);
+  assert.equal(truncated.window.messages.some((message) => message.type === 'watchlist'), false);
+});
+
+test('DeBot page bridge confirms an empty personal watchlist twice before publishing it', async () => {
+  const account = {
+    platform: 0,
+    monitor_object: 'recovered_account',
+    config_name: 'Recovered Account',
+    config_id: 42
+  };
+
+  async function runScenario(responses) {
+    const window = new FakeWindow('https://debot.ai');
+    const watchlistCalls = [];
+    let responseIndex = 0;
+    const fetchImpl = async (url) => {
+      const requestUrl = String(url);
+      if (requestUrl.startsWith('/api/social/twitter/timeline?')) {
+        return jsonResponse({ feeds: [] });
+      }
+      if (requestUrl.startsWith('/api/social/subscribe/list?')) {
+        watchlistCalls.push(requestUrl);
+        const response = responses[Math.min(responseIndex, responses.length - 1)];
+        responseIndex += 1;
+        return jsonResponse(response);
+      }
+      throw new Error(`Unexpected DeBot endpoint: ${requestUrl}`);
+    };
+
+    vm.runInNewContext(bridgeSource('debot-page.js'), {
+      window,
+      document: { visibilityState: 'hidden', addEventListener() {} },
+      fetch: fetchImpl,
+      setInterval: () => 1,
+      setTimeout,
+      clearTimeout,
+      Blob,
+      ArrayBuffer,
+      Uint8Array,
+      TextDecoder,
+      URLSearchParams,
+      URL,
+      console
+    }, { filename: 'debot-page.js' });
+
+    await eventually(() => assert.equal(watchlistCalls.length, 2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(watchlistCalls[0], watchlistCalls[1]);
+    assert.equal(new URL(watchlistCalls[0], 'https://debot.ai').searchParams.get('page'), '1');
+    return { window, watchlistCalls };
+  }
+
+  const recovered = await runScenario([
+    { list: [], total: 0 },
+    { list: [account], total: 1 }
+  ]);
+  assert.equal(recovered.window.messages.some((message) => message.type === 'watchlist'), false);
+
+  const inconsistentTotal = await runScenario([
+    { list: [], total: 0 },
+    { list: [], total: 1 }
+  ]);
+  assert.equal(inconsistentTotal.window.messages.some((message) => message.type === 'watchlist'), false);
+
+  const confirmedEmpty = await runScenario([
+    { list: [], total: 0 },
+    { list: [], total: 0 }
+  ]);
+  const snapshots = confirmedEmpty.window.messages.filter((message) => message.type === 'watchlist');
+  assert.equal(snapshots.length, 1);
+  assert.ok(Array.isArray(snapshots[0].payload.accounts));
+  assert.equal(snapshots[0].payload.accounts.length, 0);
+});
+
+test('an older watchlist request cannot overwrite a newer completed snapshot or timeline cache', async () => {
+  let resolveOlderRequest = null;
+  let watchlistRequest = 0;
+  const harness = createTimelineBridgeHarness(async () => ({ feeds: [], has_more: false, next_cursor: '' }), {
+    initialWatchlistHandler: async () => {
+      watchlistRequest += 1;
+      if (watchlistRequest === 1) {
+        return new Promise((resolve) => {
+          resolveOlderRequest = resolve;
+        });
+      }
+      if (watchlistRequest === 2) {
+        return {
+          list: [{
+            platform: 0,
+            monitor_object: 'newer_account',
+            config_name: 'Newer Account',
+            config_id: 202
+          }],
+          total: 1
+        };
+      }
+      throw new Error(`Unexpected watchlist request ${watchlistRequest}`);
+    }
+  });
+
+  await eventually(() => assert.equal(typeof resolveOlderRequest, 'function'));
+  harness.window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'command',
+    command: {
+      id: 702,
+      type: 'watchlist.add',
+      payload: { platform: 'twitter', handle: 'newer_account' }
+    }
+  });
+  await eventually(() => assert.ok(harness.window.messages.some((message) =>
+    message.type === 'command-result'
+      && message.payload.commandId === 702
+      && message.payload.success === true
+      && message.payload.remoteId === '202')));
+  const currentSnapshot = harness.window.messages.find((message) => message.type === 'watchlist');
+  assert.deepEqual(Array.from(currentSnapshot.payload.accounts, (account) => account.accountKey), ['newer_account']);
+
+  resolveOlderRequest({
+    list: [{
+      platform: 0,
+      monitor_object: 'older_account',
+      config_name: 'Older Account',
+      config_id: 101
+    }],
+    total: 1
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal((await harness.forcePoll('verify-newer-watchlist-cache')).ok, true);
+
+  const snapshots = harness.window.messages.filter((message) => message.type === 'watchlist');
+  assert.equal(snapshots.length, 1);
+  assert.deepEqual(Array.from(snapshots[0].payload.accounts, (account) => account.accountKey), ['newer_account']);
+  assert.equal(harness.timelineCalls().at(-1).configIds, '202');
+  assert.equal(harness.timelineCalls().some((call) => call.configIds === '101'), false);
+});
+
+test('watchlist snapshots reject accounts with missing or invalid remote IDs', async () => {
+  const invalidRows = [
+    {
+      platform: 0,
+      monitor_object: 'missing_remote_id',
+      config_name: 'Missing Remote ID'
+    },
+    {
+      platform: 0,
+      monitor_object: 'text_remote_id',
+      config_name: 'Text Remote ID',
+      config_id: 'not-a-positive-id'
+    },
+    {
+      platform: 0,
+      monitor_object: 'zero_remote_id',
+      config_name: 'Zero Remote ID',
+      config_id: 0
+    }
+  ];
+
+  for (const row of invalidRows) {
+    const harness = createTimelineBridgeHarness(
+      async () => ({ feeds: [], has_more: false, next_cursor: '' }),
+      { initialWatchlistHandler: async () => ({ list: [row], total: 1 }) }
+    );
+    await eventually(() => assert.equal(harness.watchlistCalls().length, 1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(
+      harness.window.messages.some((message) => message.type === 'watchlist'),
+      false,
+      row.monitor_object
+    );
+    assert.equal(
+      harness.timelineCalls().some((call) => call.configIds && call.configIds !== ''),
+      false,
+      row.monitor_object
+    );
+  }
 });
 
 test('DeBot page bridge executes fixed analysis jobs with sanitized results and four-worker concurrency', async () => {
@@ -1192,7 +2360,7 @@ test('relay transports only supported page events and delivers claimed commands 
           return { ok: true, payload: { commands: [{ id: 9, type: 'watchlist.add', payload: { handle: 'bob' } }] } };
         }
         if (message.type === 'posts' && message.payload?.deliveryId === 'delivery-not-durable') {
-          return { ok: true, payload: {} };
+          return { ok: true, payload: { durable: false, backpressured: true } };
         }
         return { ok: true, payload: { durable: true } };
       },
@@ -1224,7 +2392,9 @@ test('relay transports only supported page events and delivers claimed commands 
     message.source === 'debot-social-relay'
       && message.type === 'posts-delivery-result'
       && message.payload.deliveryId === 'delivery-1'
-      && message.payload.ok === true)));
+      && message.payload.ok === true
+      && message.payload.durable === true
+      && message.payload.backpressured === false)));
 
   window.dispatchMessage({
     source: 'debot-social-page',
@@ -1235,7 +2405,9 @@ test('relay transports only supported page events and delivers claimed commands 
     message.source === 'debot-social-relay'
       && message.type === 'posts-delivery-result'
       && message.payload.deliveryId === 'delivery-not-durable'
-      && message.payload.ok === false)));
+      && message.payload.ok === false
+      && message.payload.durable === false
+      && message.payload.backpressured === true)));
 
   assert.equal(typeof runtimeListener, 'function');
   const forced = new Promise((resolve) => {
@@ -1362,7 +2534,7 @@ test('relay claims at most four analysis jobs, validates claim tokens and refill
 });
 
 test('Radar content bridge announces readiness only when the extension has a configured token', async () => {
-  const window = new FakeWindow('http://217.116.171.250');
+  const window = new FakeWindow('https://radar.217-116-171-250.sslip.io');
   const runtimeMessages = [];
   let configured = false;
   const chrome = {
@@ -1385,6 +2557,7 @@ test('Radar content bridge announces readiness only when the extension has a con
   await eventually(() => assert.ok(window.messages.some((message) =>
     message.source === 'robinhood-social-bridge' && message.type === 'ready')));
   assert.equal(window.messages.find((message) => message.type === 'ready').configured, false);
+  assert.equal(window.messages.find((message) => message.type === 'ready').writable, true);
 
   configured = true;
   window.messages.length = 0;
@@ -1401,6 +2574,39 @@ test('Radar content bridge announces readiness only when the extension has a con
     message.source === 'robinhood-social-bridge' && message.type === 'response')));
   assert.ok(runtimeMessages.some((message) => message.type === 'status'));
   assert.ok(runtimeMessages.some((message) => message.type === 'api'));
+});
+
+test('Radar content bridge keeps the public HTTP page read-only', async () => {
+  const window = new FakeWindow('http://217.116.171.250');
+  const runtimeMessages = [];
+  const chrome = {
+    runtime: {
+      async sendMessage(message) {
+        runtimeMessages.push(message);
+        return { ok: true, payload: { configured: true } };
+      }
+    }
+  };
+  vm.runInNewContext(bridgeSource('radar-content.js'), {
+    window,
+    chrome,
+    setTimeout: () => 1
+  }, { filename: 'radar-content.js' });
+
+  await eventually(() => assert.ok(window.messages.some((message) => message.type === 'ready')));
+  assert.equal(window.messages.find((message) => message.type === 'ready').writable, false);
+  window.dispatchMessage({
+    source: 'robinhood-radar',
+    type: 'social-command',
+    requestId: 'insecure-request',
+    command: { method: 'DELETE', path: '/watchlist/27' }
+  });
+  await eventually(() => assert.ok(window.messages.some((message) =>
+    message.type === 'response' && message.requestId === 'insecure-request')));
+  const response = window.messages.find((message) => message.requestId === 'insecure-request');
+  assert.equal(response.ok, false);
+  assert.match(response.error, /HTTPS/);
+  assert.equal(runtimeMessages.some((message) => message.type === 'api'), false);
 });
 
 test('background uses the bridge secret only as authorization and submits allowlisted social data', async (t) => {
@@ -1422,6 +2628,8 @@ test('background uses the bridge secret only as authorization and submits allowl
   let failPostRequests = false;
   let postResponseMode = 'ok';
   let resolveDeferredPost = null;
+  let watchlistResponseMode = 'ok';
+  let resolveDeferredWatchlist = null;
   let hangingPostAbortedAt = 0;
   let failAnalysisResultRequests = false;
   let analysisResultResponseStatus = 200;
@@ -1506,6 +2714,7 @@ test('background uses the bridge secret only as authorization and submits allowl
       async setBadgeBackgroundColor() {}
     },
     runtime: {
+      id: 'extension-test-id',
       onMessage: {
         addListener(value) {
           listener = value;
@@ -1527,6 +2736,7 @@ test('background uses the bridge secret only as authorization and submits allowl
     const requestUrl = String(url);
     requests.push({ url: requestUrl, options });
     const isPostRequest = /\/bridge\/posts$/.test(requestUrl);
+    const isWatchlistRequest = /\/bridge\/watchlist\/snapshot$/.test(requestUrl);
     const isAnalysisClaimRequest = /\/bridge\/debot\/jobs\?limit=\d+$/.test(requestUrl);
     const isAnalysisResultRequest = /\/bridge\/debot\/jobs\/\d+\/result$/.test(requestUrl);
     if (failPostRequests && isPostRequest) {
@@ -1563,6 +2773,11 @@ test('background uses the bridge secret only as authorization and submits allowl
             resolveDeferredPost = () => resolve(JSON.stringify({ ok: true }));
           });
         }
+        if (isWatchlistRequest && watchlistResponseMode === 'deferred') {
+          return new Promise((resolve) => {
+            resolveDeferredWatchlist = () => resolve(JSON.stringify({ ok: true }));
+          });
+        }
         if (isAnalysisClaimRequest) return JSON.stringify({ ok: true, jobs: [analysisJob] });
         if (isAnalysisResultRequest && responseStatus >= 400) {
           return JSON.stringify({ error: 'analysis result is permanently invalid' });
@@ -1592,8 +2807,32 @@ test('background uses the bridge secret only as authorization and submits allowl
   startupListener();
   assert.equal(alarms.length, alarmCount + 2);
   assert.equal(alarms.slice(-2).every((alarm) => alarm.name === 'debot-social-bridge-recovery'), true);
-  const send = (message, sender = {}) => new Promise((resolve) => {
-    assert.equal(listener(message, sender, resolve), true);
+  const managedRelaySender = {
+    id: 'extension-test-id',
+    url: 'https://debot.ai/',
+    tab: { id: 17, url: 'https://debot.ai/' }
+  };
+  const radarHttpsUrl = 'https://radar.217-116-171-250.sslip.io/robinhood-radar/';
+  const radarHttpsSender = {
+    id: 'extension-test-id',
+    url: radarHttpsUrl,
+    tab: { id: 27, url: radarHttpsUrl }
+  };
+  const radarHttpUrl = 'http://217.116.171.250/robinhood-radar/';
+  const radarHttpSender = {
+    id: 'extension-test-id',
+    url: radarHttpUrl,
+    tab: { id: 28, url: radarHttpUrl }
+  };
+  const send = (message, sender = null) => new Promise((resolve) => {
+    const resolvedSender = message?.source === 'debot-social-relay'
+      ? {
+          ...managedRelaySender,
+          ...(sender || {}),
+          tab: { ...managedRelaySender.tab, ...(sender?.tab || {}) }
+        }
+      : sender || {};
+    assert.equal(listener(message, resolvedSender, resolve), true);
   });
 
   const settings = await send({ source: 'bridge-options', type: 'get-settings' });
@@ -1601,10 +2840,43 @@ test('background uses the bridge secret only as authorization and submits allowl
   assert.equal(settings.payload.bridgeToken, 'configured');
   assert.equal(JSON.stringify(settings).includes(saved.bridgeToken), false);
 
-  const contentStatus = await send({ source: 'robinhood-radar-content', type: 'status' });
+  const contentStatus = await send(
+    { source: 'robinhood-radar-content', type: 'status' },
+    radarHttpSender
+  );
   assert.equal(contentStatus.ok, true);
   assert.deepEqual(contentStatus.payload, { configured: true });
   assert.equal(JSON.stringify(contentStatus).includes(saved.bridgeToken), false);
+
+  const behaviorPreference = await send({
+    source: 'robinhood-radar-content',
+    type: 'api',
+    command: {
+      method: 'PATCH',
+      path: '/watchlist/27',
+      body: { eventTypes: ['post', 'follow', 'profile_avatar'] }
+    }
+  }, radarHttpsSender);
+  assert.equal(behaviorPreference.ok, true);
+  const behaviorPreferenceRequest = requests.findLast((request) => /\/watchlist\/27$/.test(request.url));
+  assert.equal(behaviorPreferenceRequest.options.method, 'PATCH');
+  assert.deepEqual(JSON.parse(behaviorPreferenceRequest.options.body), {
+    eventTypes: ['post', 'follow', 'profile_avatar']
+  });
+
+  const requestCountBeforeInsecureWrite = requests.length;
+  const insecureBehaviorPreference = await send({
+    source: 'robinhood-radar-content',
+    type: 'api',
+    command: {
+      method: 'PATCH',
+      path: '/watchlist/27',
+      body: { eventTypes: [] }
+    }
+  }, radarHttpSender);
+  assert.equal(insecureBehaviorPreference.ok, false);
+  assert.match(insecureBehaviorPreference.error, /HTTPS/);
+  assert.equal(requests.length, requestCountBeforeInsecureWrite);
 
   const invalidServer = await send({
     source: 'bridge-options',
@@ -1750,22 +3022,85 @@ test('background uses the bridge secret only as authorization and submits allowl
   await eventually(() => assert.equal(saved.debotAnalysisResultOutboxV1?.records?.length, 0));
   analysisResultResponseStatus = 200;
 
-  const requestsBeforeFilteredActivities = requests.filter((request) => /\/bridge\/posts$/.test(request.url)).length;
-  const filteredActivities = await send({
+  const requestsBeforeInvalidActivities = requests.filter((request) => /\/bridge\/posts$/.test(request.url)).length;
+  const invalidActivities = await send({
     source: 'debot-social-relay',
     type: 'posts',
     payload: {
       posts: [
         { source: 'twitter', externalId: 'follow:alice:bob', kind: 'follow' },
         { source: 'twitter', externalId: 'unfollow:alice:bob', kind: 'unfollow' },
-        { source: 'twitter', externalId: 'profile:alice:1', kind: 'profile' }
+        { source: 'twitter', externalId: 'profile:alice:1', kind: 'profile' },
+        { source: 'twitter', externalId: 'unknown:alice:1', kind: 'list_update' }
       ]
     }
   });
-  assert.equal(filteredActivities.ok, true);
-  assert.equal(filteredActivities.payload.skipped, true);
-  assert.equal(requests.filter((request) => /\/bridge\/posts$/.test(request.url)).length, requestsBeforeFilteredActivities);
+  assert.equal(invalidActivities.ok, true);
+  assert.equal(invalidActivities.payload.skipped, true);
+  assert.equal(requests.filter((request) => /\/bridge\/posts$/.test(request.url)).length, requestsBeforeInvalidActivities);
 
+  const requestsBeforeSocialActivities = requests.filter((request) => /\/bridge\/posts$/.test(request.url)).length;
+  const socialActivities = await send({
+    source: 'debot-social-relay',
+    type: 'posts',
+    payload: {
+      posts: [
+        {
+          source: 'twitter',
+          externalId: 'follow:alice:bob',
+          kind: 'follow',
+          author: { id: 'alice-id', handle: 'alice', followersCount: 42 },
+          target: {
+            id: 'bob-id',
+            handle: 'bob',
+            name: 'Bob',
+            followersCount: 73,
+            url: 'https://x.com/bob',
+            cookie: 'private-target-cookie'
+          },
+          sourceUpdatedAt: 1_784_300_001_000
+        },
+        {
+          source: 'twitter',
+          externalId: 'unfollow:alice:carol',
+          kind: 'unfollow',
+          author: { handle: 'alice' },
+          target: { handle: 'carol', url: 'https://x.com/carol' },
+          sourceUpdatedAt: 1_784_300_002_000
+        },
+        {
+          source: 'twitter',
+          externalId: 'profile:alice:1784300003000',
+          kind: 'profile',
+          author: { handle: 'alice' },
+          profileChanges: ['name', 'avatar', 'bio', 'unsupported'],
+          profileDetail: {
+            name: { before: 'Alice', after: 'Alice 2', cookie: 'private-profile-cookie' },
+            avatar: { before: 'old.png', after: 'new.png' },
+            bio: { before: 'old bio', after: 'new bio' },
+            unsupported: { before: 'secret', after: 'secret' }
+          },
+          sourceUpdatedAt: 1_784_300_003_000
+        }
+      ]
+    }
+  });
+  assert.equal(socialActivities.ok, true);
+  assert.equal(socialActivities.payload.durable, true);
+  await eventually(() => assert.ok(requests.filter((request) =>
+    /\/bridge\/posts$/.test(request.url)).length > requestsBeforeSocialActivities));
+  const socialActivityRequest = requests.findLast((request) => /\/bridge\/posts$/.test(request.url));
+  const socialActivityPosts = JSON.parse(socialActivityRequest.options.body).posts;
+  assert.deepEqual(socialActivityPosts.map((post) => post.kind), ['follow', 'unfollow', 'profile']);
+  assert.equal(socialActivityPosts[0].target.handle, 'bob');
+  assert.equal(socialActivityPosts[0].target.followersCount, 73);
+  assert.deepEqual(socialActivityPosts[2].profileChanges, ['name', 'avatar', 'bio']);
+  assert.equal(socialActivityPosts[2].profileDetail.name.after, 'Alice 2');
+  assert.equal(/private-(?:target|profile)-cookie/.test(socialActivityRequest.options.body), false);
+  assert.equal(socialActivityRequest.options.body.includes('unsupported'), false);
+  await eventually(() => assert.equal(saved.debotSocialPostOutboxV1?.records?.length, 0));
+
+  const requestsBeforeSafePost = requests.filter((request) => /\/bridge\/posts$/.test(request.url)).length;
   await send({
     source: 'debot-social-relay',
     type: 'posts',
@@ -1783,7 +3118,8 @@ test('background uses the bridge secret only as authorization and submits allowl
       }]
     }
   });
-  await eventually(() => assert.ok(requests.some((request) => /\/bridge\/posts$/.test(request.url))));
+  await eventually(() => assert.ok(requests.filter((request) =>
+    /\/bridge\/posts$/.test(request.url)).length > requestsBeforeSafePost));
   const postRequest = requests.findLast((request) => /\/bridge\/posts$/.test(request.url));
   assert.match(postRequest.url, /\/api\/social\/bridge\/posts$/);
   assert.equal(postRequest.options.headers.authorization, `Bearer ${saved.bridgeToken}`);
@@ -1878,13 +3214,84 @@ test('background uses the bridge secret only as authorization and submits allowl
       accounts: [{
         platform: 'twitter',
         handle: 'alice',
+        remoteId: '42',
         metadata: { hotSubscribeId: 4, monitorLevel: 'high', sub_token: 'debot-session-value' }
       }]
     }
   });
   const watchlistBody = requests.at(-1).options.body;
   assert.equal(watchlistBody.includes('debot-session-value'), false);
-  assert.equal(JSON.parse(watchlistBody).complete, true);
+  const firstWatchlistBody = JSON.parse(watchlistBody);
+  assert.equal(firstWatchlistBody.complete, true);
+  assert.equal(typeof firstWatchlistBody.snapshotSessionId, 'string');
+  assert.ok(firstWatchlistBody.snapshotSessionId.length > 8);
+  assert.equal(Number.isSafeInteger(firstWatchlistBody.snapshotSessionStartedAt), true);
+  assert.equal(firstWatchlistBody.snapshotRevision, 1);
+
+  watchlistResponseMode = 'deferred';
+  const serialRequestCount = requests.filter((request) => /\/bridge\/watchlist\/snapshot$/.test(request.url)).length;
+  const firstSerialSnapshot = send({
+    source: 'debot-social-relay',
+    type: 'watchlist',
+    payload: { accounts: [{ platform: 'twitter', handle: 'bob', remoteId: '43' }] }
+  });
+  await eventually(() => assert.equal(typeof resolveDeferredWatchlist, 'function'));
+  const secondSerialSnapshot = send({
+    source: 'debot-social-relay',
+    type: 'watchlist',
+    payload: { accounts: [{ platform: 'twitter', handle: 'carol', remoteId: '44' }] }
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(
+    requests.filter((request) => /\/bridge\/watchlist\/snapshot$/.test(request.url)).length,
+    serialRequestCount + 1
+  );
+  watchlistResponseMode = 'ok';
+  resolveDeferredWatchlist();
+  await firstSerialSnapshot;
+  await secondSerialSnapshot;
+  const serialBodies = requests
+    .filter((request) => /\/bridge\/watchlist\/snapshot$/.test(request.url))
+    .slice(-2)
+    .map((request) => JSON.parse(request.options.body));
+  assert.deepEqual(serialBodies.map((body) => body.snapshotRevision), [2, 3]);
+  assert.equal(serialBodies.every((body) => body.snapshotSessionId === firstWatchlistBody.snapshotSessionId), true);
+  assert.equal(serialBodies.every((body) => (
+    body.snapshotSessionStartedAt === firstWatchlistBody.snapshotSessionStartedAt
+  )), true);
+
+  const commandAcknowledgement = await send({
+    source: 'debot-social-relay',
+    type: 'command-result',
+    payload: {
+      commandId: 77,
+      success: true,
+      remoteId: '42',
+      verifiedAbsent: true
+    }
+  });
+  assert.equal(commandAcknowledgement.ok, true);
+  const commandAcknowledgementRequest = requests.findLast((request) => /\/bridge\/commands\/77\/ack$/.test(request.url));
+  assert.deepEqual(JSON.parse(commandAcknowledgementRequest.options.body), {
+    success: true,
+    error: '',
+    remoteId: '42',
+    verifiedAbsent: true
+  });
+
+  const requestCountBeforeUnmanagedWrite = requests.length;
+  const unmanagedHeartbeat = await send({
+    source: 'debot-social-relay',
+    type: 'heartbeat',
+    payload: { bridgeId: 'must-not-upload' }
+  }, {
+    id: 'extension-test-id',
+    url: 'https://example.test/',
+    tab: { id: 17, url: 'https://example.test/' }
+  });
+  assert.equal(unmanagedHeartbeat.ok, true);
+  assert.deepEqual(unmanagedHeartbeat.payload, { accepted: false, managed: false });
+  assert.equal(requests.length, requestCountBeforeUnmanagedWrite);
 
   failPostRequests = true;
   const queuedDuringOutage = await send({

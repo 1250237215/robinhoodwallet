@@ -4,11 +4,15 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   normalizeFeedSources,
+  normalizeProfileChanges,
   normalizeSocialPost,
   normalizeSocialSource,
   normalizeTimestamp,
+  normalizeWatchEventTypes,
   normalizeWatchAccount,
-  parseSocialActivityIdentity
+  parseSocialActivityIdentity,
+  SOCIAL_PROFILE_CHANGES,
+  SOCIAL_WATCH_EVENT_TYPES
 } from './normalize.js';
 
 function json(value) {
@@ -31,10 +35,62 @@ function boolean(value) {
   return Boolean(Number(value));
 }
 
+function normalizeWatchlistSnapshotVersion(value) {
+  const input = value && typeof value === 'object' ? value : {};
+  const sessionId = String(input.snapshotSessionId ?? '').trim().slice(0, 240);
+  const startedRaw = input.snapshotSessionStartedAt;
+  const revisionRaw = input.snapshotRevision;
+  const hasAnyVersion = Boolean(sessionId)
+    || (startedRaw !== null && startedRaw !== undefined && startedRaw !== '')
+    || (revisionRaw !== null && revisionRaw !== undefined && revisionRaw !== '');
+  if (!hasAnyVersion) return null;
+  const sessionStartedAt = Number(startedRaw);
+  const revision = Number(revisionRaw);
+  if (!sessionId
+    || !Number.isSafeInteger(sessionStartedAt) || sessionStartedAt <= 0
+    || !Number.isSafeInteger(revision) || revision <= 0) {
+    throw new TypeError('Invalid watchlist snapshot version');
+  }
+  return { sessionId, sessionStartedAt, revision };
+}
+
+function watchEventTypesFromJson(value) {
+  try {
+    return normalizeWatchEventTypes(parseJson(value, SOCIAL_WATCH_EVENT_TYPES));
+  } catch {
+    return [...SOCIAL_WATCH_EVENT_TYPES];
+  }
+}
+
+function profileFromJson(value) {
+  const profile = parseJson(value, {});
+  let changes = [];
+  try {
+    changes = normalizeProfileChanges(profile?.changes || []);
+  } catch {
+    changes = [];
+  }
+  const sourceDetail = profile?.detail && typeof profile.detail === 'object' && !Array.isArray(profile.detail)
+    ? profile.detail
+    : {};
+  const detail = {};
+  for (const change of changes) {
+    const item = sourceDetail[change] && typeof sourceDetail[change] === 'object'
+      ? sourceDetail[change]
+      : {};
+    detail[change] = {
+      before: String(item.before || ''),
+      after: String(item.after || '')
+    };
+  }
+  return { changes, detail };
+}
+
 function postFromRow(row) {
   if (!row) return null;
   const debotDiscoveredAt = Number(row.discovered_at || row.received_at);
   const vpsIngestedAt = Number(row.ingested_at || row.stored_at);
+  const profile = profileFromJson(row.profile_json);
   return {
     id: Number(row.id),
     source: row.source,
@@ -58,6 +114,8 @@ function postFromRow(row) {
     quotedExternalId: row.quoted_external_id,
     repostExternalId: row.repost_external_id,
     target: parseJson(row.target_json, {}),
+    profileChanges: profile.changes,
+    profileDetail: profile.detail,
     publishedAt: Number(row.published_at),
     debotDiscoveredAt,
     vpsIngestedAt,
@@ -83,6 +141,7 @@ function watchlistFromRow(row) {
     url: row.url,
     remoteId: row.remote_id,
     metadata: parseJson(row.metadata_json, {}),
+    eventTypes: watchEventTypesFromJson(row.event_types_json),
     desiredState: row.desired_state,
     syncStatus: row.sync_status,
     origin: row.origin,
@@ -235,6 +294,26 @@ function mergeSocialAuthor(current, incoming) {
   };
 }
 
+function mergeSocialProfile(currentChanges, currentDetail, incomingChanges, incomingDetail) {
+  const selected = new Set([
+    ...(Array.isArray(currentChanges) ? currentChanges : []),
+    ...(Array.isArray(incomingChanges) ? incomingChanges : [])
+  ]);
+  const existing = currentDetail && typeof currentDetail === 'object' ? currentDetail : {};
+  const next = incomingDetail && typeof incomingDetail === 'object' ? incomingDetail : {};
+  const changes = SOCIAL_PROFILE_CHANGES.filter((change) => selected.has(change));
+  const detail = {};
+  for (const change of changes) {
+    const previousValues = existing[change] && typeof existing[change] === 'object' ? existing[change] : {};
+    const nextValues = next[change] && typeof next[change] === 'object' ? next[change] : {};
+    detail[change] = {
+      before: String(nextValues.before || previousValues.before || ''),
+      after: String(nextValues.after || previousValues.after || '')
+    };
+  }
+  return { changes, detail };
+}
+
 function activityClusters(rows) {
   const byOccurrence = new Map();
   for (const row of rows) {
@@ -277,9 +356,16 @@ function migrateSocialActivities(db) {
         || Number(right.updated_at) - Number(left.updated_at)
         || Number(right.id) - Number(left.id));
       const winner = newestFirst[0];
-      const externalId = occurrenceIndex === 0
+      const exactBase = clusterRows.find((row) =>
+        String(row.external_id).toLowerCase() === activity.canonicalId.toLowerCase());
+      const exactOccurrence = clusterRows
+        .map((row) => parseSocialActivityIdentity(row.external_id, row.author_handle))
+        .find((identity) => identity?.occurrenceAt !== null && identity?.occurrenceAt !== undefined);
+      const externalId = exactBase
         ? activity.canonicalId
-        : `${activity.canonicalId}:${cluster.occurrenceAt}`;
+        : exactOccurrence?.occurrenceId || (occurrenceIndex === 0
+          ? activity.canonicalId
+          : `${activity.canonicalId}:${cluster.occurrenceAt}`);
       const author = activityAuthorFromRows(newestFirst, activity.actorHandle);
       const target = activityTargetFromRows(newestFirst, activity);
       const feedSources = normalizeFeedSources(
@@ -353,6 +439,39 @@ function migrateSocialActivities(db) {
   });
 }
 
+function legacyProfileChange(row) {
+  const aliases = new Map([
+    ['rename', 'name'],
+    ['namechange', 'name'],
+    ['reimage', 'avatar'],
+    ['reavatar', 'avatar'],
+    ['avatarchange', 'avatar'],
+    ['imagechange', 'avatar'],
+    ['redescription', 'bio'],
+    ['descriptionchange', 'bio'],
+    ['biochange', 'bio']
+  ]);
+  const raw = parseJson(row.raw_json, {});
+  const rawTweet = raw?.tweet && typeof raw.tweet === 'object' ? raw.tweet : {};
+  for (const value of [
+    raw?.kind,
+    raw?.postType,
+    raw?.tw_type,
+    raw?.twType,
+    raw?.twitter_type,
+    raw?.event_type,
+    raw?.eventType,
+    raw?.action,
+    raw?.type,
+    raw?.tweet_type,
+    rawTweet?.tweet_type
+  ]) {
+    const change = aliases.get(String(value || '').trim().toLowerCase().replace(/[-_\s]+/g, ''));
+    if (change) return change;
+  }
+  return '';
+}
+
 function legacyProfileIdentity(row) {
   const authorHandle = String(row.author_handle || '').replace(/^@/, '').trim();
   if (!/^[a-z0-9_]{1,15}$/i.test(authorHandle)) return null;
@@ -364,6 +483,7 @@ function legacyProfileIdentity(row) {
     return { authorHandle, canonicalId: `profile:${authorHandle.toLowerCase()}:${canonical[2]}` };
   }
   if (row.kind !== 'post' || row.content || row.url) return null;
+  if (legacyProfileChange(row)) return { authorHandle, canonicalId };
   const externalId = String(row.external_id || '');
   const plainPrefix = `profile_${authorHandle}_`;
   if (externalId.toLowerCase().startsWith(plainPrefix.toLowerCase())) {
@@ -382,12 +502,38 @@ function legacyProfileIdentity(row) {
   return { authorHandle, canonicalId };
 }
 
+function legacyProfileData(rows) {
+  const changes = new Set();
+  const detail = {};
+  for (const row of rows) {
+    const stored = profileFromJson(row.profile_json);
+    for (const change of stored.changes) {
+      changes.add(change);
+      detail[change] = stored.detail[change];
+    }
+    const rawChange = legacyProfileChange(row);
+    if (rawChange) changes.add(rawChange);
+    if (String(row.external_id || '').includes('profile_images')) changes.add('avatar');
+    try {
+      const decoded = Buffer.from(String(row.external_id || ''), 'base64url').toString('utf8');
+      if (decoded.includes('profile_images')) changes.add('avatar');
+    } catch {
+      // The external id is not a legacy base64 profile identity.
+    }
+  }
+  const ordered = SOCIAL_PROFILE_CHANGES.filter((change) => changes.has(change));
+  for (const change of ordered) {
+    if (!detail[change]) detail[change] = { before: '', after: '' };
+  }
+  return { changes: ordered, detail };
+}
+
 function migrateProfileActivities(db) {
   const groups = new Map();
   for (const row of db.prepare(`
     SELECT id, external_id, kind, author_id, author_handle, author_name,
            author_avatar_url, author_followers, content, url, feed_sources_json,
-           published_at, received_at, source_updated_at, stored_at, updated_at
+           profile_json, raw_json, published_at, received_at, source_updated_at, stored_at, updated_at
     FROM social_posts
     WHERE source = 'twitter' AND kind IN ('post', 'profile')
   `).all()) {
@@ -404,7 +550,7 @@ function migrateProfileActivities(db) {
   const updateWinner = db.prepare(`
     UPDATE social_posts
     SET external_id = ?, kind = 'profile', author_id = ?, author_handle = ?, author_name = ?,
-        author_avatar_url = ?, author_followers = ?, feed_sources_json = ?,
+        author_avatar_url = ?, author_followers = ?, feed_sources_json = ?, profile_json = ?,
         received_at = ?, stored_at = ?, updated_at = ?
     WHERE id = ?
   `);
@@ -418,6 +564,7 @@ function migrateProfileActivities(db) {
       const feedSources = normalizeFeedSources(
         ordered.map((row) => parseJson(row.feed_sources_json, []))
       );
+      const profile = legacyProfileData(ordered);
       for (const duplicate of ordered.slice(1)) deleteRow.run(duplicate.id);
       if (ordered.length > 1) setTemporaryId.run(`social-profile-migration:${winner.id}`, winner.id);
       const receivedAt = Math.min(...ordered.map((row) => Number(row.received_at)));
@@ -432,6 +579,7 @@ function migrateProfileActivities(db) {
         || winner.author_avatar_url !== author.avatarUrl
         || Number(winner.author_followers) !== author.followers
         || winner.feed_sources_json !== json(feedSources)
+        || winner.profile_json !== json(profile)
         || Number(winner.received_at) !== receivedAt
         || Number(winner.stored_at) !== storedAt
         || Number(winner.updated_at) !== updatedAt;
@@ -444,6 +592,7 @@ function migrateProfileActivities(db) {
           author.avatarUrl,
           author.followers,
           json(feedSources),
+          json(profile),
           receivedAt,
           storedAt,
           updatedAt,
@@ -454,122 +603,12 @@ function migrateProfileActivities(db) {
   });
 }
 
-function nonTweetRowReason(row) {
-  const kind = String(row.kind || '').trim().toLowerCase().replace(/[-_\s]+/g, '');
-  if (['follow', 'unfollow'].includes(kind)) return `non-tweet:${kind}`;
-  if ([
-    'profile',
-    'profilechange',
-    'profileupdate',
-    'rename',
-    'reimage',
-    'reavatar',
-    'redescription',
-    'namechange',
-    'avatarchange',
-    'imagechange',
-    'biochange'
-  ].includes(kind)) return 'non-tweet:profile';
-
-  if (row.source === 'twitter' && parseSocialActivityIdentity(row.external_id, row.author_handle)) {
-    return 'non-tweet:relationship';
-  }
-  if (row.source === 'twitter'
-    && /^(?:follow|unfollow):[a-z0-9_]{1,15}:[a-z0-9_]{1,15}:\d{10,16}$/i.test(String(row.external_id || ''))) {
-    return 'non-tweet:relationship';
-  }
-  if (row.source === 'twitter' && legacyProfileIdentity(row)) return 'non-tweet:profile';
-
-  const raw = parseJson(row.raw_json, {});
-  const rawTweet = raw?.tweet && typeof raw.tweet === 'object' ? raw.tweet : {};
-  const rawTypes = [
-    raw?.kind,
-    raw?.postType,
-    raw?.tw_type,
-    raw?.twType,
-    raw?.twitter_type,
-    raw?.event_type,
-    raw?.eventType,
-    raw?.action,
-    raw?.type,
-    raw?.tweet_type,
-    rawTweet?.tweet_type
-  ];
-  for (const value of rawTypes) {
-    const candidate = String(value || '').trim().toLowerCase().replace(/[-_\s]+/g, '');
-    if (['follow', 'unfollow'].includes(candidate)) return `non-tweet:${candidate}`;
-    if ([
-      'profile',
-      'profilechange',
-      'profileupdate',
-      'rename',
-      'reimage',
-      'reavatar',
-      'redescription',
-      'namechange',
-      'avatarchange',
-      'imagechange',
-      'biochange'
-    ].includes(candidate)) return 'non-tweet:profile';
-  }
-  return '';
-}
-
-function nonTweetChangeReason(row) {
-  const payload = parseJson(row.payload_json, {});
-  const author = payload?.author && typeof payload.author === 'object' ? payload.author : {};
-  return nonTweetRowReason({
-    source: payload?.source,
-    external_id: payload?.externalId || payload?.external_id,
-    kind: payload?.kind,
-    author_handle: author.handle || payload?.authorHandle,
-    content: payload?.content,
-    url: payload?.url,
-    published_at: payload?.publishedAt,
-    source_updated_at: payload?.sourceUpdatedAt,
-    raw_json: json(payload?.raw || {})
-  });
-}
-
-function purgeNonTweetRows(db) {
-  const rows = db.prepare(`
-    SELECT id, source, external_id, kind, author_handle, content, url, published_at,
-           source_updated_at, raw_json
-    FROM social_posts
-  `).all();
-  const rejected = rows
-    .map((row) => ({ row, reason: nonTweetRowReason(row) }))
-    .filter((candidate) => candidate.reason);
-
-  const deleteChanges = db.prepare(`
-    DELETE FROM social_changes WHERE entity_type = 'post' AND entity_id = ?
-  `);
-  const deleteChange = db.prepare('DELETE FROM social_changes WHERE id = ?');
-  const deletePost = db.prepare('DELETE FROM social_posts WHERE id = ?');
-  return transaction(db, () => {
-    let changesDeleted = 0;
-    for (const { row } of rejected) {
-      changesDeleted += Number(deleteChanges.run(String(row.id)).changes || 0);
-      deletePost.run(row.id);
-    }
-    const orphanedNonTweets = db.prepare(`
-      SELECT social_changes.id, social_changes.payload_json
-      FROM social_changes
-      WHERE social_changes.entity_type = 'post'
-        AND NOT EXISTS (
-          SELECT 1 FROM social_posts WHERE CAST(social_posts.id AS TEXT) = social_changes.entity_id
-        )
-    `).all().filter((row) => nonTweetChangeReason(row));
-    for (const row of orphanedNonTweets) {
-      changesDeleted += Number(deleteChange.run(row.id).changes || 0);
-    }
-    return { postsDeleted: rejected.length, changesDeleted };
-  });
-}
-
 function resolveActivityOccurrence(db, normalized) {
   const activity = parseSocialActivityIdentity(normalized.externalId, normalized.authorHandle);
   if (!activity || normalized.source !== 'twitter') return normalized;
+  if (normalized._activityOccurrenceId) {
+    return { ...normalized, externalId: normalized._activityOccurrenceId };
+  }
   const candidates = db.prepare(`
     SELECT external_id, published_at, source_updated_at, id
     FROM social_posts
@@ -619,6 +658,7 @@ function postValues(post, raw, now) {
     post.quotedExternalId,
     post.repostExternalId,
     json(post.target),
+    json({ changes: post.profileChanges, detail: post.profileDetail }),
     post.publishedAt,
     post.receivedAt,
     post.discoveredAt,
@@ -661,6 +701,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       quoted_external_id TEXT NOT NULL DEFAULT '',
       repost_external_id TEXT NOT NULL DEFAULT '',
       target_json TEXT NOT NULL DEFAULT '{}',
+      profile_json TEXT NOT NULL DEFAULT '{}',
       published_at INTEGER NOT NULL,
       received_at INTEGER NOT NULL,
       discovered_at INTEGER NOT NULL DEFAULT 0,
@@ -686,6 +727,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       url TEXT NOT NULL DEFAULT '',
       remote_id TEXT NOT NULL DEFAULT '',
       metadata_json TEXT NOT NULL DEFAULT '{}',
+      event_types_json TEXT NOT NULL DEFAULT '["post","reply","quote","repost","delete","follow","unfollow","profile_name","profile_avatar","profile_bio"]',
       desired_state TEXT NOT NULL DEFAULT 'active',
       sync_status TEXT NOT NULL DEFAULT 'pending',
       origin TEXT NOT NULL DEFAULT 'local',
@@ -730,6 +772,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       version TEXT NOT NULL DEFAULT '',
       capabilities_json TEXT NOT NULL DEFAULT '[]',
       session_id TEXT NOT NULL DEFAULT '',
+      snapshot_session_id TEXT NOT NULL DEFAULT '',
+      snapshot_session_started_at INTEGER NOT NULL DEFAULT 0,
+      snapshot_revision INTEGER NOT NULL DEFAULT 0,
       last_seen_at INTEGER,
       updated_at INTEGER NOT NULL
     );
@@ -768,6 +813,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
   if (!socialPostColumns.has('target_json')) {
     db.exec("ALTER TABLE social_posts ADD COLUMN target_json TEXT NOT NULL DEFAULT '{}'");
   }
+  if (!socialPostColumns.has('profile_json')) {
+    db.exec("ALTER TABLE social_posts ADD COLUMN profile_json TEXT NOT NULL DEFAULT '{}'");
+  }
   if (!socialPostColumns.has('discovered_at')) {
     db.exec('ALTER TABLE social_posts ADD COLUMN discovered_at INTEGER NOT NULL DEFAULT 0');
     db.exec('UPDATE social_posts SET discovered_at = received_at WHERE discovered_at = 0');
@@ -777,7 +825,26 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
     db.exec('UPDATE social_posts SET ingested_at = stored_at WHERE ingested_at = 0');
   }
 
-  const initialNonTweetPurge = purgeNonTweetRows(db);
+  const socialWatchlistColumns = new Set(
+    db.prepare('PRAGMA table_info(social_watchlist)').all().map((column) => column.name)
+  );
+  if (!socialWatchlistColumns.has('event_types_json')) {
+    db.exec(`ALTER TABLE social_watchlist ADD COLUMN event_types_json TEXT NOT NULL DEFAULT '${json(SOCIAL_WATCH_EVENT_TYPES)}'`);
+  }
+
+  const socialBridgeStateColumns = new Set(
+    db.prepare('PRAGMA table_info(social_bridge_state)').all().map((column) => column.name)
+  );
+  if (!socialBridgeStateColumns.has('snapshot_session_id')) {
+    db.exec("ALTER TABLE social_bridge_state ADD COLUMN snapshot_session_id TEXT NOT NULL DEFAULT ''");
+  }
+  if (!socialBridgeStateColumns.has('snapshot_session_started_at')) {
+    db.exec('ALTER TABLE social_bridge_state ADD COLUMN snapshot_session_started_at INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!socialBridgeStateColumns.has('snapshot_revision')) {
+    db.exec('ALTER TABLE social_bridge_state ADD COLUMN snapshot_revision INTEGER NOT NULL DEFAULT 0');
+  }
+
   migrateSocialActivities(db);
   migrateProfileActivities(db);
 
@@ -786,16 +853,16 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       source, external_id, kind, author_id, author_handle, author_name, author_avatar_url,
       author_followers, content, translated_content, url, media_json, contract_addresses_json,
       chain_tags_json, feed_sources_json, reply_to_external_id, quoted_external_id, repost_external_id,
-      target_json, published_at, received_at, discovered_at, ingested_at, source_updated_at,
+      target_json, profile_json, published_at, received_at, discovered_at, ingested_at, source_updated_at,
       deleted_at, raw_json, stored_at, updated_at
-    ) VALUES (${Array(28).fill('?').join(', ')})
+    ) VALUES (${Array(29).fill('?').join(', ')})
   `);
   const updatePost = db.prepare(`
     UPDATE social_posts SET
       kind = ?, author_id = ?, author_handle = ?, author_name = ?, author_avatar_url = ?,
       author_followers = ?, content = ?, translated_content = ?, url = ?, media_json = ?,
       contract_addresses_json = ?, chain_tags_json = ?, feed_sources_json = ?, reply_to_external_id = ?,
-      quoted_external_id = ?, repost_external_id = ?, target_json = ?, published_at = ?, received_at = ?,
+      quoted_external_id = ?, repost_external_id = ?, target_json = ?, profile_json = ?, published_at = ?, received_at = ?,
       discovered_at = ?, source_updated_at = ?, deleted_at = ?, raw_json = ?, updated_at = ?
     WHERE id = ?
   `);
@@ -811,16 +878,6 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
 
   function applyPost(input, timestamp) {
     const normalized = resolveActivityOccurrence(db, normalizeSocialPost(input, { now: timestamp }));
-    if (normalized._nonTweetReason) {
-      return {
-        action: 'filtered',
-        post: null,
-        change: null,
-        reason: normalized._nonTweetReason,
-        source: normalized.source,
-        externalId: normalized.externalId
-      };
-    }
     const existingRow = db.prepare('SELECT * FROM social_posts WHERE source = ? AND external_id = ?')
       .get(normalized.source, normalized.externalId);
     if (!existingRow) {
@@ -836,7 +893,11 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       ? normalizeFeedSources([existing.feedSources, normalized.feedSources])
       : existing.feedSources;
     const feedSourcesChanged = json(mergedFeedSources) !== json(existing.feedSources);
-    if (normalized.sourceUpdatedAt < existing.sourceUpdatedAt && !provided.has('deletedAt')) {
+    const staleRestore = existing.deleted
+      && provided.has('deletedAt')
+      && normalized.deletedAt === null
+      && normalized.sourceUpdatedAt <= existing.sourceUpdatedAt;
+    if ((normalized.sourceUpdatedAt < existing.sourceUpdatedAt && !provided.has('deletedAt')) || staleRestore) {
       if (!feedSourcesChanged) return { action: 'unchanged', post: existing, change: null };
       db.prepare(`
         UPDATE social_posts SET feed_sources_json = ?, updated_at = ? WHERE id = ?
@@ -856,6 +917,14 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       avatarUrl: choose('authorAvatarUrl', existing.author.avatarUrl),
       followers: choose('authorFollowers', existing.author.followers)
     });
+    const mergedProfile = provided.has('profileChanges') || provided.has('profileDetail')
+      ? mergeSocialProfile(
+        existing.profileChanges,
+        existing.profileDetail,
+        normalized.profileChanges,
+        normalized.profileDetail
+      )
+      : { changes: existing.profileChanges, detail: existing.profileDetail };
     const merged = {
       ...normalized,
       kind: choose('kind', existing.kind),
@@ -875,6 +944,8 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       quotedExternalId: choose('quotedExternalId', existing.quotedExternalId),
       repostExternalId: choose('repostExternalId', existing.repostExternalId),
       target: provided.has('target') ? mergeSocialTarget(existing.target, normalized.target) : existing.target,
+      profileChanges: mergedProfile.changes,
+      profileDetail: mergedProfile.detail,
       publishedAt: choose('publishedAt', existing.publishedAt),
       discoveredAt: Math.min(existing.debotDiscoveredAt, normalized.discoveredAt),
       receivedAt: Math.min(existing.receivedAt, normalized.receivedAt),
@@ -903,6 +974,8 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       quotedExternalId: merged.quotedExternalId,
       repostExternalId: merged.repostExternalId,
       target: merged.target,
+      profileChanges: merged.profileChanges,
+      profileDetail: merged.profileDetail,
       publishedAt: merged.publishedAt,
       debotDiscoveredAt: merged.discoveredAt,
       discoveredAt: merged.discoveredAt,
@@ -937,6 +1010,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       merged.quotedExternalId,
       merged.repostExternalId,
       json(merged.target),
+      json({ changes: merged.profileChanges, detail: merged.profileDetail }),
       merged.publishedAt,
       merged.receivedAt,
       merged.discoveredAt,
@@ -977,7 +1051,8 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       handle: row.handle,
       name: row.name,
       url: row.url,
-      remoteId: row.remote_id
+      remoteId: row.remote_id,
+      eventTypes: watchEventTypesFromJson(row.event_types_json)
     };
     const result = db.prepare(`
       INSERT INTO social_commands(command_type, watchlist_id, payload_json, status, created_at)
@@ -986,18 +1061,25 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
     return commandFromRow(db.prepare('SELECT * FROM social_commands WHERE id = ?').get(Number(result.lastInsertRowid)));
   }
 
-  function addWatchAccount(input, timestamp, { origin = 'local', synced = false } = {}) {
+  function addWatchAccount(input, timestamp, {
+    origin = 'local',
+    synced = false,
+    preserveEventTypes = false
+  } = {}) {
     const account = normalizeWatchAccount(input);
     const existing = db.prepare('SELECT * FROM social_watchlist WHERE platform = ? AND account_key = ?')
       .get(account.platform, account.accountKey);
     let id;
     let changed = false;
     if (!existing) {
+      const initialEventTypes = preserveEventTypes
+        ? SOCIAL_WATCH_EVENT_TYPES
+        : account.eventTypes;
       const result = db.prepare(`
         INSERT INTO social_watchlist(
-          platform, account_key, handle, name, url, remote_id, metadata_json, desired_state,
+          platform, account_key, handle, name, url, remote_id, metadata_json, event_types_json, desired_state,
           sync_status, origin, last_synced_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
       `).run(
         account.platform,
         account.accountKey,
@@ -1006,6 +1088,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         account.url,
         account.remoteId,
         json(account.metadata),
+        json(initialEventTypes),
         synced ? 'synced' : 'pending',
         origin,
         synced ? timestamp : null,
@@ -1020,17 +1103,21 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       const nextUrl = account.url || existing.url;
       const nextRemoteId = account.remoteId || existing.remote_id;
       const nextMetadata = Object.keys(account.metadata).length ? account.metadata : parseJson(existing.metadata_json, {});
+      const nextEventTypes = preserveEventTypes || !account._eventTypesProvided
+        ? watchEventTypesFromJson(existing.event_types_json)
+        : account.eventTypes;
       const nextStatus = synced ? 'synced' : existing.desired_state === 'active' && existing.sync_status === 'synced'
         ? 'synced'
         : 'pending';
       changed = existing.desired_state !== 'active' || existing.handle !== account.handle ||
         existing.name !== nextName || existing.url !== nextUrl || existing.remote_id !== nextRemoteId ||
         existing.metadata_json !== json(nextMetadata) ||
+        existing.event_types_json !== json(nextEventTypes) ||
         existing.sync_status !== nextStatus;
       if (changed) {
         db.prepare(`
           UPDATE social_watchlist SET
-            handle = ?, name = ?, url = ?, remote_id = ?, metadata_json = ?, desired_state = 'active',
+            handle = ?, name = ?, url = ?, remote_id = ?, metadata_json = ?, event_types_json = ?, desired_state = 'active',
             sync_status = ?, origin = ?, last_synced_at = ?, last_error = '', updated_at = ?
           WHERE id = ?
         `).run(
@@ -1039,6 +1126,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
           nextUrl,
           nextRemoteId,
           json(nextMetadata),
+          json(nextEventTypes),
           nextStatus,
           origin === 'remote' ? 'remote' : existing.origin,
           synced ? timestamp : existing.last_synced_at,
@@ -1065,10 +1153,6 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
 
   return {
     db,
-    initialNonTweetPurge,
-    purgeNonTweetEvents() {
-      return purgeNonTweetRows(db);
-    },
     upsertPosts(inputs) {
       if (!Array.isArray(inputs)) throw new TypeError('posts must be an array');
       const timestamp = now();
@@ -1123,7 +1207,8 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       sources = [],
       feedSource = null,
       query = '',
-      includeDeleted = true
+      includeDeleted = true,
+      watchlistOnly = false
     } = {}) {
       const where = [];
       const params = [];
@@ -1151,6 +1236,47 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
           params.push(normalizedFeedSource);
         }
       }
+      if (watchlistOnly) {
+        where.push(`EXISTS (
+          SELECT 1 FROM social_watchlist AS watched
+          WHERE watched.desired_state = 'active'
+            AND watched.platform = social_posts.source
+            AND (
+              lower(watched.account_key) = lower(social_posts.author_handle)
+              OR lower(watched.handle) = lower(social_posts.author_handle)
+            )
+            AND EXISTS (
+              SELECT 1
+              FROM json_each(
+                CASE
+                  WHEN json_valid(watched.event_types_json) THEN watched.event_types_json
+                  ELSE ?
+                END
+              ) AS selected_event
+              WHERE selected_event.value = CASE
+                WHEN social_posts.deleted_at IS NOT NULL THEN 'delete'
+                WHEN social_posts.kind != 'profile' THEN social_posts.kind
+                ELSE NULL
+              END
+              OR (
+                social_posts.deleted_at IS NULL
+                AND social_posts.kind = 'profile'
+                AND selected_event.value IN (
+                  SELECT 'profile_' || profile_change.value
+                  FROM json_each(
+                    CASE
+                      WHEN json_valid(social_posts.profile_json) THEN social_posts.profile_json
+                      ELSE '{"changes":[]}'
+                    END,
+                    '$.changes'
+                  ) AS profile_change
+                  WHERE profile_change.value IN ('name', 'avatar', 'bio')
+                )
+              )
+            )
+        )`);
+        params.push(json(SOCIAL_WATCH_EVENT_TYPES));
+      }
       if (!includeDeleted) where.push('deleted_at IS NULL');
       if (query) {
         where.push('(content LIKE ? OR translated_content LIKE ? OR author_handle LIKE ? OR author_name LIKE ? OR target_json LIKE ?)');
@@ -1173,6 +1299,33 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       if (!Array.isArray(inputs)) throw new TypeError('accounts must be an array');
       const timestamp = now();
       return transaction(db, () => inputs.map((input) => addWatchAccount(input, timestamp)));
+    },
+    updateWatchAccountEventTypes(id, eventTypes) {
+      const numericId = Number(id);
+      if (!Number.isSafeInteger(numericId) || numericId < 1) throw new TypeError('Invalid watchlist id');
+      const normalizedEventTypes = normalizeWatchEventTypes(eventTypes);
+      const timestamp = now();
+      return transaction(db, () => {
+        const existing = db.prepare('SELECT * FROM social_watchlist WHERE id = ?').get(numericId);
+        if (!existing) return null;
+        const currentEventTypes = watchEventTypesFromJson(existing.event_types_json);
+        if (json(currentEventTypes) === json(normalizedEventTypes)) {
+          return {
+            entry: watchlistFromRow(existing),
+            change: null,
+            changed: false
+          };
+        }
+        db.prepare(`
+          UPDATE social_watchlist SET event_types_json = ?, updated_at = ? WHERE id = ?
+        `).run(json(normalizedEventTypes), timestamp, numericId);
+        const entry = watchlistFromRow(db.prepare('SELECT * FROM social_watchlist WHERE id = ?').get(numericId));
+        return {
+          entry,
+          change: recordChange('watchlist.updated', 'watchlist', numericId, entry, timestamp),
+          changed: true
+        };
+      });
     },
     removeWatchAccount(id) {
       const numericId = Number(id);
@@ -1245,7 +1398,12 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         return claimed;
       });
     },
-    acknowledgeCommand(id, { success, error = '', remoteId = '' } = {}) {
+    acknowledgeCommand(id, {
+      success,
+      error = '',
+      remoteId = '',
+      verifiedAbsent = false
+    } = {}) {
       const numericId = Number(id);
       if (!Number.isSafeInteger(numericId) || numericId < 1) throw new TypeError('Invalid command id');
       if (typeof success !== 'boolean') throw new TypeError('success must be a boolean');
@@ -1254,9 +1412,19 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         const row = db.prepare('SELECT * FROM social_commands WHERE id = ?').get(numericId);
         if (!row) return null;
         if (['completed', 'failed', 'cancelled'].includes(row.status)) return commandFromRow(row);
+        const confirmedSuccess = success
+          && (row.command_type !== 'watchlist.delete' || verifiedAbsent === true);
+        const resolvedError = success && !confirmedSuccess
+          ? 'Bridge did not verify that the deleted account is absent'
+          : String(error || '');
         db.prepare(`
           UPDATE social_commands SET status = ?, completed_at = ?, last_error = ? WHERE id = ?
-        `).run(success ? 'completed' : 'failed', timestamp, String(error || '').slice(0, 2_000), numericId);
+        `).run(
+          confirmedSuccess ? 'completed' : 'failed',
+          timestamp,
+          resolvedError.slice(0, 2_000),
+          numericId
+        );
         if (row.watchlist_id !== null) {
           const watch = db.prepare('SELECT * FROM social_watchlist WHERE id = ?').get(row.watchlist_id);
           const expectedState = row.command_type === 'watchlist.add' ? 'active' : 'removed';
@@ -1267,9 +1435,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
                 updated_at = ?
               WHERE id = ?
             `).run(
-              success ? 'synced' : 'failed',
-              success ? timestamp : watch.last_synced_at,
-              success ? '' : String(error || 'Bridge rejected the command').slice(0, 2_000),
+              confirmedSuccess ? 'synced' : 'failed',
+              confirmedSuccess ? timestamp : watch.last_synced_at,
+              confirmedSuccess ? '' : String(resolvedError || 'Bridge rejected the command').slice(0, 2_000),
               String(remoteId || ''),
               String(remoteId || ''),
               timestamp,
@@ -1461,20 +1629,87 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         };
       });
     },
-    reconcileRemoteWatchlist(inputs) {
+    reconcileRemoteWatchlist(inputs, snapshotMetadata = {}) {
       if (!Array.isArray(inputs)) throw new TypeError('accounts must be an array');
+      const snapshotVersion = normalizeWatchlistSnapshotVersion(snapshotMetadata);
       const timestamp = now();
       return transaction(db, () => {
+        const currentBridgeState = db.prepare('SELECT * FROM social_bridge_state WHERE singleton = 1').get();
+        const currentSessionId = String(currentBridgeState?.snapshot_session_id || '');
+        const currentSessionStartedAt = Number(currentBridgeState?.snapshot_session_started_at || 0);
+        const currentRevision = Number(currentBridgeState?.snapshot_revision || 0);
+        if (!snapshotVersion && currentSessionId && currentSessionStartedAt > 0 && currentRevision > 0) {
+          return {
+            entries: db.prepare('SELECT * FROM social_watchlist ORDER BY desired_state, lower(handle), id')
+              .all()
+              .map(watchlistFromRow),
+            changes: [],
+            snapshot: {
+              accepted: false,
+              versioned: false,
+              reason: 'legacy-snapshot-after-versioned-session'
+            }
+          };
+        }
+        if (snapshotVersion) {
+          let rejectionReason = '';
+          if (currentSessionStartedAt > snapshotVersion.sessionStartedAt) {
+            rejectionReason = 'older-snapshot-session';
+          } else if (currentSessionStartedAt === snapshotVersion.sessionStartedAt && currentSessionId) {
+            if (currentSessionId !== snapshotVersion.sessionId) rejectionReason = 'snapshot-session-conflict';
+            else if (currentRevision >= snapshotVersion.revision) rejectionReason = 'stale-snapshot-revision';
+          }
+          if (rejectionReason) {
+            return {
+              entries: db.prepare('SELECT * FROM social_watchlist ORDER BY desired_state, lower(handle), id')
+                .all()
+                .map(watchlistFromRow),
+              changes: [],
+              snapshot: {
+                accepted: false,
+                versioned: true,
+                reason: rejectionReason,
+                sessionId: snapshotVersion.sessionId,
+                sessionStartedAt: snapshotVersion.sessionStartedAt,
+                revision: snapshotVersion.revision
+              }
+            };
+          }
+          db.prepare(`
+            INSERT INTO social_bridge_state(
+              singleton, snapshot_session_id, snapshot_session_started_at, snapshot_revision, updated_at
+            ) VALUES (1, ?, ?, ?, ?)
+            ON CONFLICT(singleton) DO UPDATE SET
+              snapshot_session_id = excluded.snapshot_session_id,
+              snapshot_session_started_at = excluded.snapshot_session_started_at,
+              snapshot_revision = excluded.snapshot_revision,
+              updated_at = excluded.updated_at
+          `).run(
+            snapshotVersion.sessionId,
+            snapshotVersion.sessionStartedAt,
+            snapshotVersion.revision,
+            timestamp
+          );
+        }
         const normalized = inputs.map((input) => normalizeWatchAccount(input));
         const remoteKeys = new Set(normalized.map((account) => `${account.platform}:${account.accountKey}`));
         const changes = [];
         for (const account of normalized) {
           const existing = db.prepare('SELECT * FROM social_watchlist WHERE platform = ? AND account_key = ?')
             .get(account.platform, account.accountKey);
-          if (existing?.desired_state === 'removed' && existing.sync_status !== 'synced') {
-            continue;
+          if (existing?.desired_state === 'removed') {
+            const removedAt = Number(existing.last_synced_at || existing.updated_at || 0);
+            if (existing.sync_status !== 'synced'
+              || !snapshotVersion
+              || removedAt >= snapshotVersion.sessionStartedAt) {
+              continue;
+            }
           }
-          const result = addWatchAccount(account, timestamp, { origin: 'remote', synced: true });
+          const result = addWatchAccount(account, timestamp, {
+            origin: 'remote',
+            synced: true,
+            preserveEventTypes: true
+          });
           if (result.change) changes.push(result.change);
         }
         const activeRows = db.prepare("SELECT * FROM social_watchlist WHERE desired_state = 'active'").all();
@@ -1517,7 +1752,17 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
           entries: db.prepare('SELECT * FROM social_watchlist ORDER BY desired_state, lower(handle), id')
             .all()
             .map(watchlistFromRow),
-          changes
+          changes,
+          snapshot: snapshotVersion
+            ? {
+                accepted: true,
+                versioned: true,
+                reason: '',
+                sessionId: snapshotVersion.sessionId,
+                sessionStartedAt: snapshotVersion.sessionStartedAt,
+                revision: snapshotVersion.revision
+              }
+            : { accepted: true, versioned: false, reason: 'legacy-unversioned' }
         };
       });
     },
@@ -1546,12 +1791,26 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
     },
     getBridgeState() {
       const row = db.prepare('SELECT * FROM social_bridge_state WHERE singleton = 1').get();
-      if (!row) return { bridgeId: '', version: '', capabilities: [], sessionId: '', lastSeenAt: null };
+      if (!row) {
+        return {
+          bridgeId: '',
+          version: '',
+          capabilities: [],
+          sessionId: '',
+          snapshotSessionId: '',
+          snapshotSessionStartedAt: 0,
+          snapshotRevision: 0,
+          lastSeenAt: null
+        };
+      }
       return {
         bridgeId: row.bridge_id,
         version: row.version,
         capabilities: parseJson(row.capabilities_json, []),
         sessionId: row.session_id,
+        snapshotSessionId: row.snapshot_session_id,
+        snapshotSessionStartedAt: Number(row.snapshot_session_started_at || 0),
+        snapshotRevision: Number(row.snapshot_revision || 0),
         lastSeenAt: row.last_seen_at === null ? null : Number(row.last_seen_at)
       };
     },

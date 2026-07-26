@@ -1,0 +1,306 @@
+import fs from 'node:fs';
+import vm from 'node:vm';
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+const appJs = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+const listenerBoundary = appJs.indexOf("elements.chainSwitcher.addEventListener('click'");
+
+assert.notEqual(listenerBoundary, -1, 'social behavior harness could not find the UI listener boundary');
+
+function createElementStub() {
+  return {
+    checked: false,
+    classList: {
+      add() {},
+      remove() {},
+      toggle() {},
+      contains() { return false; }
+    },
+    close() {},
+    dataset: {},
+    disabled: false,
+    hidden: false,
+    innerHTML: '',
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    removeAttribute() {},
+    setAttribute() {},
+    showModal() {},
+    style: { setProperty() {} },
+    textContent: '',
+    value: ''
+  };
+}
+
+function createTimerHarness() {
+  let nextId = 1;
+  const timers = [];
+  return {
+    clear() {
+      timers.length = 0;
+    },
+    clearTimeout(id) {
+      const timer = timers.find((candidate) => candidate.id === id);
+      if (timer) timer.cancelled = true;
+    },
+    pendingDelays() {
+      return timers.filter((timer) => !timer.cancelled).map((timer) => timer.delay);
+    },
+    async runNext() {
+      const timer = timers.find((candidate) => !candidate.cancelled);
+      assert.ok(timer, 'expected a pending timer');
+      timer.cancelled = true;
+      timer.callback();
+      await Promise.resolve();
+      await Promise.resolve();
+    },
+    setTimeout(callback, delay = 0) {
+      const id = nextId;
+      nextId += 1;
+      timers.push({ id, callback, delay: Number(delay), cancelled: false });
+      return id;
+    }
+  };
+}
+
+function createSocialBehaviorHarness({
+  origin = 'http://radar.test',
+  protocol = 'http:',
+  hostname = 'radar.test',
+  localStorage = null
+} = {}) {
+  const timers = createTimerHarness();
+  const elements = new Map();
+  const document = {
+    querySelector(selector) {
+      if (!elements.has(selector)) elements.set(selector, createElementStub());
+      return elements.get(selector);
+    },
+    querySelectorAll() { return []; },
+    visibilityState: 'visible'
+  };
+  const window = {
+    history: { replaceState() {} },
+    localStorage: localStorage || {
+      getItem() { return null; },
+      removeItem() {},
+      setItem() {}
+    },
+    location: {
+      hash: '',
+      hostname,
+      origin,
+      pathname: '/robinhood-radar/',
+      protocol,
+      search: ''
+    },
+    postMessage() {}
+  };
+  window.window = window;
+
+  const context = vm.createContext({
+    AbortController,
+    URL,
+    URLSearchParams,
+    atob,
+    btoa,
+    clearInterval() {},
+    clearTimeout: timers.clearTimeout,
+    console,
+    document,
+    fetch: async () => { throw new Error('unexpected fetch'); },
+    performance,
+    setInterval() { return 1; },
+    setTimeout: timers.setTimeout,
+    window
+  });
+
+  const exposure = `
+    renderSocialMonitor = () => {};
+    renderSocialBridgeStatus = () => {};
+    globalThis.__socialBehavior = {
+      state,
+      applySocialChange,
+      applySocialSnapshot,
+      setSnapshotLoader(loader) { loadSocialSnapshot = loader; },
+      reset() {
+        state.activeTab = 'monitor';
+        state.socialStarted = true;
+        state.socialConnected = true;
+        state.socialSequence = 1;
+        state.socialLatestChangeId = 0;
+        state.socialStreamEpoch = 'test-epoch';
+        state.socialPosts = [];
+        state.socialDeferredPosts = new Map();
+        state.socialWatchlist = [];
+        state.socialCounts = {};
+        state.socialBridge = {};
+        state.socialWatchlistSnapshotTimer = null;
+        state.socialRecoveryBusy = false;
+        state.socialRecoveryStartedAt = null;
+        state.socialRecoveryTargetId = 0;
+      }
+    };
+  `;
+  vm.runInContext(`${appJs.slice(0, listenerBoundary)}\n${exposure}`, context, {
+    filename: 'public/app.js'
+  });
+
+  const api = context.__socialBehavior;
+  const reset = () => {
+    timers.clear();
+    api.reset();
+  };
+  reset();
+  return { api, reset, timers };
+}
+
+test('the public HTTP page clears a legacy social token during initialization', () => {
+  const insecureRemovals = [];
+  createSocialBehaviorHarness({
+    origin: 'http://217.116.171.250',
+    protocol: 'http:',
+    hostname: '217.116.171.250',
+    localStorage: {
+      getItem() { return 'legacy-secret'; },
+      removeItem(key) { insecureRemovals.push(key); },
+      setItem() {}
+    }
+  });
+  assert.deepEqual(insecureRemovals, ['robinhood-social-device-token']);
+
+  const secureRemovals = [];
+  createSocialBehaviorHarness({
+    origin: 'https://radar.217-116-171-250.sslip.io',
+    protocol: 'https:',
+    hostname: 'radar.217-116-171-250.sslip.io',
+    localStorage: {
+      getItem() { return 'secure-secret'; },
+      removeItem(key) { secureRemovals.push(key); },
+      setItem() {}
+    }
+  });
+  assert.deepEqual(secureRemovals, []);
+});
+
+function watchEntry({ id = 7, handle = '1874a3', eventTypes = ['post'] } = {}) {
+  return {
+    id,
+    platform: 'twitter',
+    handle,
+    accountKey: handle,
+    desiredState: 'active',
+    syncStatus: 'synced',
+    eventTypes
+  };
+}
+
+function socialPost({
+  id = 101,
+  externalId = 'tweet-101',
+  handle = '1874a3',
+  publishedAt = 1_753_567_890_000,
+  content = 'new post'
+} = {}) {
+  return {
+    id,
+    externalId,
+    source: 'twitter',
+    kind: 'post',
+    content,
+    publishedAt,
+    author: { handle, name: handle }
+  };
+}
+
+function postIds(api) {
+  return Array.from(api.state.socialPosts, (post) => String(post.externalId));
+}
+
+function watchHandles(api) {
+  return Array.from(api.state.socialWatchlist, (entry) => String(entry.handle));
+}
+
+test('post.created before watchlist.updated survives a failed snapshot retry and remains deduplicated', async () => {
+  const { api, timers } = createSocialBehaviorHarness();
+  const entry = watchEntry();
+  const post = socialPost();
+  let snapshotCalls = 0;
+
+  api.setSnapshotLoader(() => {
+    snapshotCalls += 1;
+    if (snapshotCalls === 1) return Promise.resolve(false);
+    return Promise.resolve(api.applySocialSnapshot({
+      latestChangeId: 2,
+      streamEpoch: 'test-epoch',
+      watchlist: [entry],
+      posts: [post]
+    }));
+  });
+
+  api.applySocialChange({ id: 1, entityType: 'post', data: post });
+  assert.deepEqual(postIds(api), []);
+  assert.equal(api.state.socialDeferredPosts.size, 1);
+
+  api.applySocialChange({ id: 2, entityType: 'watchlist', data: entry });
+  assert.deepEqual(postIds(api), ['tweet-101']);
+  assert.equal(api.state.socialDeferredPosts.size, 0);
+  assert.deepEqual(timers.pendingDelays(), [100]);
+
+  await timers.runNext();
+  assert.equal(snapshotCalls, 1);
+  assert.deepEqual(postIds(api), ['tweet-101']);
+  assert.deepEqual(timers.pendingDelays(), [2_000]);
+
+  await timers.runNext();
+  assert.equal(snapshotCalls, 2);
+  assert.deepEqual(postIds(api), ['tweet-101']);
+  assert.equal(api.state.socialPosts.length, 1);
+});
+
+test('an older HTTP snapshot cannot roll back a newer SSE watchlist, cursor, or post', () => {
+  const { api } = createSocialBehaviorHarness();
+  const liveEntry = watchEntry({ id: 9, handle: '1874a3' });
+  const livePost = socialPost({ id: 201, externalId: 'tweet-live' });
+
+  api.applySocialChange({ id: 10, entityType: 'watchlist', data: liveEntry });
+  api.applySocialChange({ id: 11, entityType: 'post', data: livePost });
+
+  const applied = api.applySocialSnapshot({
+    latestChangeId: 9,
+    streamEpoch: 'test-epoch',
+    watchlist: [watchEntry({ id: 3, handle: 'stale_account' })],
+    posts: [socialPost({ id: 99, externalId: 'tweet-stale', handle: 'stale_account' })]
+  });
+
+  assert.equal(applied, false);
+  assert.equal(api.state.socialLatestChangeId, 11);
+  assert.deepEqual(watchHandles(api), ['1874a3']);
+  assert.deepEqual(postIds(api), ['tweet-live']);
+});
+
+test('reset applies its watchlist and posts before flushing deferred live posts', () => {
+  const { api } = createSocialBehaviorHarness();
+  const deferredPost = socialPost({ id: 301, externalId: 'tweet-deferred', publishedAt: 200 });
+  const snapshotPost = socialPost({ id: 302, externalId: 'tweet-snapshot', publishedAt: 100 });
+  const entry = watchEntry();
+
+  api.applySocialChange({ id: 1, entityType: 'post', data: deferredPost });
+  assert.equal(api.state.socialDeferredPosts.size, 1);
+  assert.deepEqual(postIds(api), []);
+
+  const applied = api.applySocialSnapshot({
+    latestChangeId: 20,
+    streamEpoch: 'reset-epoch',
+    watchlist: [entry],
+    posts: [snapshotPost]
+  }, { resetCursor: true });
+
+  assert.equal(applied, true);
+  assert.equal(api.state.socialLatestChangeId, 20);
+  assert.deepEqual(watchHandles(api), ['1874a3']);
+  assert.deepEqual(postIds(api), ['tweet-deferred', 'tweet-snapshot']);
+  assert.equal(api.state.socialPosts.length, 2);
+  assert.equal(api.state.socialDeferredPosts.size, 0);
+});

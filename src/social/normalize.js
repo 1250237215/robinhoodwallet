@@ -11,22 +11,54 @@ const SOURCE_ALIASES = new Map([
   ['debot', 'debot']
 ]);
 
-const POST_KINDS = new Set(['post', 'reply', 'quote', 'repost', 'follow', 'unfollow', 'profile', 'delete']);
-const SOCIAL_ACTIVITY_KINDS = new Set(['follow', 'unfollow']);
-const NON_TWEET_KIND_ALIASES = new Map([
+export const SOCIAL_WATCH_EVENT_TYPES = Object.freeze([
+  'post',
+  'reply',
+  'quote',
+  'repost',
+  'delete',
+  'follow',
+  'unfollow',
+  'profile_name',
+  'profile_avatar',
+  'profile_bio'
+]);
+export const SOCIAL_PROFILE_CHANGES = Object.freeze(['name', 'avatar', 'bio']);
+
+const WATCH_EVENT_TYPE_SET = new Set(SOCIAL_WATCH_EVENT_TYPES);
+const PROFILE_CHANGE_SET = new Set(SOCIAL_PROFILE_CHANGES);
+const POST_KIND_ALIASES = new Map([
+  ['post', 'post'],
+  ['tweet', 'post'],
+  ['reply', 'reply'],
+  ['quote', 'quote'],
+  ['quotetweet', 'quote'],
+  ['repost', 'repost'],
+  ['retweet', 'repost'],
+  ['delete', 'delete'],
+  ['deleted', 'delete'],
+  ['deltweet', 'delete'],
+  ['deletepost', 'delete'],
   ['follow', 'follow'],
+  ['tweetuserfollow', 'follow'],
   ['unfollow', 'unfollow'],
-  ['profile', 'profile'],
-  ['profilechange', 'profile'],
-  ['profileupdate', 'profile'],
-  ['rename', 'profile'],
-  ['reimage', 'profile'],
-  ['reavatar', 'profile'],
-  ['redescription', 'profile'],
-  ['namechange', 'profile'],
-  ['avatarchange', 'profile'],
-  ['imagechange', 'profile'],
-  ['biochange', 'profile']
+  ['tweetuserunfollow', 'unfollow']
+]);
+const SOCIAL_ACTIVITY_KINDS = new Set(['follow', 'unfollow']);
+const PROFILE_KIND_ALIASES = new Map([
+  ['profile', ''],
+  ['profilechange', ''],
+  ['profileupdate', ''],
+  ['tweetuserprofile', ''],
+  ['rename', 'name'],
+  ['namechange', 'name'],
+  ['reimage', 'avatar'],
+  ['reavatar', 'avatar'],
+  ['avatarchange', 'avatar'],
+  ['imagechange', 'avatar'],
+  ['redescription', 'bio'],
+  ['descriptionchange', 'bio'],
+  ['biochange', 'bio']
 ]);
 const CHAIN_TAGS = new Set(['robinhood', 'base', 'solana']);
 const FEED_SOURCE_ORDER = Object.freeze(['all', 'featured', 'my']);
@@ -111,30 +143,82 @@ function activityCandidate(value) {
   }
 }
 
-function nonTweetKind(value) {
-  const candidate = text(value, 80).toLowerCase().replace(/[-_\s]+/g, '');
-  return NON_TWEET_KIND_ALIASES.get(candidate) || '';
+function compactKind(value) {
+  return text(value, 80).toLowerCase().replace(/[-_\s]+/g, '');
 }
 
-function legacyProfileCandidate(externalId, authorHandle = '') {
-  const candidate = text(externalId, 240);
-  if (/^profile(?::|_)/i.test(candidate)) return true;
-  if (!/^[a-z0-9_-]{12,}$/i.test(candidate)) return false;
-  try {
-    const decoded = Buffer.from(candidate, 'base64url').toString('utf8');
-    const handle = text(authorHandle, 240).replace(/^@/, '').toLowerCase();
-    const normalized = decoded.toLowerCase();
-    return Boolean(handle)
-      && normalized.startsWith(`@${handle}_`)
-      && normalized.includes('https://pbs.twimg.com/profile_images/');
-  } catch {
-    return false;
+export function normalizeWatchEventTypes(value, { defaultAll = false } = {}) {
+  if (value === undefined && defaultAll) return [...SOCIAL_WATCH_EVENT_TYPES];
+  if (!Array.isArray(value)) throw new TypeError('eventTypes must be an array');
+  const requested = new Set();
+  for (const eventType of value) {
+    if (typeof eventType !== 'string' || !WATCH_EVENT_TYPE_SET.has(eventType)) {
+      throw new TypeError(`Unsupported social watch event type: ${String(eventType)}`);
+    }
+    requested.add(eventType);
   }
+  return SOCIAL_WATCH_EVENT_TYPES.filter((eventType) => requested.has(eventType));
 }
 
-function relationshipOccurrenceCandidate(externalId) {
-  return /^(?:follow|unfollow):[a-z0-9_]{1,15}:[a-z0-9_]{1,15}:\d{10,16}$/i
-    .test(text(externalId, 240));
+export function normalizeProfileChanges(value) {
+  if (!Array.isArray(value)) throw new TypeError('profileChanges must be an array');
+  const requested = new Set();
+  for (const change of value) {
+    if (typeof change !== 'string' || !PROFILE_CHANGE_SET.has(change)) {
+      throw new TypeError(`Unsupported social profile change: ${String(change)}`);
+    }
+    requested.add(change);
+  }
+  return SOCIAL_PROFILE_CHANGES.filter((change) => requested.has(change));
+}
+
+function profileKindChange(value) {
+  const candidate = compactKind(value);
+  return PROFILE_KIND_ALIASES.has(candidate) ? PROFILE_KIND_ALIASES.get(candidate) : null;
+}
+
+function profileDetailValue(input, profileInput, change, side) {
+  const nested = profileInput[change] && typeof profileInput[change] === 'object'
+    ? profileInput[change]
+    : {};
+  const sideAliases = side === 'before'
+    ? ['before', 'old', 'previous', 'from']
+    : ['after', 'new', 'current', 'to'];
+  const prefix = side === 'before' ? ['before', 'old', 'previous'] : ['after', 'new', 'current'];
+  const suffix = change === 'avatar' ? ['AvatarUrl', 'Avatar', 'ImageUrl', 'Image']
+    : change === 'bio' ? ['Bio', 'Description']
+      : ['Name'];
+  const directAliases = prefix.flatMap((left) => suffix.map((right) => `${left}${right}`));
+  return text(firstValue(input, directAliases, firstValue(nested, sideAliases)), 10_000);
+}
+
+function normalizedProfileData(input, inferredChange) {
+  const changesSpecified = hasOwn(input, ['profileChanges', 'profile_changes']);
+  const detailSpecified = hasOwn(input, ['profileDetail', 'profile_detail', 'profile']);
+  const rawDetail = firstValue(input, ['profileDetail', 'profile_detail', 'profile'], {});
+  if (detailSpecified && (!rawDetail || typeof rawDetail !== 'object' || Array.isArray(rawDetail))) {
+    throw new TypeError('profileDetail must be an object');
+  }
+  const detailInput = rawDetail && typeof rawDetail === 'object' && !Array.isArray(rawDetail) ? rawDetail : {};
+  let profileChanges;
+  if (changesSpecified) {
+    profileChanges = normalizeProfileChanges(firstValue(input, ['profileChanges', 'profile_changes']));
+  } else {
+    const inferred = new Set();
+    if (inferredChange) inferred.add(inferredChange);
+    for (const change of SOCIAL_PROFILE_CHANGES) {
+      if (Object.hasOwn(detailInput, change)) inferred.add(change);
+    }
+    profileChanges = SOCIAL_PROFILE_CHANGES.filter((change) => inferred.has(change));
+  }
+  const profileDetail = {};
+  for (const change of profileChanges) {
+    profileDetail[change] = {
+      before: profileDetailValue(input, detailInput, change, 'before'),
+      after: profileDetailValue(input, detailInput, change, 'after')
+    };
+  }
+  return { profileChanges, profileDetail, changesSpecified, detailSpecified };
 }
 
 export function parseSocialActivityIdentity(externalId, authorHandle = '') {
@@ -142,7 +226,7 @@ export function parseSocialActivityIdentity(externalId, authorHandle = '') {
   if (!candidate) return null;
   const expectedActor = text(authorHandle, 240).replace(/^@/, '');
   const handlePattern = '[a-z0-9_]{1,15}';
-  const colon = candidate.match(new RegExp(`^(follow|unfollow):(${handlePattern}):(${handlePattern})$`, 'i'));
+  const colon = candidate.match(new RegExp(`^(follow|unfollow):(${handlePattern}):(${handlePattern})(?::(\\d{10,16}))?$`, 'i'));
   if (colon) {
     const kind = colon[1].toLowerCase();
     const actorHandle = text(colon[2], 240).replace(/^@/, '');
@@ -150,11 +234,15 @@ export function parseSocialActivityIdentity(externalId, authorHandle = '') {
     if (!actorHandle || !targetHandle || (expectedActor && actorHandle.toLowerCase() !== expectedActor.toLowerCase())) {
       return null;
     }
+    const occurrenceAt = colon[4] ? Number(colon[4]) : null;
+    const canonicalId = `${kind}:${actorHandle.toLowerCase()}:${targetHandle.toLowerCase()}`;
     return {
       kind,
       actorHandle,
       targetHandle,
-      canonicalId: `${kind}:${actorHandle.toLowerCase()}:${targetHandle.toLowerCase()}`
+      canonicalId,
+      occurrenceAt,
+      occurrenceId: occurrenceAt === null ? canonicalId : `${canonicalId}:${occurrenceAt}`
     };
   }
 
@@ -165,11 +253,14 @@ export function parseSocialActivityIdentity(externalId, authorHandle = '') {
   if (!candidate.toLowerCase().startsWith(prefix.toLowerCase())) return null;
   const targetHandle = text(candidate.slice(prefix.length), 240).replace(/^@/, '');
   if (!new RegExp(`^${handlePattern}$`, 'i').test(targetHandle)) return null;
+  const canonicalId = `${kind}:${actorHandle.toLowerCase()}:${targetHandle.toLowerCase()}`;
   return {
     kind,
     actorHandle,
     targetHandle,
-    canonicalId: `${kind}:${actorHandle.toLowerCase()}:${targetHandle.toLowerCase()}`
+    canonicalId,
+    occurrenceAt: null,
+    occurrenceId: canonicalId
   };
 }
 
@@ -312,8 +403,11 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
   ).replace(/^@/, '');
   const suppliedActivityCandidate = activityCandidate(suppliedExternalId);
   const activityIdentity = parseSocialActivityIdentity(suppliedExternalId, suppliedAuthorHandle);
+  if (suppliedActivityCandidate && !activityIdentity) {
+    throw new TypeError('Social activity identity conflicts with its author or target');
+  }
   const authorHandle = suppliedAuthorHandle || activityIdentity?.actorHandle || '';
-  let externalId = activityIdentity?.canonicalId || suppliedExternalId;
+  let externalId = activityIdentity?.occurrenceId || suppliedExternalId;
   const content = text(firstValue(input, ['content', 'text', 'body']), 100_000);
   const translatedContent = text(
     firstValue(input, ['translatedContent', 'translatedText', 'translation']),
@@ -327,28 +421,47 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
   const deletedAt = input.deleted === true || input.deletedAt
     ? normalizeTimestamp(input.deletedAt, now)
     : null;
-  const kindCandidate = text(firstValue(input, ['kind', 'postType', 'type'], 'post'), 20).toLowerCase();
-  const kind = activityIdentity?.kind || (POST_KINDS.has(kindCandidate) ? kindCandidate : 'post');
-  const filteredKind = nonTweetKind(firstValue(input, ['kind', 'postType', 'type']))
-    || (source === 'twitter' ? activityIdentity?.kind : '')
-    || (source === 'twitter' && suppliedActivityCandidate ? 'relationship' : '')
-    || (source === 'twitter' && relationshipOccurrenceCandidate(suppliedExternalId) ? 'relationship' : '')
-    || (source === 'twitter' && legacyProfileCandidate(suppliedExternalId, authorHandle) ? 'profile' : '');
+  const kindSpecified = hasOwn(input, ['kind', 'postType', 'type']);
+  const rawKind = firstValue(input, ['kind', 'postType', 'type'], 'post');
+  const normalizedPostKind = POST_KIND_ALIASES.get(compactKind(rawKind)) || '';
+  const inferredProfileChange = profileKindChange(rawKind);
+  const profileFieldsSpecified = hasOwn(input, ['profileChanges', 'profile_changes', 'profileDetail', 'profile_detail', 'profile']);
+  const isProfile = inferredProfileChange !== null || profileFieldsSpecified;
+  if (kindSpecified && !normalizedPostKind && inferredProfileChange === null) {
+    throw new TypeError(`Unsupported social post kind: ${String(rawKind)}`);
+  }
+  const kind = activityIdentity?.kind || (isProfile ? 'profile' : normalizedPostKind || 'post');
+  const profileData = normalizedProfileData(input, inferredProfileChange);
+  if (kind === 'profile' && !profileData.profileChanges.length) {
+    throw new TypeError('Social profile activity requires at least one verified profile change');
+  }
+  if (kind === 'profile') {
+    if (!/^[a-z0-9_]{1,15}$/i.test(authorHandle)) {
+      throw new TypeError('Social profile activity requires a valid author handle');
+    }
+    const canonicalProfile = /^profile:([a-z0-9_]{1,15}):(\d{10,16})$/i.exec(suppliedExternalId);
+    if (canonicalProfile && canonicalProfile[1].toLowerCase() !== authorHandle.toLowerCase()) {
+      throw new TypeError('Social profile activity identity conflicts with its author');
+    }
+  }
   const target = normalizeSocialTarget(
     input,
     SOCIAL_ACTIVITY_KINDS.has(kind) ? activityIdentity?.targetHandle : ''
   );
-  if (!filteredKind && activityIdentity && target.handle
+  if (activityIdentity && target.handle
     && target.handle.toLowerCase() !== activityIdentity.targetHandle.toLowerCase()) {
     throw new TypeError('Social activity target conflicts with its externalId');
   }
   if (SOCIAL_ACTIVITY_KINDS.has(kind)) {
     const completeIdentity = /^[a-z0-9_]{1,15}$/i.test(authorHandle)
       && /^[a-z0-9_]{1,15}$/i.test(target.handle);
-    if (!completeIdentity && !filteredKind) {
+    if (!completeIdentity) {
       throw new TypeError('Social activity requires valid actor and target handles');
     }
-    if (completeIdentity) externalId = `${kind}:${authorHandle.toLowerCase()}:${target.handle.toLowerCase()}`;
+    const canonicalId = `${kind}:${authorHandle.toLowerCase()}:${target.handle.toLowerCase()}`;
+    externalId = activityIdentity?.occurrenceAt === null || activityIdentity?.occurrenceAt === undefined
+      ? canonicalId
+      : `${canonicalId}:${activityIdentity.occurrenceAt}`;
   }
   const publishedAt = normalizeTimestamp(
     firstValue(input, ['publishedAt', 'createdAt', 'postTimestamp', 'timestamp']),
@@ -394,6 +507,8 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
     replyToExternalId: ['replyToExternalId', 'replyToId'],
     quotedExternalId: ['quotedExternalId', 'quotedId'],
     repostExternalId: ['repostExternalId', 'repostedId'],
+    profileChanges: ['profileChanges', 'profile_changes'],
+    profileDetail: ['profileDetail', 'profile_detail', 'profile'],
     target: [
       'target',
       'activityTarget',
@@ -423,6 +538,11 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
     if (keys.some((key) => Object.hasOwn(authorInput, key))) provided.add(name);
   }
   if (hasOwn(input, ['kind', 'postType', 'type'])) provided.add('kind');
+  if (isProfile) {
+    provided.add('kind');
+    provided.add('profileChanges');
+    provided.add('profileDetail');
+  }
   if (hasOwn(input, ['publishedAt', 'createdAt', 'postTimestamp', 'timestamp'])) provided.add('publishedAt');
   if (hasOwn(input, ['sourceUpdatedAt', 'updatedAt', 'editedAt'])) provided.add('sourceUpdatedAt');
   if (activityIdentity) {
@@ -459,6 +579,8 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
     quotedExternalId: text(firstValue(input, ['quotedExternalId', 'quotedId']), 240),
     repostExternalId: text(firstValue(input, ['repostExternalId', 'repostedId']), 240),
     target,
+    profileChanges: kind === 'profile' ? profileData.profileChanges : [],
+    profileDetail: kind === 'profile' ? profileData.profileDetail : {},
     publishedAt,
     discoveredAt,
     receivedAt: discoveredAt,
@@ -466,7 +588,10 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
     deletedAt,
     raw: firstValue(input, ['raw', 'payload'], input),
     _provided: provided,
-    _nonTweetReason: filteredKind ? `non-tweet:${filteredKind}` : ''
+    _activityCanonicalId: activityIdentity?.canonicalId || '',
+    _activityOccurrenceId: activityIdentity?.occurrenceAt === null || activityIdentity?.occurrenceAt === undefined
+      ? ''
+      : activityIdentity.occurrenceId
   };
 }
 
@@ -490,6 +615,7 @@ export function normalizeWatchAccount(input, { defaultPlatform = 'twitter' } = {
   const platform = normalizeSocialSource(firstValue(value, ['platform', 'source'], defaultPlatform), defaultPlatform);
   const accountKey = text(firstValue(value, ['accountKey'], handle), 240).toLowerCase();
   if (!accountKey) throw new TypeError('Watchlist account key is required');
+  const eventTypesProvided = Object.hasOwn(value, 'eventTypes');
   return {
     platform,
     accountKey,
@@ -497,6 +623,8 @@ export function normalizeWatchAccount(input, { defaultPlatform = 'twitter' } = {
     name: text(firstValue(value, ['name', 'displayName']), 500),
     url: suppliedUrl,
     remoteId: text(firstValue(value, ['remoteId', 'authorId']), 240),
-    metadata: value.metadata && typeof value.metadata === 'object' ? value.metadata : {}
+    metadata: value.metadata && typeof value.metadata === 'object' ? value.metadata : {},
+    eventTypes: normalizeWatchEventTypes(eventTypesProvided ? value.eventTypes : undefined, { defaultAll: true }),
+    _eventTypesProvided: eventTypesProvided
   };
 }

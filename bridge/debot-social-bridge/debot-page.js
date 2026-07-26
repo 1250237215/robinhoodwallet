@@ -1,25 +1,35 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const DEFAULT_TYPES = 'tweet|retweet|quote|delTweet|reply';
-  const TWEET_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete']);
+  const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
+  const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
   const PRIMARY_POLL_INTERVAL_MS = 2_000;
   const PRIMARY_API_TIMEOUT_MS = 3_500;
-  const OPTIONAL_POLL_INTERVAL_MS = 15_000;
+  const TIMELINE_PAGE_SIZE = 50;
+  const TIMELINE_CATCHUP_PAGES_PER_POLL = 3;
+  const TIMELINE_CATCHUP_MAX_PAGES = 100;
+  const TIMELINE_CATCHUP_MAX_POSTS = TIMELINE_PAGE_SIZE * TIMELINE_CATCHUP_MAX_PAGES;
   const WATCHLIST_POLL_INTERVAL_MS = 30_000;
   const API_TIMEOUT_MS = 20_000;
   const DELIVERY_TIMEOUT_MS = 2_000;
   const DELIVERY_RETRY_BASE_MS = 2_000;
   const DELIVERY_RETRY_MAX_MS = 30_000;
+  const PAGE_PENDING_MAX_POSTS = 100;
+  const PAGE_PENDING_MAX_BYTES = 2 * 1024 * 1024;
   const ERROR_TYPES = new Set(['AUTH', 'TIMEOUT', 'NETWORK', 'DEBOT']);
   const ANALYSIS_JOB_TYPES = new Set(['debot.token_detail.v1', 'debot.wallet_token_analysis.v1']);
   const ANALYSIS_CONCURRENCY = 4;
   const ANALYSIS_QUEUE_LIMIT = 32;
   const MAX_ANALYSIS_RESULT_BYTES = 256 * 1024;
+  const WATCHLIST_PAGE_SIZE = 500;
+  const WATCHLIST_MAX_PAGES = 10;
   const EVM_ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
   const seen = new Map();
   const pendingPosts = new Map();
   const pendingDeliveries = new Map();
+  const pendingCapacityWaiters = new Set();
+  let pendingPostBytes = 0;
+  let pendingPostBackpressured = false;
   let lastWatchlistAt = 0;
   let pollInFlight = null;
   let deliverySequence = 0;
@@ -29,21 +39,93 @@
   const analysisQueue = [];
   const analysisKeys = new Set();
   let watchlistInFlight = null;
-  let optionalPollInFlight = null;
+  let watchlistFetchGeneration = 0;
   let primaryFollowUpRequested = false;
+  let timelineCatchUpRequired = true;
+  let timelineCatchUpCursor = '';
+  let timelineCatchUpPages = 0;
+  let timelineCatchUpPosts = 0;
+  let timelineCatchUpBoundary = new Set();
+  let timelineCatchUpGeneration = 0;
+  let timelineCatchUpInFlight = null;
+  let timelineCatchUpTruncated = false;
+  let lastPrimarySuccessAt = 0;
 
   function emit(type, payload) {
     window.postMessage({ source: PAGE_SOURCE, type, payload }, window.location.origin);
   }
 
+  function numericTimestamp(value) {
+    const raw = String(value ?? '').trim();
+    if (!raw) return null;
+    if (/^[+-]?\d+$/.test(raw) && typeof BigInt === 'function') {
+      try {
+        const integer = BigInt(raw);
+        const absolute = integer < 0n ? -integer : integer;
+        let milliseconds;
+        if (absolute >= 100_000_000_000_000_000n) milliseconds = integer / 1_000_000n;
+        else if (absolute >= 100_000_000_000_000n) milliseconds = integer / 1_000n;
+        else if (absolute >= 100_000_000_000n) milliseconds = integer;
+        else milliseconds = integer * 1_000n;
+        const normalized = Number(milliseconds);
+        return Number.isSafeInteger(normalized) ? normalized : null;
+      } catch {
+        return null;
+      }
+    }
+    if (!/^[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?$/i.test(raw)) return null;
+    const numeric = Number(raw);
+    if (!Number.isFinite(numeric)) return null;
+    const absolute = Math.abs(numeric);
+    const milliseconds = absolute >= 100_000_000_000_000_000
+      ? numeric / 1_000_000
+      : absolute >= 100_000_000_000_000
+        ? numeric / 1_000
+        : absolute >= 100_000_000_000
+          ? numeric
+          : numeric * 1_000;
+    const normalized = Math.trunc(milliseconds);
+    return Number.isSafeInteger(normalized) ? normalized : null;
+  }
+
   function timestamp(value, fallback = Date.now()) {
     if (value === null || value === undefined || value === '') return fallback;
-    if (typeof value === 'number' || /^\d+(?:\.\d+)?$/.test(String(value))) {
-      const numeric = Number(value);
-      return Number.isFinite(numeric) ? (numeric < 10_000_000_000 ? numeric * 1_000 : numeric) : fallback;
-    }
+    const numeric = numericTimestamp(value);
+    if (numeric !== null) return numeric;
     const parsed = Date.parse(String(value));
     return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  function firstTimestamp(values) {
+    for (const value of values) {
+      const normalized = timestamp(value, null);
+      if (normalized !== null) return normalized;
+    }
+    return null;
+  }
+
+  function stableEventTimestamp(identityOccurrence, sourceValues) {
+    const occurrenceAt = timestamp(identityOccurrence, null);
+    const sourceTimes = sourceValues
+      .map((value) => timestamp(value, null))
+      .filter((value) => value !== null);
+    const sourceAt = sourceTimes[0] ?? null;
+    if (occurrenceAt === null) return sourceAt;
+    if (sourceAt === null) return occurrenceAt;
+
+    const earliestSocialAt = Date.UTC(2006, 0, 1);
+    const latestReasonableAt = Date.now() + 7 * 24 * 60 * 60 * 1_000;
+    const occurrenceIsPlausible = occurrenceAt >= earliestSocialAt && occurrenceAt <= latestReasonableAt;
+    const plausibleSourceTimes = sourceTimes.filter((value) => (
+      value >= earliestSocialAt && value <= latestReasonableAt
+    ));
+    if (!occurrenceIsPlausible && plausibleSourceTimes.length) return plausibleSourceTimes[0];
+    if (occurrenceIsPlausible && !plausibleSourceTimes.length) return occurrenceAt;
+
+    const sevenDays = 7 * 24 * 60 * 60 * 1_000;
+    const agreesWithSource = plausibleSourceTimes.some((value) => Math.abs(value - occurrenceAt) <= sevenDays);
+    const precedesIngestion = plausibleSourceTimes.some((value) => occurrenceAt <= value);
+    return agreesWithSource || precedesIngestion ? occurrenceAt : plausibleSourceTimes[0] ?? sourceAt;
   }
 
   function translation(tweet) {
@@ -55,9 +137,9 @@
     const items = tweet?.media || tweet?.medias || tweet?.attachments || tweet?.images || [];
     if (!Array.isArray(items)) return [];
     return items.slice(0, 12).map((item) => {
-      if (typeof item === 'string') return { type: 'image', url: item };
-      const url = item?.url || item?.media_url_https || item?.media_url || item?.src || '';
-      const previewUrl = item?.preview_url || item?.thumbnail_url || item?.poster || '';
+      if (typeof item === 'string') return { type: 'image', url: limitedText(item, 2_000) };
+      const url = limitedText(item?.url || item?.media_url_https || item?.media_url || item?.src || '', 2_000);
+      const previewUrl = limitedText(item?.preview_url || item?.thumbnail_url || item?.poster || '', 2_000);
       const type = String(item?.type || item?.media_type || 'image').toLowerCase();
       return { type: type === 'video' ? 'video' : type === 'gif' ? 'gif' : 'image', url, previewUrl };
     }).filter((item) => item.url || item.previewUrl);
@@ -73,13 +155,74 @@
     if (['retweet', 'repost'].includes(type)) return 'repost';
     if (type === 'quote') return 'quote';
     if (type === 'reply') return 'reply';
-    if (type === 'follow') return 'follow';
-    if (type === 'unfollow') return 'unfollow';
-    if (['rename', 'reimage', 'reavatar', 'redescription', 'profile', 'profileupdate'].includes(type)) {
+    if (['follow', 'tweetuserfollow'].includes(type)) return 'follow';
+    if (['unfollow', 'tweetuserunfollow'].includes(type)) return 'unfollow';
+    if (['rename', 'reimage', 'reavatar', 'redescription', 'profile', 'profileupdate', 'tweetuserprofile'].includes(type)) {
       return 'profile';
     }
     if (['delete', 'deleted', 'deltweet', 'deletepost'].includes(type)) return 'delete';
     return '';
+  }
+
+  function explicitEventTypes(payload) {
+    const tweet = payload?.tweet || {};
+    return [
+      payload?.tw_type,
+      payload?.twType,
+      payload?.twitter_type,
+      payload?.event_type,
+      payload?.eventType,
+      payload?.action,
+      payload?.type,
+      payload?.tweet_type,
+      tweet.tweet_type
+    ].filter((value) => value !== null && value !== undefined && String(value).trim() !== '');
+  }
+
+  function changedFlag(value) {
+    return value === true || value === 1 || value === '1' || String(value || '').toLowerCase() === 'true';
+  }
+
+  function profileChangeData(payload) {
+    const profile = payload?.profile && typeof payload.profile === 'object' ? payload.profile : {};
+    const hasChangedPair = (beforeKey, afterKey) => Object.hasOwn(profile, beforeKey)
+      && Object.hasOwn(profile, afterKey)
+      && String(profile[beforeKey] ?? '') !== String(profile[afterKey] ?? '');
+    const definitions = [
+      {
+        type: 'name',
+        flag: profile.is_name_changed ?? profile.isNameChanged,
+        beforeKey: 'old_name',
+        afterKey: 'new_name',
+        maximum: 500
+      },
+      {
+        type: 'avatar',
+        flag: profile.is_image_changed ?? profile.isImageChanged,
+        beforeKey: 'old_image',
+        afterKey: 'new_image',
+        maximum: 2_000
+      },
+      {
+        type: 'bio',
+        flag: profile.is_bio_changed ?? profile.isBioChanged,
+        beforeKey: 'old_bio',
+        afterKey: 'new_bio',
+        maximum: 10_000
+      }
+    ];
+    const changes = [];
+    const detail = {};
+    for (const definition of definitions) {
+      if (!changedFlag(definition.flag)
+        && !hasChangedPair(definition.beforeKey, definition.afterKey)) continue;
+      changes.push(definition.type);
+      detail[definition.type] = {
+        before: String(profile[definition.beforeKey] ?? '').slice(0, definition.maximum),
+        after: String(profile[definition.afterKey] ?? '').slice(0, definition.maximum)
+      };
+    }
+    return { changes, detail };
   }
 
   function decodeBase64Url(value) {
@@ -111,10 +254,15 @@
     const raw = String(value || '').trim();
     const author = handleText(knownAuthor).toLowerCase();
     for (const candidate of [raw, decodeBase64Url(raw)]) {
-      const colon = /^(follow|unfollow):([a-z0-9_]{1,15}):([a-z0-9_]{1,15})$/i.exec(candidate);
+      const colon = /^(follow|unfollow):([a-z0-9_]{1,15}):([a-z0-9_]{1,15})(?::(\d{9,19}))?$/i.exec(candidate);
       if (colon) {
         if (author && colon[2].toLowerCase() !== author) return { invalid: true };
-        return { kind: colon[1].toLowerCase(), author: colon[2], target: colon[3] };
+        return {
+          kind: colon[1].toLowerCase(),
+          author: colon[2],
+          target: colon[3],
+          occurrenceAt: colon[4] || null
+        };
       }
       if (/^(?:follow|unfollow):/i.test(candidate)) return { invalid: true };
       const prefixKind = /^(follow|unfollow)_/i.exec(candidate)?.[1]?.toLowerCase();
@@ -132,17 +280,7 @@
   function eventType(payload, identity) {
     const tweet = payload?.tweet || {};
     if (identity?.kind) return identity.kind;
-    const rawExplicitTypes = [
-      payload?.tw_type,
-      payload?.twType,
-      payload?.twitter_type,
-      payload?.event_type,
-      payload?.eventType,
-      payload?.action,
-      payload?.type,
-      payload?.tweet_type,
-      tweet.tweet_type
-    ].filter((value) => value !== null && value !== undefined && String(value).trim() !== '');
+    const rawExplicitTypes = explicitEventTypes(payload);
     const explicitTypes = rawExplicitTypes.map(normalizedEventType).filter(Boolean);
     const specific = explicitTypes.find((type) => type !== 'post');
     if (specific) return specific;
@@ -163,75 +301,176 @@
         || (Array.isArray(tweet.medias) && tweet.medias.length)
         || (Array.isArray(tweet.attachments) && tweet.attachments.length)
     );
-    if (rawExplicitTypes.length) {
-      const tweetId = String(tweet.tweet_id || tweet.id || '').trim();
-      const link = String(tweet.link || payload?.link || '').trim();
-      const hasPublishedEvidence = Boolean(tweet.date || tweet.created_at)
-        || /^https?:\/\/(?:www\.)?(?:x|twitter)\.com\/[^/]+\/status\/[^/?#]+/i.test(link);
-      const hasNonTweetStructure = [
-        payload?.target,
-        payload?.target_user,
-        payload?.targetUser,
-        payload?.follow_user,
-        payload?.followUser,
-        payload?.followed_user,
-        payload?.followedUser,
-        payload?.unfollow_user,
-        payload?.unfollowUser,
-        payload?.profile
-      ].some((value) => value !== null && value !== undefined && value !== '');
-      return tweetId && hasPublishedEvidence && !hasNonTweetStructure ? 'post' : '';
-    }
+    if (rawExplicitTypes.length) return '';
     return hasTweetPayload ? 'post' : '';
+  }
+
+  function targetValue(payload) {
+    const candidates = [
+      payload?.follow,
+      payload?.target,
+      payload?.target_user,
+      payload?.targetUser,
+      payload?.follow_user,
+      payload?.followUser,
+      payload?.followed_user,
+      payload?.followedUser,
+      payload?.unfollow_user,
+      payload?.unfollowUser,
+      payload?.to_user,
+      payload?.toUser,
+      payload?.object_user,
+      payload?.objectUser
+    ];
+    return candidates.find((value) => value !== null && value !== undefined && value !== '') || {};
+  }
+
+  function normalizeTarget(payload, identity) {
+    const raw = targetValue(payload);
+    const target = raw && typeof raw === 'object' ? raw : {};
+    const profile = target.profile_info && typeof target.profile_info === 'object' ? target.profile_info : {};
+    const scalarHandle = typeof raw === 'string' ? raw : '';
+    const handle = handleText(
+      target.username
+        || target.screen_name
+        || target.screenName
+        || target.handle
+        || profile.Username
+        || profile.username
+        || profile.ScreenName
+        || payload.target_username
+        || payload.targetUsername
+        || payload.target_screen_name
+        || payload.follow_username
+        || payload.unfollow_username
+        || payload.to_username
+        || scalarHandle
+        || identity?.target
+    );
+    return {
+      id: limitedText(target.id || target.user_id || target.userId || payload.target_user_id || '', 240),
+      handle: limitedText(handle, 240),
+      name: limitedText(target.name || target.display_name || target.displayName || profile.Name || profile.name || payload.target_name || '', 500),
+      avatarUrl: limitedText(target.avatar || target.avatar_url || target.profile_image_url_https || profile.Avatar || profile.avatar || '', 2_000),
+      followersCount: Number(target.followers_count || profile.Stats?.Followers || profile.followers_count || 0),
+      url: limitedText(target.url || target.profile_url || (handle ? `https://x.com/${handle}` : ''), 2_000)
+    };
   }
 
   function normalizePost(payload, feedSource = 'my') {
     if (!payload || typeof payload !== 'object') return null;
     const tweet = payload.tweet || {};
     const user = payload.user || tweet.user || {};
-    const handle = String(user.username || payload.screen_name || '').replace(/^@/, '');
+    const handle = handleText(
+      user.username
+        || user.screen_name
+        || user.screenName
+        || user.handle
+        || user.profile_info?.Username
+        || user.profile_info?.username
+        || payload.screen_name
+        || payload.screenName
+        || payload.username
+    );
     const rawExternalId = String(payload.doc_id || tweet.tweet_id || payload.id || '').trim();
     if (!rawExternalId) return null;
     const identity = eventIdentity(rawExternalId, handle);
     if (identity?.invalid) return null;
     const kind = eventType(payload, identity);
-    if (!TWEET_KINDS.has(kind)) return null;
+    if (!SOCIAL_EVENT_KINDS.has(kind)) return null;
+    const tweetId = String(tweet.tweet_id || tweet.id || (/^\d{5,25}$/.test(rawExternalId) ? rawExternalId : '')).trim();
+    const statusUrl = String(tweet.link || payload.link || '').trim();
+    const publishedEvidenceAt = firstTimestamp([
+      payload.publish_timestamp,
+      payload.publishTimestamp,
+      tweet.date,
+      tweet.created_at,
+      tweet.createdAt,
+      payload.date,
+      payload.created_at,
+      payload.createdAt
+    ]);
+    const stableEventAt = stableEventTimestamp(identity?.occurrenceAt, [
+      payload.save_time,
+      payload.saveTime,
+      payload.index_time,
+      payload.indexTime,
+      payload.publish_timestamp,
+      payload.publishTimestamp,
+      tweet.date,
+      tweet.created_at,
+      tweet.createdAt,
+      payload.date,
+      payload.created_at,
+      payload.createdAt
+    ]);
+    if (['post', 'reply', 'quote', 'repost'].includes(kind)) {
+      const validStatusUrl = /^https?:\/\/(?:www\.)?(?:x|twitter)\.com\/[^/]+\/status\/[^/?#]+/i.test(statusUrl);
+      if (!/^\d{5,25}$/.test(tweetId) || (publishedEvidenceAt === null && !validStatusUrl)) return null;
+    }
+    if (kind === 'delete' && (!/^\d{5,25}$/.test(tweetId) || stableEventAt === null)) return null;
+    if (['follow', 'unfollow', 'profile'].includes(kind) && stableEventAt === null) return null;
+    const target = ['follow', 'unfollow'].includes(kind) ? normalizeTarget(payload, identity) : null;
+    if (identity?.target && target?.handle
+      && identity.target.toLowerCase() !== target.handle.toLowerCase()) return null;
+    const identityAuthor = handleText(handle || identity?.author).toLowerCase();
+    const identityTarget = handleText(target?.handle || identity?.target).toLowerCase();
+    if (['follow', 'unfollow'].includes(kind)
+      && (!/^[a-z0-9_]{1,15}$/i.test(identityAuthor) || !/^[a-z0-9_]{1,15}$/i.test(identityTarget))) {
+      return null;
+    }
+    const profile = kind === 'profile' ? profileChangeData(payload) : { changes: [], detail: {} };
+    if (kind === 'profile' && (!/^[a-z0-9_]{1,15}$/i.test(identityAuthor) || !profile.changes.length)) {
+      return null;
+    }
     const discoveredAt = Date.now();
-    const publishedAt = timestamp(payload.publish_timestamp || payload.index_time || tweet.date || payload.date);
-    const sourceUpdatedAt = timestamp(payload.save_time || payload.index_time, publishedAt);
+    const isAccountActivity = ['follow', 'unfollow', 'profile'].includes(kind);
+    const publishedAt = isAccountActivity
+      ? stableEventAt
+      : publishedEvidenceAt ?? stableEventAt ?? discoveredAt;
+    const sourceUpdatedAt = stableEventAt ?? publishedAt;
     const platform = Number(payload.platform ?? 0);
-    const content = String(tweet.text || payload.text || '').trim();
-    const mentioned = Array.isArray(payload.mentioned_ca) ? payload.mentioned_ca : [];
+    const content = isAccountActivity ? '' : limitedText(tweet.text || payload.text || '', 100_000).trim();
+    const mentioned = !isAccountActivity && Array.isArray(payload.mentioned_ca)
+      ? payload.mentioned_ca.slice(0, 32)
+      : [];
     const deleted = kind === 'delete' || payload.is_deleted === true;
+    const occurrenceAt = Number(stableEventAt);
     return {
       source: platform === 1 ? 'binance' : 'twitter',
-      externalId: rawExternalId,
+      externalId: ['follow', 'unfollow'].includes(kind)
+        ? `${kind}:${identityAuthor}:${identityTarget}:${occurrenceAt}`
+        : kind === 'profile'
+          ? `profile:${identityAuthor}:${sourceUpdatedAt}`
+          : rawExternalId,
       kind,
       author: {
-        id: String(user.id || user.user_id || ''),
-        handle,
-        name: String(user.name || user.display_name || user.displayName || ''),
-        avatarUrl: String(user.avatar || user.profile_image_url_https || ''),
+        id: limitedText(user.id || user.user_id || '', 240),
+        handle: limitedText(handle || identity?.author || '', 240),
+        name: limitedText(user.name || user.display_name || user.displayName || '', 500),
+        avatarUrl: limitedText(user.avatar || user.profile_image_url_https || '', 2_000),
         followersCount: Number(user.followers_count || user.profile_info?.Stats?.Followers || 0)
       },
+      ...(target ? { target } : {}),
+      ...(kind === 'profile' ? { profileChanges: profile.changes, profileDetail: profile.detail } : {}),
       content,
-      translatedContent: String(translation(tweet) || payload.translated_text || ''),
-      url: String(tweet.link || payload.link || (handle && tweet.tweet_id ? `https://x.com/${handle}/status/${tweet.tweet_id}` : '')),
-      media: mediaItems(tweet),
+      translatedContent: isAccountActivity ? '' : limitedText(translation(tweet) || payload.translated_text || '', 100_000),
+      url: isAccountActivity ? '' : limitedText(statusUrl || (handle && tweetId ? `https://x.com/${handle}/status/${tweetId}` : ''), 2_000),
+      media: isAccountActivity ? [] : mediaItems(tweet),
       contractAddresses: mentioned.map((item) => ({
-        address: item.ca_address || item.address || item.ca || '',
-        chain: String(item.chain || '').toLowerCase()
+        address: limitedText(item.ca_address || item.address || item.ca || '', 100),
+        chain: limitedText(item.chain || '', 20).toLowerCase()
       })),
-      chainTags: mentioned.map((item) => String(item.chain || '').toLowerCase()).filter(Boolean),
-      replyToExternalId: String(tweet.reply_to?.[0] || ''),
-      quotedExternalId: String(tweet.quoted_post?.tweet_id || ''),
-      repostExternalId: String(tweet.retweeted_post?.tweet_id || ''),
+      chainTags: mentioned.map((item) => limitedText(item.chain || '', 20).toLowerCase()).filter(Boolean),
+      replyToExternalId: isAccountActivity ? '' : limitedText(tweet.reply_to?.[0] || '', 240),
+      quotedExternalId: isAccountActivity ? '' : limitedText(tweet.quoted_post?.tweet_id || '', 240),
+      repostExternalId: isAccountActivity ? '' : limitedText(tweet.retweeted_post?.tweet_id || '', 240),
       publishedAt,
       discoveredAt,
       receivedAt: discoveredAt,
       sourceUpdatedAt,
       deleted,
-      deletedAt: deleted ? discoveredAt : null,
+      deletedAt: deleted ? stableEventAt ?? publishedAt : null,
       feedSources: [feedSource]
     };
   }
@@ -240,15 +479,18 @@
     return `${post.source}:${post.externalId}`;
   }
 
+  function stableStringify(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+  }
+
   function postFingerprint(post) {
-    return JSON.stringify([
-      post.sourceUpdatedAt,
-      post.deleted,
-      post.kind,
-      post.content,
-      post.translatedContent,
-      post.feedSources
-    ]);
+    // Browser observation times change on every poll and are not source
+    // revisions. Every other normalized field is persisted or displayed.
+    const { discoveredAt: _discoveredAt, receivedAt: _receivedAt, ...sourceVersion } = post;
+    return stableStringify(sourceVersion);
   }
 
   function mergeSocialAccount(previous, incoming) {
@@ -284,6 +526,14 @@
         ...(newer.feedSources || [])
       ])).sort()
     };
+    if (older.target || newer.target) merged.target = mergeSocialAccount(older.target, newer.target);
+    if (older.profileChanges || newer.profileChanges) {
+      merged.profileChanges = Array.from(new Set([
+        ...(older.profileChanges || []),
+        ...(newer.profileChanges || [])
+      ]));
+      merged.profileDetail = { ...(older.profileDetail || {}), ...(newer.profileDetail || {}) };
+    }
     return merged;
   }
 
@@ -293,15 +543,68 @@
     if (delivery.retryTimerId !== null) clearTimeout(delivery.retryTimerId);
   }
 
+  function utf8Bytes(value) {
+    let bytes = 0;
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      if (code < 0x80) bytes += 1;
+      else if (code < 0x800) bytes += 2;
+      else if (code >= 0xd800 && code <= 0xdbff
+        && value.charCodeAt(index + 1) >= 0xdc00
+        && value.charCodeAt(index + 1) <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else bytes += 3;
+    }
+    return bytes;
+  }
+
+  function postPayloadBytes(post) {
+    return utf8Bytes(JSON.stringify(post));
+  }
+
+  function durabilityReceipt() {
+    let resolve;
+    const promise = new Promise((complete) => {
+      resolve = complete;
+    });
+    return { promise, resolve, settled: false };
+  }
+
+  function settleDurability(receipt) {
+    if (!receipt || receipt.settled) return;
+    receipt.settled = true;
+    receipt.resolve();
+  }
+
+  function notifyPendingCapacity() {
+    const waiters = [...pendingCapacityWaiters];
+    pendingCapacityWaiters.clear();
+    for (const resolve of waiters) resolve();
+  }
+
+  function waitForPendingCapacity() {
+    return new Promise((resolve) => pendingCapacityWaiters.add(resolve));
+  }
+
+  function pendingPostFits(bytes, replacing = null) {
+    const records = pendingPosts.size - (replacing ? 1 : 0) + 1;
+    const totalBytes = pendingPostBytes - Number(replacing?.bytes || 0) + bytes;
+    return records <= PAGE_PENDING_MAX_POSTS && totalBytes <= PAGE_PENDING_MAX_BYTES;
+  }
+
   function detachPendingPost(key, pending) {
-    if (pendingPosts.get(key)?.deliveryId !== pending.deliveryId) return;
+    if (pendingPosts.get(key)?.deliveryId !== pending.deliveryId) return null;
     pendingPosts.delete(key);
+    pendingPostBytes = Math.max(0, pendingPostBytes - Number(pending.bytes || 0));
     const delivery = pendingDeliveries.get(pending.deliveryId);
-    if (!delivery) return;
+    if (!delivery) return pending;
     delivery.items = delivery.items.filter((item) => item.key !== key);
-    if (delivery.items.length) return;
-    clearDeliveryTimers(delivery);
-    pendingDeliveries.delete(pending.deliveryId);
+    if (!delivery.items.length) {
+      clearDeliveryTimers(delivery);
+      pendingDeliveries.delete(pending.deliveryId);
+    }
+    return pending;
   }
 
   function acknowledgeDelivery(deliveryId) {
@@ -313,6 +616,7 @@
       const pending = pendingPosts.get(item.key);
       if (pending?.deliveryId !== deliveryId) continue;
       pendingPosts.delete(item.key);
+      pendingPostBytes = Math.max(0, pendingPostBytes - Number(item.bytes || 0));
       seen.set(item.key, {
         fingerprint: item.fingerprint,
         feedSources: item.feedSources,
@@ -320,8 +624,13 @@
         sourceUpdatedAt: item.post.sourceUpdatedAt,
         at: now
       });
+      settleDurability(item.durability);
     }
     pendingDeliveries.delete(deliveryId);
+    const resumeAfterBackpressure = pendingPostBackpressured;
+    pendingPostBackpressured = false;
+    notifyPendingCapacity();
+    if (resumeAfterBackpressure) requestPrimaryFollowUp();
   }
 
   function retryDelivery(deliveryId) {
@@ -330,37 +639,27 @@
     if (delivery.timeoutId !== null && typeof clearTimeout === 'function') clearTimeout(delivery.timeoutId);
     delivery.timeoutId = null;
 
-    const release = () => {
+    const resend = () => {
       const current = pendingDeliveries.get(deliveryId);
       if (current !== delivery) return;
-      const posts = [];
-      for (const item of delivery.items) {
-        const pending = pendingPosts.get(item.key);
-        if (pending?.deliveryId !== deliveryId) continue;
-        pendingPosts.delete(item.key);
-        const acknowledged = seen.get(item.key);
-        const acknowledgedAt = Number(acknowledged?.sourceUpdatedAt || 0);
-        const itemUpdatedAt = Number(item.post.sourceUpdatedAt || item.post.publishedAt || 0);
-        if (acknowledged?.fingerprint === item.fingerprint) continue;
-        if (acknowledged && acknowledgedAt > itemUpdatedAt) continue;
-        posts.push(item.post);
+      delivery.retryTimerId = null;
+      delivery.attempt += 1;
+      delivery.at = Date.now();
+      const items = delivery.items.filter((item) => pendingPosts.get(item.key)?.deliveryId === deliveryId);
+      if (!items.length) {
+        pendingDeliveries.delete(deliveryId);
+        return;
       }
-      pendingDeliveries.delete(deliveryId);
-      if (posts.length) deliverPosts(posts, delivery.attempt + 1);
+      delivery.timeoutId = setTimeout(() => retryDelivery(deliveryId), DELIVERY_TIMEOUT_MS);
+      emit('posts', { posts: items.map((item) => item.post), deliveryId });
     };
 
-    if (typeof setTimeout !== 'function') {
-      for (const item of delivery.items) {
-        if (pendingPosts.get(item.key)?.deliveryId === deliveryId) pendingPosts.delete(item.key);
-      }
-      pendingDeliveries.delete(deliveryId);
-      return;
-    }
+    if (typeof setTimeout !== 'function') return;
     const delay = Math.min(
       DELIVERY_RETRY_BASE_MS * (2 ** Math.min(delivery.attempt, 4)),
       DELIVERY_RETRY_MAX_MS
     );
-    delivery.retryTimerId = setTimeout(release, delay);
+    delivery.retryTimerId = setTimeout(resend, delay);
   }
 
   function deliverPosts(posts, attempt = 0) {
@@ -374,16 +673,47 @@
     }
 
     const fresh = [];
-    for (const [key, candidate] of candidates) {
+    const durability = new Set();
+    const entries = [...candidates.entries()];
+    let remaining = [];
+    let deliveryId = '';
+    for (let index = 0; index < entries.length; index += 1) {
+      const [key, candidate] = entries[index];
       const acknowledged = seen.get(key);
       const pending = pendingPosts.get(key);
       let post = mergeObservedPosts(acknowledged?.post, pending?.post);
       post = mergeObservedPosts(post, candidate);
       const fingerprint = postFingerprint(post);
       if (acknowledged?.fingerprint === fingerprint) continue;
-      if (pending?.fingerprint === fingerprint && now - pending.at < DELIVERY_TIMEOUT_MS) continue;
-      if (pending) detachPendingPost(key, pending);
-      fresh.push({ post, key, fingerprint });
+      if (pending?.fingerprint === fingerprint) {
+        durability.add(pending.durability.promise);
+        if (now - pending.at >= DELIVERY_TIMEOUT_MS) retryDelivery(pending.deliveryId);
+        continue;
+      }
+      const bytes = postPayloadBytes(post);
+      if (!pendingPostFits(bytes, pending)) {
+        remaining = entries.slice(index).map(([, value]) => value);
+        break;
+      }
+      const previous = pending ? detachPendingPost(key, pending) : null;
+      if (!deliveryId) {
+        deliverySequence += 1;
+        deliveryId = `${now.toString(36)}-${deliverySequence.toString(36)}`;
+      }
+      const item = {
+        post,
+        key,
+        fingerprint,
+        feedSources: post.feedSources,
+        bytes,
+        deliveryId,
+        at: now,
+        durability: previous?.durability || durabilityReceipt()
+      };
+      pendingPosts.set(key, item);
+      pendingPostBytes += bytes;
+      durability.add(item.durability.promise);
+      fresh.push(item);
     }
     for (const [key, value] of seen) if (now - value.at > 24 * 60 * 60 * 1_000) seen.delete(key);
     for (const [deliveryId, delivery] of pendingDeliveries) {
@@ -391,20 +721,84 @@
         retryDelivery(deliveryId);
       }
     }
-    if (!fresh.length) return 0;
-
-    deliverySequence += 1;
-    const deliveryId = `${now.toString(36)}-${deliverySequence.toString(36)}`;
-    const items = fresh.map(({ post, key, fingerprint }) => ({ post, key, fingerprint, feedSources: post.feedSources }));
-    for (const item of items) {
-      pendingPosts.set(item.key, { ...item, deliveryId, at: now });
+    if (fresh.length) {
+      const timeoutId = typeof setTimeout === 'function'
+        ? setTimeout(() => retryDelivery(deliveryId), DELIVERY_TIMEOUT_MS)
+        : null;
+      pendingDeliveries.set(deliveryId, { items: fresh, at: now, timeoutId, retryTimerId: null, attempt });
+      emit('posts', { posts: fresh.map(({ post }) => post), deliveryId });
     }
-    const timeoutId = typeof setTimeout === 'function'
-      ? setTimeout(() => retryDelivery(deliveryId), DELIVERY_TIMEOUT_MS)
-      : null;
-    pendingDeliveries.set(deliveryId, { items, at: now, timeoutId, retryTimerId: null, attempt });
-    emit('posts', { posts: fresh.map(({ post }) => post), deliveryId });
-    return fresh.length;
+    if (remaining.length) {
+      pendingPostBackpressured = true;
+      requestTimelineCatchUp();
+    }
+    return {
+      queued: fresh.length,
+      waiting: durability.size,
+      remaining,
+      backpressured: remaining.length > 0,
+      durable: Promise.all([...durability])
+    };
+  }
+
+  async function deliverPostsDurably(posts) {
+    let remaining = (Array.isArray(posts) ? posts : [posts]).filter(Boolean);
+    while (remaining.length) {
+      const result = deliverPosts(remaining);
+      if (result.waiting) await result.durable;
+      remaining = result.remaining;
+      if (remaining.length && !result.waiting) await waitForPendingCapacity();
+    }
+  }
+
+  async function completeDeliveryDurably(delivery) {
+    await delivery.durable;
+    if (delivery.remaining.length) await deliverPostsDurably(delivery.remaining);
+  }
+
+  function healthyHeartbeatCapabilities() {
+    return [
+      'posts',
+      'watchlist',
+      'commands',
+      'debot-session',
+      'debot-analysis-v1',
+      ...(timelineCatchUpTruncated ? ['catchup-truncated'] : [])
+    ];
+  }
+
+  function emitHealthyHeartbeat() {
+    emit('heartbeat', {
+      bridgeId: 'debot-browser-extension',
+      version: '1.2.0',
+      sessionId: String(Date.now()),
+      capabilities: healthyHeartbeatCapabilities()
+    });
+  }
+
+  function requestTimelineCatchUp({ force = false, boundaryCutoff = lastPrimarySuccessAt } = {}) {
+    if (timelineCatchUpRequired && !force) return;
+    timelineCatchUpGeneration += 1;
+    timelineCatchUpRequired = true;
+    timelineCatchUpCursor = '';
+    timelineCatchUpPages = 0;
+    timelineCatchUpPosts = 0;
+    const observedBeforeOutage = [...seen.entries(), ...pendingPosts.entries()]
+      .filter(([, value]) => Number(value?.post?.discoveredAt || value?.post?.receivedAt || 0) <= boundaryCutoff)
+      .map(([key]) => key);
+    timelineCatchUpBoundary = new Set(observedBeforeOutage);
+  }
+
+  function finishTimelineCatchUp(generation = timelineCatchUpGeneration, { truncated = false } = {}) {
+    if (generation !== timelineCatchUpGeneration) return;
+    const warningChanged = timelineCatchUpTruncated !== truncated;
+    timelineCatchUpTruncated = truncated;
+    timelineCatchUpRequired = false;
+    timelineCatchUpCursor = '';
+    timelineCatchUpPages = 0;
+    timelineCatchUpPosts = 0;
+    timelineCatchUpBoundary.clear();
+    if (truncated || warningChanged) emitHealthyHeartbeat();
   }
 
   class DeBotRequestError extends Error {
@@ -770,44 +1164,112 @@
   }
 
   function watchlistRows(data) {
-    const rows = data?.list || data?.records || data?.items || data || [];
-    return Array.isArray(rows) ? rows : [];
+    if (Array.isArray(data)) return data;
+    if (!data || typeof data !== 'object') return null;
+    for (const key of ['list', 'records', 'items']) {
+      if (Object.hasOwn(data, key)) return Array.isArray(data[key]) ? data[key] : null;
+    }
+    return null;
   }
 
-  function normalizeWatchlist(data) {
-    return watchlistRows(data).map((item) => ({
-      platform: Number(item.platform || 0) === 1 ? 'binance' : 'twitter',
-      accountKey: String(item.monitor_object || item.tweet_username || item.username || '').toLowerCase(),
-      handle: String(item.monitor_object || item.tweet_username || item.username || ''),
-      name: String(item.config_name || item.tweet_name || item.name || ''),
-      url: String(item.url || ''),
-      remoteId: String(item.config_id || item.id || ''),
-      metadata: { hotSubscribeId: item.hot_subscribe_id || null, monitorLevel: item.monitor_level || '' }
-    })).filter((item) => item.handle);
+  function normalizeWatchlistRows(rows) {
+    return rows.map((item) => {
+      const handle = String(item?.monitor_object || item?.tweet_username || item?.username || '').trim();
+      const remoteIdText = String(item?.config_id ?? item?.id ?? '').trim();
+      const remoteId = /^\d+$/.test(remoteIdText) ? Number(remoteIdText) : 0;
+      if (!handle || !Number.isSafeInteger(remoteId) || remoteId <= 0) return null;
+      return {
+        platform: Number(item?.platform || 0) === 1 ? 'binance' : 'twitter',
+        accountKey: handle.toLowerCase(),
+        handle,
+        name: String(item?.config_name || item?.tweet_name || item?.name || ''),
+        url: String(item?.url || ''),
+        remoteId: String(remoteId),
+        metadata: { hotSubscribeId: item?.hot_subscribe_id || null, monitorLevel: item?.monitor_level || '' }
+      };
+    }).filter(Boolean);
   }
 
-  async function fetchWatchlist() {
-    const data = await api('social/subscribe/list?keyword=&page=1&page_size=500');
-    const accounts = normalizeWatchlist(data);
-    cachedAccounts = accounts;
-    emit('watchlist', { accounts });
-    lastWatchlistAt = Date.now();
+  async function fetchWatchlist({ commitRequired = false } = {}) {
+    const generation = ++watchlistFetchGeneration;
+    const byKey = new Map();
+    let complete = false;
+    let fetchedRows = 0;
+    let emptyFirstPageConfirmed = false;
+    for (let page = 1; page <= WATCHLIST_MAX_PAGES; page += 1) {
+      const data = await api(`social/subscribe/list?keyword=&page=${page}&page_size=${WATCHLIST_PAGE_SIZE}`);
+      const rows = watchlistRows(data);
+      if (!rows) throw new Error('DeBot returned an invalid watchlist page');
+      const normalizedRows = normalizeWatchlistRows(rows);
+      if (normalizedRows.length !== rows.length) throw new Error('DeBot returned an incomplete watchlist account');
+      fetchedRows += rows.length;
+      for (const account of normalizedRows) {
+        byKey.set(`${account.platform}:${account.accountKey}`, account);
+      }
+      const total = Number(data?.total ?? data?.count ?? data?.pagination?.total ?? data?.page?.total);
+      const hasTotal = Number.isFinite(total) && total >= 0;
+      if (hasTotal && fetchedRows > total) throw new Error('DeBot watchlist total is inconsistent');
+      if (page === 1 && rows.length === 0 && !emptyFirstPageConfirmed) {
+        const confirmation = await api(`social/subscribe/list?keyword=&page=1&page_size=${WATCHLIST_PAGE_SIZE}`);
+        const confirmationRows = watchlistRows(confirmation);
+        const confirmationTotal = Number(
+          confirmation?.total
+            ?? confirmation?.count
+            ?? confirmation?.pagination?.total
+            ?? confirmation?.page?.total
+        );
+        const confirmationHasTotal = Number.isFinite(confirmationTotal) && confirmationTotal >= 0;
+        if (!confirmationRows || confirmationRows.length !== 0
+          || (confirmationHasTotal && confirmationTotal !== 0)) {
+          throw new Error('DeBot returned an unstable empty watchlist');
+        }
+        emptyFirstPageConfirmed = true;
+      }
+      if (rows.length < WATCHLIST_PAGE_SIZE || (hasTotal && fetchedRows === total)) {
+        if (hasTotal && fetchedRows !== total) throw new Error('DeBot watchlist page is incomplete');
+        complete = true;
+        break;
+      }
+    }
+    if (!complete) throw new Error('DeBot watchlist exceeds the complete-sync limit');
+    const accounts = [...byKey.values()];
+    if (generation === watchlistFetchGeneration) {
+      cachedAccounts = accounts;
+      emit('watchlist', { accounts });
+      lastWatchlistAt = Date.now();
+    } else if (commitRequired) {
+      // A command confirmation must publish the exact complete snapshot it
+      // verified. Retry behind a newer concurrent fetch instead of returning
+      // success with no committed snapshot.
+      return fetchWatchlist({ commitRequired: true });
+    }
     return accounts;
   }
 
-  async function fetchTimeline(feedSource, configIds = []) {
-    const params = new URLSearchParams({ cursor: '', limit: '50', tw_types: DEFAULT_TYPES });
-    let path;
-    if (feedSource === 'featured') path = `social/twitter/hot/timeline?${params}`;
-    else {
-      params.set('config_ids', configIds.join('|'));
-      path = `${feedSource === 'my' ? 'social/twitter/timeline' : 'social/twitter/all/timeline'}?${params}`;
-    }
-    const data = await api(path, {
-      timeoutMs: feedSource === 'my' ? PRIMARY_API_TIMEOUT_MS : API_TIMEOUT_MS
+  async function fetchPersonalTimelinePage(configIds = [], cursor = '') {
+    const params = new URLSearchParams({
+      cursor,
+      limit: String(TIMELINE_PAGE_SIZE),
+      tw_types: DEFAULT_TYPES
     });
-    const feeds = Array.isArray(data?.feeds) ? data.feeds : [];
-    return feeds.map((item) => normalizePost(item, feedSource)).filter(Boolean);
+    params.set('config_ids', configIds.join('|'));
+    const data = await api(`social/twitter/timeline?${params}`, {
+      timeoutMs: PRIMARY_API_TIMEOUT_MS
+    });
+    if (!data || typeof data !== 'object' || !Array.isArray(data.feeds)) {
+      throw new Error('DeBot returned an invalid personal timeline page');
+    }
+    const nextCursor = String(data.next_cursor ?? data.nextCursor ?? '');
+    const hasMoreField = data.has_more ?? data.hasMore;
+    const hasMore = hasMoreField === true || hasMoreField === 1 || hasMoreField === '1'
+      || String(hasMoreField || '').toLowerCase() === 'true'
+      || (hasMoreField === undefined && Boolean(nextCursor));
+    if (hasMore && !nextCursor) throw new Error('DeBot omitted the personal timeline cursor');
+    return {
+      posts: data.feeds.map((item) => normalizePost(item, 'my')).filter(Boolean),
+      hasMore,
+      nextCursor
+    };
   }
 
   function accountConfigKey() {
@@ -826,7 +1288,12 @@
     if (watchlistInFlight || Date.now() - lastWatchlistAt <= 30_000) return watchlistInFlight;
     const previousKey = accountConfigKey();
     const operation = fetchWatchlist().then(() => {
-      if (accountConfigKey() !== previousKey) requestPrimaryFollowUp();
+      if (accountConfigKey() !== previousKey) {
+        // A changed account set needs a fresh bounded history pass; old-account
+        // boundaries cannot prove that a newly added account has been covered.
+        requestTimelineCatchUp({ force: true, boundaryCutoff: 0 });
+        requestPrimaryFollowUp();
+      }
     }).catch(() => {
       // The primary monitored-account timeline remains independent of watchlist refresh failures.
     }).finally(() => {
@@ -836,39 +1303,90 @@
     return operation;
   }
 
-  function pollOptionalTimelines() {
-    if (optionalPollInFlight) return optionalPollInFlight;
-    const configIds = cachedAccounts.map((account) => account.remoteId).filter(Boolean);
-    const deliverTimeline = (promise) => promise.then((posts) => {
-      deliverPosts(posts);
-      return posts;
+  async function continueTimelineCatchUp(configIds, firstPage, firstPageDelivery, generation) {
+    if (!timelineCatchUpRequired || generation !== timelineCatchUpGeneration) return;
+    try {
+      await completeDeliveryDurably(firstPageDelivery);
+    } catch {
+      return;
+    }
+    if (!timelineCatchUpRequired || generation !== timelineCatchUpGeneration) return;
+    const firstPageReachedBoundary = !timelineCatchUpCursor
+      && firstPage.posts.some((post) => timelineCatchUpBoundary.has(postIdentity(post)));
+    if (firstPageReachedBoundary || (!timelineCatchUpCursor && !firstPage.hasMore)) {
+      finishTimelineCatchUp(generation);
+      return;
+    }
+
+    let cursor = timelineCatchUpCursor || firstPage.nextCursor;
+    for (let page = 0; page < TIMELINE_CATCHUP_PAGES_PER_POLL; page += 1) {
+      if (!timelineCatchUpRequired || generation !== timelineCatchUpGeneration) return;
+      if (!cursor) {
+        finishTimelineCatchUp(generation);
+        return;
+      }
+      if (timelineCatchUpPages >= TIMELINE_CATCHUP_MAX_PAGES
+        || timelineCatchUpPosts >= TIMELINE_CATCHUP_MAX_POSTS) {
+        finishTimelineCatchUp(generation, { truncated: true });
+        return;
+      }
+
+      let olderPage;
+      try {
+        olderPage = await fetchPersonalTimelinePage(configIds, cursor);
+      } catch {
+        // Keep the cursor so the next successful primary poll resumes this recovery page.
+        return;
+      }
+      if (!timelineCatchUpRequired || generation !== timelineCatchUpGeneration) return;
+
+      const reachedBoundary = olderPage.posts.some((post) => timelineCatchUpBoundary.has(postIdentity(post)));
+      try {
+        await deliverPostsDurably(olderPage.posts);
+      } catch {
+        return;
+      }
+      if (!timelineCatchUpRequired || generation !== timelineCatchUpGeneration) return;
+      timelineCatchUpPages += 1;
+      timelineCatchUpPosts += olderPage.posts.length;
+      if (reachedBoundary || !olderPage.hasMore) {
+        finishTimelineCatchUp(generation);
+        return;
+      }
+      if (timelineCatchUpPages >= TIMELINE_CATCHUP_MAX_PAGES
+        || timelineCatchUpPosts >= TIMELINE_CATCHUP_MAX_POSTS) {
+        finishTimelineCatchUp(generation, { truncated: true });
+        return;
+      }
+      cursor = olderPage.nextCursor;
+      timelineCatchUpCursor = cursor;
+    }
+  }
+
+  function scheduleTimelineCatchUp(configIds, firstPage, firstPageDelivery) {
+    if (!timelineCatchUpRequired || timelineCatchUpInFlight) return;
+    const generation = timelineCatchUpGeneration;
+    const operation = continueTimelineCatchUp(configIds, firstPage, firstPageDelivery, generation).finally(() => {
+      if (timelineCatchUpInFlight === operation) timelineCatchUpInFlight = null;
     });
-    const operation = Promise.allSettled([
-      deliverTimeline(fetchTimeline('featured')),
-      deliverTimeline(fetchTimeline('all', configIds))
-    ]).finally(() => {
-      if (optionalPollInFlight === operation) optionalPollInFlight = null;
-    });
-    optionalPollInFlight = operation;
-    return operation;
+    timelineCatchUpInFlight = operation;
   }
 
   async function runPoll() {
     const configIds = cachedAccounts.map((account) => account.remoteId).filter(Boolean);
     try {
-      deliverPosts(await fetchTimeline('my', configIds));
-      emit('heartbeat', {
-        bridgeId: 'debot-browser-extension',
-        version: '1.1.3',
-        sessionId: String(Date.now()),
-        capabilities: ['posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1']
-      });
+      const firstPage = await fetchPersonalTimelinePage(configIds);
+      const firstPageDelivery = deliverPosts(firstPage.posts);
+      lastPrimarySuccessAt = Date.now();
+      emitHealthyHeartbeat();
+      scheduleTimelineCatchUp(configIds, firstPage, firstPageDelivery);
       return { ok: true };
     } catch (error) {
+      requestTimelineCatchUp();
       const errorType = coarseErrorType(error);
       emit('heartbeat', {
         bridgeId: 'debot-browser-extension',
-        version: '1.1.3',
+        version: '1.2.0',
         capabilities: ['debot-analysis-v1', 'error'],
         error: errorType
       });
@@ -912,27 +1430,26 @@
     }
     if (command.type === 'watchlist.delete') {
       const accounts = await fetchWatchlist();
-      const remoteIds = accounts
-        .filter((item) => item.platform === platformName && item.accountKey === handle.toLowerCase())
+      const targetKey = handle.toLowerCase();
+      const matchedAccounts = accounts
+        .filter((item) => item.platform === platformName && item.accountKey === targetKey);
+      const remoteIds = matchedAccounts
         .map((item) => Number(item.remoteId))
         .filter((id) => Number.isSafeInteger(id) && id > 0);
-      const knownRemoteIds = new Set(accounts
-        .map((item) => Number(item.remoteId))
-        .filter((id) => Number.isSafeInteger(id) && id > 0));
-      const explicitText = String(payload.remoteId ?? '').trim();
-      const explicitId = explicitText ? Number(explicitText) : null;
-      if (Number.isSafeInteger(explicitId) && explicitId > 0
-        && knownRemoteIds.has(explicitId) && !remoteIds.includes(explicitId)) {
-        remoteIds.push(explicitId);
-      }
       if (remoteIds.length) {
         await api('social/subscribe/remove', {
           method: 'POST',
           body: JSON.stringify({ config_ids: remoteIds })
         });
       }
-      await fetchWatchlist();
-      return { remoteId: String(remoteIds[0] || '') };
+      const syncedAccounts = await fetchWatchlist({ commitRequired: true });
+      const removedIds = new Set(remoteIds.map(String));
+      const stillPresent = syncedAccounts.some((item) => (
+        item.platform === platformName
+        && (item.accountKey === targetKey || removedIds.has(String(item.remoteId)))
+      ));
+      if (stillPresent) throw new Error('DeBot watchlist still contains the deleted account');
+      return { remoteId: String(remoteIds[0] || ''), verifiedAbsent: true };
     }
     throw new Error(`Unsupported command: ${command.type}`);
   }
@@ -944,11 +1461,11 @@
     try {
       const packet = JSON.parse(frame.slice(arrayStart));
       const channel = String(packet[0] || '');
-      if (!['social-user-twitter', 'social-hot-twitter'].includes(channel)) return;
+      if (channel !== 'social-user-twitter') return;
       const envelope = packet[1] || {};
       const parsed = typeof envelope.Payload === 'string' ? JSON.parse(envelope.Payload) : envelope.Payload || envelope;
       const payload = parsed?.data || parsed;
-      const post = normalizePost(payload, channel === 'social-user-twitter' ? 'my' : 'featured');
+      const post = normalizePost(payload, 'my');
       deliverPosts([post]);
     } catch {
       // Fallback polling covers socket frames from an unknown protocol version.
@@ -994,13 +1511,16 @@
     });
   }
 
-  const requestImmediatePoll = () => requestPrimaryFollowUp();
-  window.addEventListener('online', requestImmediatePoll);
-  window.addEventListener('pageshow', requestImmediatePoll);
-  window.addEventListener('focus', requestImmediatePoll);
+  const requestRecoveryPoll = () => {
+    if (Date.now() - lastPrimarySuccessAt > PRIMARY_POLL_INTERVAL_MS * 3) requestTimelineCatchUp();
+    requestPrimaryFollowUp();
+  };
+  window.addEventListener('online', requestRecoveryPoll);
+  window.addEventListener('pageshow', requestRecoveryPoll);
+  window.addEventListener('focus', requestRecoveryPoll);
   if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') requestImmediatePoll();
+      if (document.visibilityState === 'visible') requestRecoveryPoll();
     });
   }
 
@@ -1022,7 +1542,9 @@
     }
     if (message.type === 'posts-delivery-result') {
       const deliveryId = String(message.payload?.deliveryId || '');
-      if (deliveryId && message.payload?.ok === true) acknowledgeDelivery(deliveryId);
+      if (deliveryId && message.payload?.ok === true && message.payload?.durable === true) {
+        acknowledgeDelivery(deliveryId);
+      }
       else if (deliveryId) retryDelivery(deliveryId);
       return;
     }
@@ -1034,7 +1556,12 @@
     const operation = commandQueue.then(() => executeCommand(message.command));
     commandQueue = operation.catch(() => {});
     void operation.then((result) => {
-      emit('command-result', { commandId: message.command.id, success: true, remoteId: result.remoteId || '' });
+      emit('command-result', {
+        commandId: message.command.id,
+        success: true,
+        remoteId: result.remoteId || '',
+        verifiedAbsent: result.verifiedAbsent === true
+      });
     }).catch((error) => {
       emit('command-result', {
         commandId: message.command.id,
@@ -1046,8 +1573,6 @@
 
   void fallbackPoll();
   void refreshWatchlistIfNeeded();
-  void pollOptionalTimelines();
   setInterval(() => requestPrimaryFollowUp(), PRIMARY_POLL_INTERVAL_MS);
-  setInterval(() => void pollOptionalTimelines(), OPTIONAL_POLL_INTERVAL_MS);
   setInterval(() => void refreshWatchlistIfNeeded(), WATCHLIST_POLL_INTERVAL_MS);
 })();

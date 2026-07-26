@@ -124,7 +124,7 @@ test('outbox persists only the post allowlist and never raw or credential fields
   assert.deepEqual(Object.keys(stored.media[0]).sort(), ['previewUrl', 'type', 'url']);
 });
 
-test('outbox rejects relationship activity and omits unrelated targets from tweet records', async () => {
+test('outbox persists complete relationship and profile activity through a strict allowlist', async () => {
   const storage = new FakeStorage();
   const outbox = createPostOutbox({ storage });
   const result = await outbox.enqueue([
@@ -140,17 +140,117 @@ test('outbox rejects relationship activity and omits unrelated targets from twee
         cookie: 'private-target-cookie'
       }
     }),
+    post('unfollow:alice:carol', {
+      kind: 'unfollow',
+      target: {
+        id: 'target-2',
+        handle: 'carol',
+        name: 'Carol',
+        avatarUrl: 'https://example.test/carol.png',
+        followersCount: 19,
+        url: 'https://x.com/carol',
+        authorization: 'private-target-authorization'
+      }
+    }),
+    post('profile:alice:100', {
+      kind: 'profile',
+      profileChanges: ['name', 'avatar', 'bio', 'unknown', 'name'],
+      profileDetail: {
+        name: { before: 'Alice', after: 'Alice 2', cookie: 'private-profile-cookie' },
+        avatar: { before: 'https://old.example/a.png', after: 'https://new.example/a.png' },
+        bio: { before: 'old bio', after: 'new bio' },
+        unknown: { before: 'private-profile-before', after: 'private-profile-after' }
+      }
+    }),
     post('ordinary-tweet', {
       target: { handle: 'must-not-be-persisted' }
     })
   ]);
 
   const records = (await outbox.readBatch()).records.map((record) => record.post);
-  assert.equal(result.rejected, 1);
-  assert.equal(result.added, 1);
-  assert.deepEqual(records.map((record) => record.externalId), ['ordinary-tweet']);
-  assert.equal(Object.hasOwn(records[0], 'target'), false);
+  assert.equal(result.rejected, 0);
+  assert.equal(result.added, 4);
+  assert.deepEqual(records.map((record) => record.externalId), [
+    'follow:alice:bob',
+    'unfollow:alice:carol',
+    'profile:alice:100',
+    'ordinary-tweet'
+  ]);
+  assert.deepEqual(Object.keys(records[0].target).sort(), [
+    'avatarUrl', 'followersCount', 'handle', 'id', 'name', 'url'
+  ]);
+  assert.deepEqual(records[2].profileChanges, ['name', 'avatar', 'bio']);
+  assert.deepEqual(records[2].profileDetail, {
+    name: { before: 'Alice', after: 'Alice 2' },
+    avatar: { before: 'https://old.example/a.png', after: 'https://new.example/a.png' },
+    bio: { before: 'old bio', after: 'new bio' }
+  });
+  assert.equal(Object.hasOwn(records[3], 'target'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-target-cookie'), false);
+  assert.equal(JSON.stringify(storage.value).includes('private-target-authorization'), false);
+  assert.equal(JSON.stringify(storage.value).includes('private-profile-cookie'), false);
+  assert.equal(JSON.stringify(storage.value).includes('private-profile-before'), false);
+  assert.equal(storage.value.debotSocialPostOutboxV1.schemaVersion, 2);
+});
+
+test('outbox rejects incomplete relationship, profile and unknown activity', async () => {
+  const storage = new FakeStorage();
+  const outbox = createPostOutbox({ storage });
+  const result = await outbox.enqueue([
+    post('follow-missing-author', {
+      kind: 'follow',
+      author: { handle: '' },
+      target: { handle: 'bob' }
+    }),
+    post('follow-missing-target', {
+      kind: 'follow',
+      target: { handle: '' }
+    }),
+    post('unfollow-invalid-target', {
+      kind: 'unfollow',
+      target: { handle: 'not-valid-handle-too-long' }
+    }),
+    post('profile-missing-author', {
+      kind: 'profile',
+      author: { handle: '' },
+      profileChanges: ['name']
+    }),
+    post('profile-missing-change', {
+      kind: 'profile',
+      profileChanges: []
+    }),
+    post('unknown-kind', { kind: 'list_update' })
+  ]);
+
+  assert.deepEqual(
+    { added: result.added, rejected: result.rejected, queued: result.queued },
+    { added: 0, rejected: 6, queued: 0 }
+  );
+  assert.equal(storage.setCalls, 0);
+});
+
+test('outbox preserves separate occurrences of repeated relationship activity', async () => {
+  const storage = new FakeStorage();
+  const outbox = createPostOutbox({ storage });
+  const relationship = post('follow:alice:bob', {
+    kind: 'follow',
+    target: { handle: 'bob' },
+    publishedAt: 100,
+    sourceUpdatedAt: 100
+  });
+
+  assert.equal((await outbox.enqueue(relationship)).added, 1);
+  assert.equal((await outbox.enqueue({
+    ...relationship,
+    publishedAt: 200,
+    sourceUpdatedAt: 200,
+    receivedAt: 250
+  })).added, 1);
+  assert.equal((await outbox.enqueue({ ...relationship, receivedAt: 999 })).duplicates, 1);
+
+  const records = (await outbox.readBatch()).records;
+  assert.deepEqual(records.map(({ post: value }) => value.sourceUpdatedAt), [100, 200]);
+  assert.equal(new Set(records.map(({ key }) => key)).size, 2);
 });
 
 test('outbox preserves accepted records and rejects new records when its record limit overflows', async () => {
@@ -177,6 +277,65 @@ test('outbox preserves accepted records and rejects new records when its record 
   assert.deepEqual(
     (await outbox.readBatch(10)).records.map(({ post: value }) => value.externalId),
     ['item-2', 'item-3', 'item-4']
+  );
+});
+
+test('atomic enqueue preserves the existing queue and accepts the complete batch after capacity clears', async () => {
+  const storage = new FakeStorage();
+  const outbox = createPostOutbox({ storage, maxRecords: 3 });
+  const existing = await outbox.enqueue([
+    post('existing-1'),
+    post('existing-2')
+  ]);
+  const existingBatch = await outbox.readBatch(10);
+  const storedBeforeOverflow = structuredClone(storage.value);
+  const setCallsBeforeOverflow = storage.setCalls;
+
+  assert.equal(existing.added, 2);
+  const overflowed = await outbox.enqueue([
+    post('retry-1'),
+    post('retry-2')
+  ], { requireAll: true });
+
+  assert.deepEqual(
+    {
+      added: overflowed.added,
+      overflow: overflowed.overflow,
+      queued: overflowed.queued,
+      keys: overflowed.keys,
+      atomic: overflowed.atomic
+    },
+    { added: 0, overflow: 2, queued: 2, keys: [], atomic: true }
+  );
+  assert.equal(storage.setCalls, setCallsBeforeOverflow);
+  assert.deepEqual(storage.value, storedBeforeOverflow);
+  assert.deepEqual(
+    (await outbox.readBatch(10)).records.map(({ key, post: value }) => [key, value.externalId]),
+    existingBatch.records.map(({ key, post: value }) => [key, value.externalId])
+  );
+
+  const cleared = await outbox.acknowledge(existingBatch.records.map(({ key }) => key));
+  assert.deepEqual(
+    { acknowledged: cleared.acknowledged, queued: cleared.queued },
+    { acknowledged: 2, queued: 0 }
+  );
+
+  const retried = await outbox.enqueue([
+    post('retry-1'),
+    post('retry-2')
+  ], { requireAll: true });
+  assert.deepEqual(
+    {
+      added: retried.added,
+      overflow: retried.overflow,
+      queued: retried.queued,
+      atomic: retried.atomic
+    },
+    { added: 2, overflow: 0, queued: 2, atomic: true }
+  );
+  assert.deepEqual(
+    (await outbox.readBatch(10)).records.map(({ post: value }) => value.externalId),
+    ['retry-1', 'retry-2']
   );
 });
 
@@ -240,9 +399,12 @@ test('outbox rejects incomplete posts and publishes conservative default limits'
   const result = await outbox.enqueue([
     null,
     { source: 'debot' },
-    { externalId: 'missing-source' }
+    { externalId: 'missing-source' },
+    { source: 'debot', externalId: 'unknown', kind: 'unknown' },
+    { source: 'debot', externalId: 'follow:alice:bob', kind: 'follow', author: { handle: 'alice' } },
+    { source: 'debot', externalId: 'profile:alice:1', kind: 'profile', author: { handle: 'alice' } }
   ]);
-  assert.equal(result.rejected, 3);
+  assert.equal(result.rejected, 6);
   assert.equal(result.queued, 0);
   assert.equal(storage.setCalls, 0);
   assert.deepEqual(POST_OUTBOX_LIMITS, {

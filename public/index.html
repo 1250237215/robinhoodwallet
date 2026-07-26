@@ -414,31 +414,9 @@
             </header>
 
             <div class="social-monitor-toolbar">
-              <div class="social-feed-tabs" id="social-feed-tabs" role="tablist" aria-label="社媒消息范围">
-                <button type="button" role="tab" data-social-feed="all" aria-selected="true" class="is-active">全部</button>
-                <button type="button" role="tab" data-social-feed="featured" aria-selected="false">精选</button>
-                <button type="button" role="tab" data-social-feed="my" aria-selected="false">我的</button>
-              </div>
-              <label>
-                <span class="sr-only">社媒来源</span>
-                <select id="social-platform-filter" aria-label="社媒来源">
-                  <option value="all">全部来源</option>
-                  <option value="twitter">推特</option>
-                  <option value="binance">币安广场</option>
-                </select>
-              </label>
-              <label>
-                <span class="sr-only">关联链</span>
-                <select id="social-chain-filter" aria-label="关联链">
-                  <option value="all">全部链</option>
-                  <option value="robinhood">Robinhood</option>
-                  <option value="base">Base</option>
-                  <option value="solana">Solana</option>
-                </select>
-              </label>
               <label class="social-search-field">
                 <i data-lucide="search" aria-hidden="true"></i>
-                <input id="social-search" type="search" autocomplete="off" placeholder="搜索账号或内容" aria-label="搜索社媒消息" />
+                <input id="social-search" type="search" autocomplete="off" placeholder="搜索个人监控账号或内容" aria-label="搜索个人社媒监控" />
               </label>
             </div>
 
@@ -456,13 +434,6 @@
                 <label>
                   <span>账号，一行一个</span>
                   <textarea id="social-watchlist-input" rows="3" placeholder="@username&#10;https://x.com/username" required></textarea>
-                </label>
-                <label>
-                  <span>平台</span>
-                  <select id="social-watchlist-platform">
-                    <option value="twitter">推特</option>
-                    <option value="binance">币安广场</option>
-                  </select>
                 </label>
                 <button class="social-primary-button" id="social-watchlist-add" type="submit">
                   <i data-lucide="user-plus" aria-hidden="true"></i>
@@ -598,6 +569,44 @@
     </main>
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+    <dialog class="social-event-editor" id="social-event-editor" aria-labelledby="social-event-editor-title">
+      <form class="social-event-editor-form" id="social-event-editor-form">
+        <div class="social-event-editor-head">
+          <div>
+            <span>账号行为监控</span>
+            <h2 id="social-event-editor-title">--</h2>
+          </div>
+          <button class="icon-button" id="social-event-editor-close" type="button" title="关闭" aria-label="关闭账号行为编辑">
+            <i data-lucide="x" aria-hidden="true"></i>
+          </button>
+        </div>
+        <input id="social-event-editor-id" type="hidden" />
+        <fieldset class="social-event-options" id="social-event-options">
+          <legend>选择需要显示的动态</legend>
+          <label><input type="checkbox" name="socialEventType" value="post" /><span><i data-lucide="send" aria-hidden="true"></i>发帖</span></label>
+          <label><input type="checkbox" name="socialEventType" value="reply" /><span><i data-lucide="message-circle-reply" aria-hidden="true"></i>回复</span></label>
+          <label><input type="checkbox" name="socialEventType" value="quote" /><span><i data-lucide="quote" aria-hidden="true"></i>引用</span></label>
+          <label><input type="checkbox" name="socialEventType" value="repost" /><span><i data-lucide="repeat-2" aria-hidden="true"></i>转发</span></label>
+          <label><input type="checkbox" name="socialEventType" value="delete" /><span><i data-lucide="message-circle-x" aria-hidden="true"></i>删帖</span></label>
+          <label><input type="checkbox" name="socialEventType" value="follow" /><span><i data-lucide="user-plus" aria-hidden="true"></i>关注</span></label>
+          <label><input type="checkbox" name="socialEventType" value="unfollow" /><span><i data-lucide="user-minus" aria-hidden="true"></i>取消关注</span></label>
+          <label><input type="checkbox" name="socialEventType" value="profile_name" /><span><i data-lucide="signature" aria-hidden="true"></i>改名</span></label>
+          <label><input type="checkbox" name="socialEventType" value="profile_avatar" /><span><i data-lucide="image" aria-hidden="true"></i>换头像</span></label>
+          <label><input type="checkbox" name="socialEventType" value="profile_bio" /><span><i data-lucide="notebook-pen" aria-hidden="true"></i>改简介</span></label>
+        </fieldset>
+        <div class="social-event-editor-actions">
+          <div>
+            <button class="social-secondary-button" id="social-event-select-all" type="button">全部选择</button>
+            <button class="social-secondary-button" id="social-event-clear-all" type="button">全部关闭</button>
+          </div>
+          <button class="social-primary-button" id="social-event-editor-save" type="submit">
+            <i data-lucide="save" aria-hidden="true"></i>
+            保存设置
+          </button>
+        </div>
+      </form>
+    </dialog>
 
     <dialog class="wallet-editor" id="wallet-editor" aria-labelledby="wallet-editor-title">
       <form class="wallet-editor-form" id="wallet-editor-form" method="dialog">

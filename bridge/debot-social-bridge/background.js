@@ -18,7 +18,11 @@ const MAX_ANALYSIS_CONCURRENCY = 4;
 const MAX_ANALYSIS_RESULT_BYTES = 256 * 1024;
 const ANALYSIS_RESULT_BATCH_SIZE = 20;
 const ANALYSIS_RESULT_UPLOAD_CONCURRENCY = 4;
-const TWEET_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete']);
+const SNAPSHOT_SESSION_STARTED_AT = Date.now();
+const SNAPSHOT_SESSION_ID = `${SNAPSHOT_SESSION_STARTED_AT.toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
+const PROFILE_CHANGE_TYPES = new Set(['name', 'avatar', 'bio']);
+const SOCIAL_HANDLE_PATTERN = /^[a-z0-9_]{1,15}$/i;
 const ANALYSIS_ERROR_TYPES = new Set([
   'AUTH',
   'TIMEOUT',
@@ -30,6 +34,11 @@ const ANALYSIS_ERROR_TYPES = new Set([
 const ALLOWED_SERVER_ORIGINS = new Set([
   'https://radar.217-116-171-250.sslip.io'
 ]);
+const RADAR_READ_ORIGINS = new Set([
+  ...ALLOWED_SERVER_ORIGINS,
+  'http://217.116.171.250'
+]);
+const RADAR_WRITE_ORIGIN = 'https://radar.217-116-171-250.sslip.io';
 const storageReady = Promise.all([
   chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }),
   chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' })
@@ -44,6 +53,8 @@ let postFlushRetryAttempt = 0;
 let analysisResultFlushInFlight = null;
 let analysisResultFlushRequested = false;
 let bridgeMaintenanceInFlight = null;
+let snapshotRevision = 0;
+let watchlistUploadQueue = Promise.resolve();
 
 function normalizeServerBase(value) {
   const url = new URL(String(value || DEFAULT_SERVER_BASE));
@@ -78,27 +89,61 @@ function safeContracts(value) {
   }));
 }
 
-function safeSocialAccount(value) {
+function safeSocialAccount(value, { includeUrl = false } = {}) {
   const account = value && typeof value === 'object' ? value : {};
   return {
     id: text(account.id, 240),
     handle: text(account.handle, 240),
     name: text(account.name, 500),
     avatarUrl: text(account.avatarUrl, 2_000),
-    followersCount: number(account.followersCount)
+    followersCount: number(account.followersCount),
+    ...(includeUrl ? { url: text(account.url, 2_000) } : {})
   };
+}
+
+function safeProfileChanges(value) {
+  return [...new Set((Array.isArray(value) ? value : [])
+    .map((item) => text(item, 20).toLowerCase())
+    .filter((item) => PROFILE_CHANGE_TYPES.has(item)))];
+}
+
+function safeProfileDetail(value, changes) {
+  const detail = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const normalized = {};
+  for (const change of changes) {
+    const maximum = change === 'bio' ? 10_000 : change === 'avatar' ? 2_000 : 500;
+    const item = detail[change] && typeof detail[change] === 'object' ? detail[change] : {};
+    normalized[change] = {
+      before: text(item.before, maximum),
+      after: text(item.after, maximum)
+    };
+  }
+  return normalized;
 }
 
 function safePost(value) {
   const post = value && typeof value === 'object' ? value : {};
   const kind = text(post.kind, 20).toLowerCase();
-  if (!TWEET_KINDS.has(kind)) return null;
+  if (!SOCIAL_EVENT_KINDS.has(kind)) return null;
   const author = post.author && typeof post.author === 'object' ? post.author : {};
+  const safeAuthor = safeSocialAccount(author);
+  const target = ['follow', 'unfollow'].includes(kind)
+    ? safeSocialAccount(post.target, { includeUrl: true })
+    : null;
+  const profileChanges = kind === 'profile' ? safeProfileChanges(post.profileChanges) : [];
+  if (['follow', 'unfollow'].includes(kind)
+    && (!SOCIAL_HANDLE_PATTERN.test(safeAuthor.handle) || !SOCIAL_HANDLE_PATTERN.test(target.handle))) return null;
+  if (kind === 'profile' && (!SOCIAL_HANDLE_PATTERN.test(safeAuthor.handle) || !profileChanges.length)) return null;
   return {
     source: text(post.source, 40),
     externalId: text(post.externalId, 240),
     kind,
-    author: safeSocialAccount(author),
+    author: safeAuthor,
+    ...(target ? { target } : {}),
+    ...(kind === 'profile' ? {
+      profileChanges,
+      profileDetail: safeProfileDetail(post.profileDetail, profileChanges)
+    } : {}),
     content: text(post.content),
     translatedContent: text(post.translatedContent),
     url: text(post.url, 2_000),
@@ -567,14 +612,17 @@ async function queuePosts(value) {
     .sort((left, right) => (left.sourceUpdatedAt || left.publishedAt) - (right.sourceUpdatedAt || right.publishedAt));
   if (!posts.length) return { queued: 0, skipped: true };
   await storageReady;
-  const result = await postOutbox.enqueue(posts);
+  const result = await postOutbox.enqueue(posts, { requireAll: true });
   void requestPostFlush();
   return {
     queued: result.queued,
+    bytes: result.bytes,
     added: result.added,
     duplicates: result.duplicates,
+    rejected: result.rejected,
     overflow: result.overflow,
-    durable: result.overflow === 0
+    durable: result.overflow === 0,
+    backpressured: result.overflow > 0
   };
 }
 
@@ -670,9 +718,16 @@ async function handleBridgePayload(message) {
     const accounts = Array.isArray(message.payload?.accounts)
       ? message.payload.accounts.map(safeWatchAccount).filter((account) => account.handle)
       : [];
+    snapshotRevision += 1;
     return socialRequest('/bridge/watchlist/snapshot', {
       method: 'POST',
-      body: { accounts: accounts.slice(0, 5_000), complete: true }
+      body: {
+        accounts: accounts.slice(0, 5_000),
+        complete: true,
+        snapshotSessionId: SNAPSHOT_SESSION_ID,
+        snapshotSessionStartedAt: SNAPSHOT_SESSION_STARTED_AT,
+        snapshotRevision
+      }
     });
   }
   throw new Error('Unsupported bridge payload');
@@ -721,7 +776,38 @@ async function findDeBotTabs() {
   return tabs.filter((tab) => Number.isSafeInteger(tab.id));
 }
 
+function isDeBotSenderUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return url.protocol === 'https:' && url.hostname === 'debot.ai';
+  } catch {
+    return false;
+  }
+}
+
+function isRadarSenderUrl(value, { write = false } = {}) {
+  try {
+    const url = new URL(String(value || ''));
+    const allowedOrigin = write
+      ? url.origin === RADAR_WRITE_ORIGIN
+      : RADAR_READ_ORIGINS.has(url.origin);
+    return allowedOrigin && /^\/robinhood-radar(?:\/|$)/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isRadarContentSender(sender, options) {
+  if (!chrome.runtime.id || sender?.id !== chrome.runtime.id) return false;
+  if (!Number.isSafeInteger(Number(sender?.tab?.id))) return false;
+  if (!isRadarSenderUrl(sender?.url, options)) return false;
+  return !sender?.tab?.url || isRadarSenderUrl(sender.tab.url, options);
+}
+
 async function isManagedDeBotSender(sender) {
+  if (!chrome.runtime.id || sender?.id !== chrome.runtime.id) return false;
+  if (!isDeBotSenderUrl(sender?.url)) return false;
+  if (sender?.tab?.url && !isDeBotSenderUrl(sender.tab.url)) return false;
   const tabId = Number(sender?.tab?.id);
   if (!Number.isSafeInteger(tabId)) return false;
   const state = await loadRecoveryState();
@@ -869,44 +955,59 @@ function runBridgeMaintenance() {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const run = async () => {
     if (!message || typeof message !== 'object') throw new Error('Invalid bridge message');
-    if (message.source === 'debot-social-relay' && ['heartbeat', 'posts', 'watchlist'].includes(message.type)) {
-      return handleBridgePayload(message);
-    }
-    if (message.source === 'debot-social-relay' && message.type === 'poll-commands') {
-      return socialRequest('/bridge/commands?limit=50');
-    }
-    if (message.source === 'debot-social-relay' && message.type === 'poll-analysis-jobs') {
-      if (!(await isManagedDeBotSender(sender))) return { ok: true, jobs: [], managed: false };
-      const requestedLimit = Number(message.payload?.limit);
-      const limit = Number.isSafeInteger(requestedLimit)
-        ? Math.min(MAX_ANALYSIS_CONCURRENCY, Math.max(1, requestedLimit))
-        : MAX_ANALYSIS_CONCURRENCY;
-      return socialRequest(`/bridge/debot/jobs?limit=${limit}`);
-    }
-    if (message.source === 'debot-social-relay' && message.type === 'command-result') {
-      const commandId = Number(message.payload?.commandId);
-      if (!Number.isSafeInteger(commandId) || commandId <= 0) throw new Error('Invalid command id');
-      return socialRequest(`/bridge/commands/${commandId}/ack`, {
-        method: 'POST',
-        body: {
-          success: message.payload?.success === true,
-          error: redactSensitiveText(message.payload?.error),
-          remoteId: String(message.payload?.remoteId || '')
-        }
-      });
-    }
-    if (message.source === 'debot-social-relay' && message.type === 'analysis-result') {
-      return queueAnalysisResult(message.payload);
+    if (message.source === 'debot-social-relay') {
+      if (!(await isManagedDeBotSender(sender))) {
+        if (message.type === 'poll-commands') return { ok: true, commands: [], managed: false };
+        if (message.type === 'poll-analysis-jobs') return { ok: true, jobs: [], managed: false };
+        if (['posts', 'analysis-result'].includes(message.type)) return { durable: false, managed: false };
+        return { accepted: false, managed: false };
+      }
+      if (['heartbeat', 'posts', 'watchlist'].includes(message.type)) {
+        return handleBridgePayload(message);
+      }
+      if (message.type === 'poll-commands') {
+        return socialRequest('/bridge/commands?limit=50');
+      }
+      if (message.type === 'poll-analysis-jobs') {
+        const requestedLimit = Number(message.payload?.limit);
+        const limit = Number.isSafeInteger(requestedLimit)
+          ? Math.min(MAX_ANALYSIS_CONCURRENCY, Math.max(1, requestedLimit))
+          : MAX_ANALYSIS_CONCURRENCY;
+        return socialRequest(`/bridge/debot/jobs?limit=${limit}`);
+      }
+      if (message.type === 'command-result') {
+        const commandId = Number(message.payload?.commandId);
+        if (!Number.isSafeInteger(commandId) || commandId <= 0) throw new Error('Invalid command id');
+        return socialRequest(`/bridge/commands/${commandId}/ack`, {
+          method: 'POST',
+          body: {
+            success: message.payload?.success === true,
+            error: redactSensitiveText(message.payload?.error),
+            remoteId: String(message.payload?.remoteId || ''),
+            verifiedAbsent: message.payload?.verifiedAbsent === true
+          }
+        });
+      }
+      if (message.type === 'analysis-result') {
+        return queueAnalysisResult(message.payload);
+      }
+      throw new Error('Unsupported DeBot relay message');
     }
     if (message.source === 'robinhood-radar-content' && message.type === 'status') {
+      if (!isRadarContentSender(sender, { write: false })) {
+        throw new Error('Untrusted Radar status sender');
+      }
       const value = await settings();
       return { configured: Boolean(value.bridgeToken) };
     }
     if (message.source === 'robinhood-radar-content' && message.type === 'api') {
+      if (!isRadarContentSender(sender, { write: true })) {
+        throw new Error('Radar social writes require the trusted HTTPS page');
+      }
       const path = String(message.command?.path || '');
       if (!/^\/watchlist(?:\/batch|\/\d+)?$/.test(path)) throw new Error('Radar requested a disallowed social route');
       const method = String(message.command?.method || 'GET').toUpperCase();
-      if (!['POST', 'DELETE'].includes(method)) throw new Error('Radar requested a disallowed method');
+      if (!['POST', 'PATCH', 'DELETE'].includes(method)) throw new Error('Radar requested a disallowed method');
       return socialRequest(path, { method, body: message.command?.body ?? null });
     }
     if (message.source === 'bridge-options' && message.type === 'get-settings') {
@@ -921,7 +1022,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     throw new Error('Unsupported bridge message');
   };
-  void run().then((payload) => sendResponse({ ok: true, payload })).catch(async (error) => {
+  let operation;
+  if (message?.source === 'debot-social-relay' && message.type === 'watchlist') {
+    operation = watchlistUploadQueue.catch(() => {}).then(run);
+    watchlistUploadQueue = operation;
+  } else if (message?.source === 'debot-social-relay'
+    && message.type === 'command-result'
+    && message.payload?.success === true) {
+    // The page emits its verified complete snapshot before the success result.
+    // Keeping both on this queue prevents the command acknowledgement from
+    // racing ahead of that snapshot at the VPS.
+    operation = watchlistUploadQueue.then(run);
+    watchlistUploadQueue = operation;
+  } else {
+    operation = run();
+  }
+  void operation.then((payload) => sendResponse({ ok: true, payload })).catch(async (error) => {
     await updateBadge('!', '#b33a45');
     sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
   });

@@ -9,6 +9,7 @@ import { createSocialConfig } from '../src/social/config.js';
 import {
   normalizeFeedSources,
   normalizeSocialPost,
+  normalizeWatchEventTypes,
   parseSocialActivityIdentity
 } from '../src/social/normalize.js';
 import { createSocialStore } from '../src/social/store.js';
@@ -72,13 +73,35 @@ test('social feed sources normalize aliases, flags, ordering and missing values'
   }).feedSources, ['featured', 'my']);
 });
 
+test('post kinds normalize known aliases and reject explicitly unknown values', () => {
+  for (const [kind, expected] of [
+    ['tweet', 'post'],
+    ['retweet', 'repost'],
+    ['quote_tweet', 'quote'],
+    ['delTweet', 'delete']
+  ]) {
+    assert.equal(normalizeSocialPost({ source: 'x', id: `kind-${kind}`, kind }).kind, expected);
+  }
+  assert.equal(normalizeSocialPost({ source: 'x', id: 'kind-default' }).kind, 'post');
+  assert.throws(
+    () => normalizeSocialPost({ source: 'x', id: 'kind-unknown', kind: 'list_update' }),
+    /Unsupported social post kind/
+  );
+  assert.throws(
+    () => normalizeSocialPost({ source: 'x', id: 'kind-empty', kind: '' }),
+    /Unsupported social post kind/
+  );
+});
+
 test('follow and unfollow activity IDs normalize without splitting underscored handles', () => {
   const encodedUnfollow = Buffer.from('unfollow:star_okx:bankrbot').toString('base64url');
   assert.deepEqual(parseSocialActivityIdentity(encodedUnfollow, '@Star_OKX'), {
     kind: 'unfollow',
     actorHandle: 'star_okx',
     targetHandle: 'bankrbot',
-    canonicalId: 'unfollow:star_okx:bankrbot'
+    canonicalId: 'unfollow:star_okx:bankrbot',
+    occurrenceAt: null,
+    occurrenceId: 'unfollow:star_okx:bankrbot'
   });
 
   const unfollow = normalizeSocialPost({
@@ -109,44 +132,93 @@ test('follow and unfollow activity IDs normalize without splitting underscored h
   });
   assert.equal(explicitRelationship.externalId, 'follow:alice:bob');
   assert.equal(explicitRelationship.authorFollowers, 123);
-  const missingActor = normalizeSocialPost({
+  assert.throws(() => normalizeSocialPost({
     source: 'twitter',
     id: 'missing-actor',
     kind: 'follow',
     target: { handle: 'bob' }
-  });
-  assert.equal(missingActor._nonTweetReason, 'non-tweet:follow');
-  const missingTarget = normalizeSocialPost({
+  }), /valid actor and target handles/);
+  assert.throws(() => normalizeSocialPost({
     source: 'twitter',
     id: 'missing-target',
     kind: 'unfollow',
     author: { handle: 'alice' }
-  });
-  assert.equal(missingTarget._nonTweetReason, 'non-tweet:unfollow');
+  }), /valid actor and target handles/);
 });
 
-test('activity inference flags conflicting relationship identities for filtering', () => {
+test('activity inference rejects conflicting relationship identities', () => {
   const mismatched = Buffer.from('follow:alice:bob').toString('base64url');
   assert.equal(parseSocialActivityIdentity(mismatched, 'charlie'), null);
 
-  const actorMismatch = normalizeSocialPost({
+  assert.throws(() => normalizeSocialPost({
     source: 'twitter',
     id: mismatched,
     authorHandle: 'charlie',
     kind: 'follow',
     target: { handle: 'bob' }
-  });
-  assert.equal(actorMismatch._nonTweetReason, 'non-tweet:follow');
+  }), /identity conflicts/);
 
   const targetMismatch = Buffer.from('follow:alice:bob').toString('base64url');
-  const conflictingTarget = normalizeSocialPost({
+  assert.throws(() => normalizeSocialPost({
     source: 'twitter',
     id: targetMismatch,
     authorHandle: 'alice',
     kind: 'follow',
     target: { handle: 'charlie' }
-  });
-  assert.equal(conflictingTarget._nonTweetReason, 'non-tweet:follow');
+  }), /target conflicts/);
+});
+
+test('repeated relationship occurrences keep exact identities across database reopen', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-social-relationship-occurrences-'));
+  const filename = path.join(directory, 'social.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const firstAt = Date.parse('2026-07-17T12:00:00.000Z');
+  const secondAt = Date.parse('2026-07-18T12:00:00.123Z');
+
+  let store = createSocialStore(filename);
+  const first = store.upsertPosts([{
+    source: 'twitter',
+    id: 'first-follow-observation',
+    kind: 'follow',
+    authorHandle: 'alice',
+    targetHandle: 'bob',
+    publishedAt: firstAt,
+    sourceUpdatedAt: firstAt
+  }])[0];
+  const second = store.upsertPosts([{
+    source: 'twitter',
+    id: 'second-follow-observation',
+    kind: 'follow',
+    authorHandle: 'alice',
+    targetHandle: 'bob',
+    publishedAt: secondAt,
+    sourceUpdatedAt: secondAt
+  }])[0];
+  assert.equal(first.post.externalId, 'follow:alice:bob');
+  assert.equal(second.post.externalId, `follow:alice:bob:${secondAt}`);
+
+  const repeated = store.upsertPosts([{
+    source: 'twitter',
+    id: `follow:alice:bob:${secondAt}`,
+    authorHandle: 'alice',
+    targetHandle: 'bob',
+    publishedAt: secondAt,
+    sourceUpdatedAt: secondAt
+  }])[0];
+  assert.equal(repeated.action, 'unchanged');
+  assert.equal(store.listPosts().length, 2);
+  assert.deepEqual(
+    store.listPosts().map((post) => post.externalId).sort(),
+    ['follow:alice:bob', `follow:alice:bob:${secondAt}`].sort()
+  );
+  store.close();
+
+  store = createSocialStore(filename);
+  assert.deepEqual(
+    store.listPosts().map((post) => post.externalId).sort(),
+    ['follow:alice:bob', `follow:alice:bob:${secondAt}`].sort()
+  );
+  store.close();
 });
 
 test('social posts are normalized, deduplicated, updated and tombstoned in place', (t) => {
@@ -203,6 +275,63 @@ test('social posts are normalized, deduplicated, updated and tombstoned in place
     store.listChanges().map((change) => change.type),
     ['post.created', 'post.updated', 'post.deleted']
   );
+});
+
+test('older bridge retries cannot restore a newer deletion tombstone', (t) => {
+  const { store } = fixture(t);
+  const publishedAt = Date.parse('2026-07-17T11:59:00Z');
+  const deletedAt = Date.parse('2026-07-17T12:02:00Z');
+  const restoredAt = Date.parse('2026-07-17T12:03:00Z');
+  store.upsertPosts([{
+    source: 'twitter',
+    id: 'deleted-retry',
+    authorHandle: 'alice',
+    text: 'original',
+    publishedAt,
+    sourceUpdatedAt: publishedAt,
+    deleted: false,
+    deletedAt: null
+  }]);
+  const deleted = store.upsertPosts([{
+    source: 'twitter',
+    id: 'deleted-retry',
+    kind: 'delete',
+    authorHandle: 'alice',
+    publishedAt,
+    sourceUpdatedAt: deletedAt,
+    deleted: true,
+    deletedAt
+  }])[0];
+  assert.equal(deleted.action, 'deleted');
+
+  const staleRetry = store.upsertPosts([{
+    source: 'twitter',
+    id: 'deleted-retry',
+    kind: 'post',
+    authorHandle: 'alice',
+    text: 'original',
+    publishedAt,
+    sourceUpdatedAt: publishedAt,
+    deleted: false,
+    deletedAt: null
+  }])[0];
+  assert.equal(staleRetry.action, 'unchanged');
+  assert.equal(staleRetry.post.deleted, true);
+  assert.equal(staleRetry.post.kind, 'delete');
+
+  const restored = store.upsertPosts([{
+    source: 'twitter',
+    id: 'deleted-retry',
+    kind: 'post',
+    authorHandle: 'alice',
+    text: 'restored',
+    publishedAt,
+    sourceUpdatedAt: restoredAt,
+    deleted: false,
+    deletedAt: null
+  }])[0];
+  assert.equal(restored.action, 'restored');
+  assert.equal(restored.post.deleted, false);
 });
 
 test('explicit contract metadata wins over duplicate addresses detected in post text', (t) => {
@@ -310,7 +439,7 @@ test('feed membership survives database reopen and legacy schema migration', (t)
   store.close();
 });
 
-test('ingestion filters relationship and profile activity while preserving real posts', (t) => {
+test('ingestion stores validated relationship and profile activity with exact profile details', (t) => {
   const { store } = fixture(t);
   const encoded = Buffer.from('unfollow:star_okx:bankrbot').toString('base64url');
   const results = store.upsertPosts([
@@ -322,27 +451,27 @@ test('ingestion filters relationship and profile activity while preserving real 
     },
     {
       source: 'twitter',
-      id: 'profile:star_okx:1785048000000',
-      kind: 'profile',
-      authorHandle: 'star_okx'
-    },
-    {
-      source: 'twitter',
       id: 'rename-event',
       kind: 'reName',
-      authorHandle: 'star_okx'
+      authorHandle: 'star_okx',
+      oldName: 'Star',
+      newName: 'Star_OKX'
     },
     {
       source: 'twitter',
       id: 'avatar-event',
       type: 'reImage',
-      authorHandle: 'star_okx'
+      authorHandle: 'star_okx',
+      oldAvatarUrl: 'https://pbs.twimg.com/profile_images/old.jpg',
+      newAvatarUrl: 'https://pbs.twimg.com/profile_images/new.jpg'
     },
     {
       source: 'twitter',
-      id: 'avatar-alias-event',
-      type: 'reAvatar',
-      authorHandle: 'star_okx'
+      id: 'profile:star_okx:1785048000000',
+      kind: 'profile',
+      authorHandle: 'star_okx',
+      profileChanges: ['bio'],
+      profileDetail: { bio: { before: 'old bio', after: 'new bio' } }
     },
     {
       source: 'twitter',
@@ -353,26 +482,70 @@ test('ingestion filters relationship and profile activity while preserving real 
     }
   ]);
 
-  assert.deepEqual(results.map((result) => result.action), [
-    'filtered',
-    'filtered',
-    'filtered',
-    'filtered',
-    'filtered',
-    'created'
-  ]);
-  assert.deepEqual(results.slice(0, 5).map((result) => result.reason), [
-    'non-tweet:unfollow',
-    'non-tweet:profile',
-    'non-tweet:profile',
-    'non-tweet:profile',
-    'non-tweet:profile'
-  ]);
-  assert.deepEqual(store.listPosts().map((post) => post.externalId), ['tweet-allowed']);
-  assert.deepEqual(store.listChanges().map((change) => change.type), ['post.created']);
+  assert.deepEqual(results.map((result) => result.action), Array(results.length).fill('created'));
+  assert.equal(results[0].post.kind, 'unfollow');
+  assert.equal(results[0].post.target.handle, 'bankrbot');
+  assert.deepEqual(results[1].post.profileChanges, ['name']);
+  assert.deepEqual(results[1].post.profileDetail.name, { before: 'Star', after: 'Star_OKX' });
+  assert.deepEqual(results[2].post.profileChanges, ['avatar']);
+  assert.deepEqual(results[2].post.profileDetail.avatar, {
+    before: 'https://pbs.twimg.com/profile_images/old.jpg',
+    after: 'https://pbs.twimg.com/profile_images/new.jpg'
+  });
+  assert.deepEqual(results[3].post.profileChanges, ['bio']);
+  assert.deepEqual(results[3].post.profileDetail.bio, { before: 'old bio', after: 'new bio' });
+  assert.throws(() => store.upsertPosts([{
+    source: 'twitter',
+    id: 'profile-without-change',
+    kind: 'profile',
+    authorHandle: 'star_okx'
+  }]), /at least one verified profile change/);
+  assert.equal(store.listPosts().length, 5);
+  assert.deepEqual(store.listChanges().map((change) => change.type), Array(5).fill('post.created'));
 });
 
-test('legacy non-tweet cleanup is safe, durable and idempotent', (t) => {
+test('partial duplicates preserve every verified change from one profile occurrence', (t) => {
+  const { store } = fixture(t);
+  const occurrenceAt = Date.parse('2026-07-25T12:00:00Z');
+  const externalId = `profile:star_okx:${occurrenceAt}`;
+  store.upsertPosts([{
+    source: 'twitter',
+    id: externalId,
+    kind: 'profile',
+    authorHandle: 'star_okx',
+    profileChanges: ['name'],
+    profileDetail: { name: { before: 'Star', after: 'Star OKX' } },
+    sourceUpdatedAt: occurrenceAt
+  }]);
+  const expanded = store.upsertPosts([{
+    source: 'twitter',
+    id: externalId,
+    kind: 'profile',
+    authorHandle: 'star_okx',
+    profileChanges: ['avatar', 'bio'],
+    profileDetail: {
+      avatar: { before: 'https://example.test/old.png', after: 'https://example.test/new.png' },
+      bio: { before: 'old bio', after: 'new bio' }
+    },
+    sourceUpdatedAt: occurrenceAt
+  }])[0];
+  assert.deepEqual(expanded.post.profileChanges, ['name', 'avatar', 'bio']);
+
+  const partialRetry = store.upsertPosts([{
+    source: 'twitter',
+    id: externalId,
+    kind: 'profile',
+    authorHandle: 'star_okx',
+    profileChanges: ['name'],
+    profileDetail: { name: { before: 'Star', after: 'Star OKX' } },
+    sourceUpdatedAt: occurrenceAt
+  }])[0];
+  assert.equal(partialRetry.action, 'unchanged');
+  assert.deepEqual(partialRetry.post.profileChanges, ['name', 'avatar', 'bio']);
+  assert.deepEqual(partialRetry.post.profileDetail.bio, { before: 'old bio', after: 'new bio' });
+});
+
+test('legacy relationship and profile activity migration is safe, durable and non-destructive', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-social-profile-migration-'));
   const filename = path.join(directory, 'social.sqlite');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -448,18 +621,22 @@ test('legacy non-tweet cleanup is safe, durable and idempotent', (t) => {
   legacy.close();
 
   store = createSocialStore(filename);
-  assert.deepEqual(store.listPosts().map((post) => post.externalId), ['1900000000000000000']);
-  assert.equal(store.initialNonTweetPurge.postsDeleted, 4);
-  assert.equal(store.initialNonTweetPurge.changesDeleted, 5);
-  assert.equal(store.listChanges().length, 2);
-  assert.equal(store.listChanges().some((change) => change.entityId === '999001'), false);
-  assert.equal(store.listChanges().some((change) => change.entityId === '999002'), true);
-  assert.deepEqual(store.purgeNonTweetEvents(), { postsDeleted: 0, changesDeleted: 0 });
+  let posts = store.listPosts();
+  assert.equal(posts.length, 4);
+  assert.equal(posts.some((post) => post.externalId === '1900000000000000000' && post.kind === 'post'), true);
+  const migratedFollow = posts.find((post) => post.kind === 'follow');
+  assert.equal(migratedFollow.externalId, 'follow:star_okx:bankrbot');
+  assert.equal(migratedFollow.target.handle, 'bankrbot');
+  const profiles = posts.filter((post) => post.kind === 'profile');
+  assert.equal(profiles.length, 2);
+  assert.equal(profiles.every((post) => post.profileChanges.includes('avatar')), true);
   store.close();
 
   store = createSocialStore(filename);
-  assert.deepEqual(store.listPosts().map((post) => post.externalId), ['1900000000000000000']);
-  assert.deepEqual(store.initialNonTweetPurge, { postsDeleted: 0, changesDeleted: 0 });
+  posts = store.listPosts();
+  assert.equal(posts.length, 4);
+  assert.equal(posts.filter((post) => post.kind === 'profile').every((post) =>
+    post.profileChanges.includes('avatar')), true);
   store.close();
 });
 
@@ -467,10 +644,20 @@ test('watchlist intents create authenticated bridge commands and acknowledgement
   const { store, setNow } = fixture(t);
   const added = store.addWatchAccounts([
     '@alice',
-    { platform: 'binance-square', handle: 'Bob', name: 'Bob Square' }
+    {
+      platform: 'binance-square',
+      handle: 'Bob',
+      name: 'Bob Square',
+      eventTypes: ['unfollow', 'post', 'post']
+    }
   ]);
   assert.equal(added.length, 2);
   assert.equal(added[0].entry.syncStatus, 'pending');
+  assert.deepEqual(
+    added[0].entry.eventTypes,
+    normalizeWatchEventTypes(undefined, { defaultAll: true })
+  );
+  assert.deepEqual(added[1].entry.eventTypes, ['post', 'unfollow']);
   assert.equal(store.getCounts().pendingCommands, 2);
 
   const claimed = store.claimCommands({ limit: 10, leaseMs: 30_000 });
@@ -483,11 +670,103 @@ test('watchlist intents create authenticated bridge commands and acknowledgement
   assert.equal(alice.syncStatus, 'synced');
   assert.equal(alice.remoteId, 'remote-alice');
 
+  const pendingBeforeUpdate = store.getCounts().pendingCommands;
+  const latestBeforeUpdate = store.getLatestChangeId();
+  const updated = store.updateWatchAccountEventTypes(alice.id, ['profile_bio', 'reply', 'reply']);
+  assert.equal(updated.changed, true);
+  assert.deepEqual(updated.entry.eventTypes, ['reply', 'profile_bio']);
+  assert.equal(updated.entry.syncStatus, 'synced');
+  assert.equal(store.getCounts().pendingCommands, pendingBeforeUpdate);
+  assert.equal(store.getLatestChangeId(), latestBeforeUpdate + 1);
+  const idempotent = store.updateWatchAccountEventTypes(alice.id, ['reply', 'profile_bio']);
+  assert.equal(idempotent.changed, false);
+  assert.equal(idempotent.change, null);
+  assert.equal(store.getLatestChangeId(), latestBeforeUpdate + 1);
+  const empty = store.updateWatchAccountEventTypes(alice.id, []);
+  assert.deepEqual(empty.entry.eventTypes, []);
+  assert.throws(() => store.updateWatchAccountEventTypes(alice.id, 'post'), /must be an array/);
+  assert.throws(() => store.updateWatchAccountEventTypes(alice.id, ['unknown']), /Unsupported social watch event type/);
+
   const removed = store.removeWatchAccount(alice.id);
   assert.equal(removed.entry.desiredState, 'removed');
   assert.equal(removed.command.type, 'watchlist.delete');
   assert.equal(store.listWatchlist().some((entry) => entry.id === alice.id), false);
   assert.equal(store.listWatchlist({ includeRemoved: true }).some((entry) => entry.id === alice.id), true);
+});
+
+test('personal watchlist filtering applies account event preferences before its result limit', (t) => {
+  const { store } = fixture(t);
+  const watched = store.addWatchAccounts(['alice'])[0].entry;
+  store.upsertPosts([
+    {
+      source: 'twitter',
+      id: 'plain-post',
+      kind: 'post',
+      authorHandle: 'alice',
+      text: 'plain monitored post'
+    },
+    {
+      source: 'twitter',
+      id: 'profile:alice:1784289600000',
+      kind: 'profile',
+      authorHandle: 'alice',
+      profileChanges: ['avatar', 'name'],
+      profileDetail: {
+        name: { before: 'Alice', after: 'Alice 2' },
+        avatar: { before: 'https://example.test/old.png', after: 'https://example.test/new.png' }
+      }
+    },
+    {
+      source: 'twitter',
+      id: 'deleted-post',
+      kind: 'post',
+      authorHandle: 'alice',
+      text: 'deleted monitored post',
+      deleted: true,
+      deletedAt: 1784289601000
+    },
+    {
+      source: 'twitter',
+      id: 'follow-observation',
+      kind: 'follow',
+      authorHandle: 'alice',
+      targetHandle: 'bob'
+    },
+    {
+      source: 'twitter',
+      id: 'unwatched-noise',
+      kind: 'post',
+      authorHandle: 'charlie',
+      text: 'not in the personal watchlist'
+    }
+  ]);
+
+  const visibleIds = () => store.listPosts({ watchlistOnly: true, limit: 100 })
+    .map((post) => post.externalId)
+    .sort();
+  assert.deepEqual(visibleIds(), [
+    'deleted-post',
+    'follow:alice:bob',
+    'plain-post',
+    'profile:alice:1784289600000'
+  ]);
+
+  store.updateWatchAccountEventTypes(watched.id, ['post']);
+  assert.deepEqual(visibleIds(), ['plain-post']);
+  assert.deepEqual(
+    store.listPosts({ watchlistOnly: true, limit: 1 }).map((post) => post.externalId),
+    ['plain-post']
+  );
+  store.updateWatchAccountEventTypes(watched.id, ['delete']);
+  assert.deepEqual(visibleIds(), ['deleted-post']);
+  store.updateWatchAccountEventTypes(watched.id, ['profile_avatar']);
+  assert.deepEqual(visibleIds(), ['profile:alice:1784289600000']);
+  store.updateWatchAccountEventTypes(watched.id, ['profile_bio']);
+  assert.deepEqual(visibleIds(), []);
+  store.updateWatchAccountEventTypes(watched.id, ['follow']);
+  assert.deepEqual(visibleIds(), ['follow:alice:bob']);
+  store.updateWatchAccountEventTypes(watched.id, []);
+  assert.deepEqual(visibleIds(), []);
 });
 
 test('complete remote watchlist snapshots reconcile direct DeBot additions and removals', (t) => {
@@ -497,14 +776,68 @@ test('complete remote watchlist snapshots reconcile direct DeBot additions and r
   store.acknowledgeCommand(command.id, { success: true });
 
   const reconciled = store.reconcileRemoteWatchlist([
-    { handle: 'bob', remoteId: 'debot-bob' }
+    { handle: 'bob', remoteId: 'debot-bob', eventTypes: ['post'] }
   ]);
   const byHandle = new Map(reconciled.entries.map((entry) => [entry.handle, entry]));
   assert.equal(byHandle.get('alice').desiredState, 'removed');
   assert.equal(byHandle.get('alice').syncStatus, 'synced');
   assert.equal(byHandle.get('bob').desiredState, 'active');
   assert.equal(byHandle.get('bob').syncStatus, 'synced');
+  assert.deepEqual(
+    byHandle.get('bob').eventTypes,
+    normalizeWatchEventTypes(undefined, { defaultAll: true })
+  );
+  store.updateWatchAccountEventTypes(byHandle.get('bob').id, ['follow', 'profile_avatar']);
+  const repeated = store.reconcileRemoteWatchlist([{
+    handle: 'bob',
+    remoteId: 'debot-bob',
+    metadata: { monitorLevel: 'important' },
+    eventTypes: ['post']
+  }]);
+  assert.deepEqual(
+    repeated.entries.find((entry) => entry.handle === 'bob').eventTypes,
+    ['follow', 'profile_avatar']
+  );
   assert.equal(local.entry.id > 0, true);
+});
+
+test('legacy watchlist rows migrate to all event types and profile details survive database reopen', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-social-watch-migration-'));
+  const filename = path.join(directory, 'social.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  let store = createSocialStore(filename);
+  store.addWatchAccounts(['alice']);
+  const profile = store.upsertPosts([{
+    source: 'twitter',
+    id: 'profile-persisted',
+    kind: 'profile',
+    authorHandle: 'alice',
+    profileChanges: ['bio', 'name'],
+    profileDetail: {
+      name: { before: 'Alice', after: 'Alice 2' },
+      bio: { before: 'before bio', after: 'after bio' }
+    }
+  }])[0].post;
+  assert.deepEqual(profile.profileChanges, ['name', 'bio']);
+  store.close();
+
+  const legacy = new DatabaseSync(filename);
+  legacy.exec('ALTER TABLE social_watchlist DROP COLUMN event_types_json');
+  legacy.close();
+
+  store = createSocialStore(filename);
+  assert.deepEqual(
+    store.listWatchlist()[0].eventTypes,
+    normalizeWatchEventTypes(undefined, { defaultAll: true })
+  );
+  const reopenedProfile = store.getPost('twitter', 'profile-persisted');
+  assert.deepEqual(reopenedProfile.profileChanges, ['name', 'bio']);
+  assert.deepEqual(reopenedProfile.profileDetail, {
+    name: { before: 'Alice', after: 'Alice 2' },
+    bio: { before: 'before bio', after: 'after bio' }
+  });
+  store.close();
 });
 
 test('remote snapshots do not overwrite a newer pending local watchlist intent', (t) => {
@@ -526,6 +859,113 @@ test('remote snapshots do not overwrite a newer pending local watchlist intent',
   const failedAdd = store.listWatchlist({ includeRemoved: true }).find((entry) => entry.handle === 'bob');
   assert.equal(failedAdd.desiredState, 'active');
   assert.equal(failedAdd.syncStatus, 'failed');
+});
+
+test('versioned and legacy stale snapshots cannot revive a confirmed removal tombstone', (t) => {
+  const initialNow = Date.parse('2026-07-17T12:00:00Z');
+  const { store, setNow } = fixture(t, initialNow);
+  const alice = store.addWatchAccounts(['alice'])[0].entry;
+  const addCommand = store.claimCommands()[0];
+  store.acknowledgeCommand(addCommand.id, { success: true, remoteId: '42' });
+
+  setNow(initialNow + 2_000);
+  store.removeWatchAccount(alice.id);
+  const unverifiedDelete = store.claimCommands()[0];
+  const rejectedAck = store.acknowledgeCommand(unverifiedDelete.id, { success: true });
+  assert.equal(rejectedAck.status, 'failed');
+  assert.match(rejectedAck.lastError, /did not verify/i);
+
+  setNow(initialNow + 3_000);
+  store.removeWatchAccount(alice.id);
+  const verifiedDelete = store.claimCommands()[0];
+  const completedAck = store.acknowledgeCommand(verifiedDelete.id, {
+    success: true,
+    verifiedAbsent: true
+  });
+  assert.equal(completedAck.status, 'completed');
+  assert.equal(
+    store.listWatchlist({ includeRemoved: true }).find((entry) => entry.id === alice.id).syncStatus,
+    'synced'
+  );
+
+  const session = {
+    snapshotSessionId: 'bridge-session-a',
+    snapshotSessionStartedAt: initialNow + 1_000,
+    snapshotRevision: 2
+  };
+  const accepted = store.reconcileRemoteWatchlist([], session);
+  assert.equal(accepted.snapshot.accepted, true);
+  assert.equal(store.getBridgeState().snapshotRevision, 2);
+
+  const staleRevision = store.reconcileRemoteWatchlist([{
+    handle: 'alice',
+    remoteId: '42'
+  }], { ...session, snapshotRevision: 1 });
+  assert.equal(staleRevision.snapshot.accepted, false);
+  assert.equal(staleRevision.snapshot.reason, 'stale-snapshot-revision');
+
+  const olderSession = store.reconcileRemoteWatchlist([{
+    handle: 'alice',
+    remoteId: '42'
+  }], {
+    snapshotSessionId: 'bridge-session-older',
+    snapshotSessionStartedAt: initialNow,
+    snapshotRevision: 99
+  });
+  assert.equal(olderSession.snapshot.accepted, false);
+  assert.equal(olderSession.snapshot.reason, 'older-snapshot-session');
+
+  const legacy = store.reconcileRemoteWatchlist([{ handle: 'alice', remoteId: '42' }]);
+  assert.equal(legacy.snapshot.accepted, false);
+  assert.equal(legacy.snapshot.versioned, false);
+  assert.equal(legacy.snapshot.reason, 'legacy-snapshot-after-versioned-session');
+
+  const sameSessionNewerRevision = store.reconcileRemoteWatchlist([{
+    handle: 'alice',
+    remoteId: '42'
+  }], { ...session, snapshotRevision: 3 });
+  assert.equal(sameSessionNewerRevision.snapshot.accepted, true);
+  const tombstone = store.listWatchlist({ includeRemoved: true }).find((entry) => entry.id === alice.id);
+  assert.equal(tombstone.desiredState, 'removed');
+  assert.equal(tombstone.syncStatus, 'synced');
+  assert.equal(store.listWatchlist().some((entry) => entry.handle === 'alice'), false);
+  assert.deepEqual(store.getBridgeState(), {
+    bridgeId: '',
+    version: '',
+    capabilities: [],
+    sessionId: '',
+    snapshotSessionId: 'bridge-session-a',
+    snapshotSessionStartedAt: initialNow + 1_000,
+    snapshotRevision: 3,
+    lastSeenAt: null
+  });
+});
+
+test('legacy snapshots cannot remove accounts added by a newer versioned snapshot', (t) => {
+  const initialNow = Date.parse('2026-07-17T12:00:00Z');
+  const { store } = fixture(t, initialNow);
+  const session = {
+    snapshotSessionId: 'bridge-session-current',
+    snapshotSessionStartedAt: initialNow,
+    snapshotRevision: 1
+  };
+
+  store.reconcileRemoteWatchlist([{ handle: 'alice' }], session);
+  const current = store.reconcileRemoteWatchlist([
+    { handle: 'alice' },
+    { handle: 'bob' }
+  ], { ...session, snapshotRevision: 2 });
+  assert.equal(current.snapshot.accepted, true);
+  assert.deepEqual(store.listWatchlist().map((entry) => entry.handle), ['alice', 'bob']);
+
+  const lateLegacy = store.reconcileRemoteWatchlist([{ handle: 'alice' }]);
+  assert.deepEqual(lateLegacy.snapshot, {
+    accepted: false,
+    versioned: false,
+    reason: 'legacy-snapshot-after-versioned-session'
+  });
+  assert.deepEqual(lateLegacy.changes, []);
+  assert.deepEqual(store.listWatchlist().map((entry) => entry.handle), ['alice', 'bob']);
 });
 
 test('DeBot jobs dedupe inflight work, rotate expired leases and cache successful results', (t) => {
