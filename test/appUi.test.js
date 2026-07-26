@@ -1113,8 +1113,9 @@ test('social monitoring replaces the visible same-token aggregation panel with a
   assert.match(appJs, /post\.translatedContent/);
   assert.match(appJs, /post\.contractAddresses/);
   assert.match(appJs, /post\.media/);
-  assert.match(stylesCss, /\.monitor-workspace \{[\s\S]*grid-template-columns: minmax\(520px, 1\.35fr\) minmax\(390px, 0\.9fr\)/);
+  assert.match(stylesCss, /\.monitor-workspace \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(stylesCss, /\.social-feed \{[\s\S]*height: min\(820px, calc\(100vh - 118px\)\)/);
+  assert.match(stylesCss, /@media \(min-width: 961px\) and \(max-width: 1220px\)[\s\S]*\.social-monitor-toolbar \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(stylesCss, /@media \(max-width: 960px\)[\s\S]*\.monitor-workspace \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.social-feed \{[\s\S]*height: 68svh/);
 });
@@ -1198,11 +1199,12 @@ test('real-time token events upsert asynchronous market cap and token-age enrich
   assert.match(appJs, /tokenAge !== '待获取'/);
 });
 
-test('real-time feed uses scan-friendly hierarchy, event colors and one-shot arrival emphasis', () => {
-  assert.match(stylesCss, /\.monitor-event-title a \{[\s\S]*font-size: 16px/);
-  assert.match(stylesCss, /\.monitor-event-amount \{[\s\S]*font-size: 15px/);
-  assert.match(stylesCss, /\.monitor-event-item time \{[\s\S]*font-size: 12px/);
-  assert.match(stylesCss, /\.monitor-event-meta span \{[\s\S]*font-size: 12px/);
+test('real-time feed uses a compact scan-friendly hierarchy, event colors and one-shot arrival emphasis', () => {
+  assert.match(stylesCss, /\.monitor-event-item \{[\s\S]*min-height: 84px/);
+  assert.match(stylesCss, /\.monitor-event-title a \{[\s\S]*font-size: 13px/);
+  assert.match(stylesCss, /\.monitor-event-amount \{[\s\S]*font-size: 12px/);
+  assert.match(stylesCss, /\.monitor-event-item time \{[\s\S]*font-size: 10px/);
+  assert.match(stylesCss, /\.monitor-event-meta span \{[\s\S]*font-size: 10px/);
   for (const eventType of ['buy', 'sell', 'transfer', 'token_create']) {
     assert.match(stylesCss, new RegExp(`\\.monitor-event-item\\[data-event-type="${eventType}"\\]`));
   }
