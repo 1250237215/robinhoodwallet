@@ -369,6 +369,7 @@ const state = {
   socialPosts: [],
   socialWatchlist: [],
   socialBridge: { state: 'loading', paired: false, online: false, readOnly: true },
+  socialBridgeObservedAt: null,
   socialCounts: {},
   socialFeedFilter: 'all',
   socialPlatformFilter: 'all',
@@ -764,15 +765,27 @@ function monitorTimestampMs(value) {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-function formatMonitorAge(value) {
+function formatMonitorAge(value, now = Date.now()) {
   const timestamp = monitorTimestampMs(value);
   if (timestamp === null) return '刚刚检测';
-  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
-  if (seconds < 5) return '刚刚';
-  if (seconds < 60) return `${seconds} 秒前`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} 分钟前`;
-  return formatDateTime(timestamp);
+  const seconds = Math.max(0, Math.floor((now - timestamp) / 1000));
+  return `${seconds} 秒前`;
+}
+
+function updateLiveRelativeTimes() {
+  const now = Date.now();
+  for (const time of document.querySelectorAll('time[data-live-timestamp]')) {
+    if (monitorTimestampMs(time.dataset.liveTimestamp) === null) continue;
+    const label = formatMonitorAge(time.dataset.liveTimestamp, now);
+    if (time.textContent !== label) time.textContent = label;
+  }
+  renderMonitorHealth();
+  renderSocialBridgeStatus();
+}
+
+function updateVisibleLiveRelativeTimes() {
+  if (document.hidden || !state.monitorStarted || state.activeTab !== 'monitor') return;
+  updateLiveRelativeTimes();
 }
 
 function normalizeTransactionHash(value) {
@@ -1260,6 +1273,12 @@ function applySocialWatchlistEntry(entry) {
   return true;
 }
 
+function applySocialBridgeStatus(bridge) {
+  if (!bridge || typeof bridge !== 'object') return;
+  state.socialBridge = { ...state.socialBridge, ...bridge };
+  state.socialBridgeObservedAt = performance.now();
+}
+
 function applySocialSnapshot(payload) {
   const record = unwrapRecord(payload || {});
   if (Array.isArray(record.posts)) mergeSocialPosts(record.posts);
@@ -1268,7 +1287,7 @@ function applySocialSnapshot(payload) {
       .filter((entry) => entry?.desiredState !== 'removed')
       .sort((left, right) => String(left.handle || '').localeCompare(String(right.handle || '')));
   }
-  if (record.bridge && typeof record.bridge === 'object') state.socialBridge = { ...state.socialBridge, ...record.bridge };
+  applySocialBridgeStatus(record.bridge);
   if (record.counts && typeof record.counts === 'object') state.socialCounts = { ...record.counts };
   const latestChangeId = finiteNumber(record.latestChangeId);
   if (latestChangeId !== null) state.socialLatestChangeId = Math.max(0, Math.trunc(latestChangeId));
@@ -1347,7 +1366,17 @@ function visibleSocialPosts() {
 
 function renderSocialBridgeStatus() {
   const bridge = state.socialBridge || {};
-  const heartbeatAgeMs = finiteNumber(bridge.heartbeatAgeMs);
+  const reportedHeartbeatAgeMs = finiteNumber(bridge.heartbeatAgeMs);
+  const bridgeObservedAt = finiteNumber(state.socialBridgeObservedAt);
+  const elapsedSinceObservationMs = bridgeObservedAt === null
+    ? 0
+    : Math.max(0, performance.now() - bridgeObservedAt);
+  const heartbeatTimestamp = monitorTimestampMs(bridge.lastSeenAt);
+  const heartbeatAgeMs = reportedHeartbeatAgeMs !== null
+    ? Math.max(0, reportedHeartbeatAgeMs + elapsedSinceObservationMs)
+    : heartbeatTimestamp !== null
+      ? Math.max(0, Date.now() - heartbeatTimestamp)
+      : null;
   const heartbeatCurrent = heartbeatAgeMs !== null
     ? heartbeatAgeMs <= SOCIAL_REALTIME_HEARTBEAT_MAX_AGE_MS
     : Boolean(bridge.online);
@@ -1466,7 +1495,7 @@ function renderSocialFeed() {
                 ${chainTags.map((chain) => `<span class="social-chain-chip" data-chain="${escapeHtml(chain)}">${escapeHtml(CHAIN_CONFIGS[chain]?.label || chain)}</span>`).join('')}
               </div>
             </div>
-            <time class="social-post-time" datetime="${escapeHtml(String(post.publishedAt || ''))}" title="${escapeHtml(formatDateTime(post.publishedAt))}">${escapeHtml(formatMonitorAge(post.publishedAt))}</time>
+            <time class="social-post-time" datetime="${escapeHtml(String(post.publishedAt ?? ''))}" data-live-timestamp="${escapeHtml(String(post.publishedAt ?? ''))}" title="${escapeHtml(formatDateTime(post.publishedAt))}" aria-live="off">${escapeHtml(formatMonitorAge(post.publishedAt))}</time>
           </header>
           ${post.content ? `<p class="social-post-content">${escapeHtml(post.content)}</p>` : ''}
           ${post.translatedContent && post.translatedContent !== post.content ? `<p class="social-post-translation">${escapeHtml(post.translatedContent)}</p>` : ''}
@@ -1552,7 +1581,7 @@ function renderMonitorEvents() {
         : `<strong class="monitor-event-recipient-target monitor-event-token">${escapeHtml(symbol)}</strong>`;
     return `
       <article class="monitor-event-item${isFresh ? ' is-new' : ''}" data-event-id="${escapeHtml(event.id)}" data-event-type="${eventType}">
-        <time datetime="${escapeHtml(String(eventTime || ''))}">${escapeHtml(formatMonitorAge(eventTime))}</time>
+        <time datetime="${escapeHtml(String(eventTime ?? ''))}" data-live-timestamp="${escapeHtml(String(eventTime ?? ''))}" title="${escapeHtml(formatDateTime(eventTime))}" aria-live="off">${escapeHtml(formatMonitorAge(eventTime))}</time>
         <div class="monitor-event-main">
           <div class="monitor-event-title">
             <span class="monitor-event-type ${eventType}">${MONITOR_EVENT_LABELS[eventType]}</span>
@@ -2141,9 +2170,7 @@ async function loadSocialStatus(expectedSequence = state.socialSequence) {
   try {
     const payload = unwrapRecord(await fetchJson(`${SOCIAL_API_ROOT}/status`));
     if (!socialLifecycleIsCurrent(expectedSequence)) return;
-    if (payload.bridge && typeof payload.bridge === 'object') {
-      state.socialBridge = { ...state.socialBridge, ...payload.bridge };
-    }
+    applySocialBridgeStatus(payload.bridge);
     if (payload.counts && typeof payload.counts === 'object') state.socialCounts = { ...payload.counts };
     state.socialConnected = payload.ok !== false;
     renderSocialBridgeStatus();
@@ -2428,6 +2455,10 @@ async function startMonitorPage({ manual = false } = {}) {
   state.monitorTransport = 'loading';
   state.monitorHealth = manual ? {} : state.monitorHealth;
   renderMonitorPage();
+  state.monitorTickTimer = setInterval(() => {
+    synchronizeMonitorAlerts();
+    updateLiveRelativeTimes();
+  }, 1_000);
   void startSocialMonitor({ manual });
   elements.monitorRefreshButton.disabled = true;
   try {
@@ -2449,9 +2480,6 @@ async function startMonitorPage({ manual = false } = {}) {
   }
   if (!chainRequestIsCurrent(context) || sequence !== state.monitorSequence ||
     !state.monitorStarted || state.activeTab !== 'monitor') return;
-  state.monitorTickTimer = setInterval(() => {
-    synchronizeMonitorAlerts();
-  }, 1_000);
   connectMonitorStream(context);
 }
 
@@ -5758,6 +5786,15 @@ window.addEventListener('hashchange', () => {
   if (wallet) void loadWalletDetail(wallet);
 });
 
+document.addEventListener('visibilitychange', updateVisibleLiveRelativeTimes);
+window.addEventListener('focus', updateVisibleLiveRelativeTimes);
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted && state.activeTab === 'monitor' && !state.monitorStarted) {
+    void startMonitorPage();
+    return;
+  }
+  updateVisibleLiveRelativeTimes();
+});
 window.addEventListener('pagehide', stopMonitorTransport);
 
 const initialAddress = normalizeAddress(window.location.hash.slice(1));

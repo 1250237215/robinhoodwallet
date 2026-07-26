@@ -1125,6 +1125,46 @@ test('social monitoring replaces the visible same-token aggregation panel with a
   assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.social-feed \{[\s\S]*height: 68svh/);
 });
 
+test('chain and social elapsed times advance every second without rerendering either feed', () => {
+  const formatterSource = appJs.slice(
+    appJs.indexOf('function formatMonitorAge'),
+    appJs.indexOf('function normalizeTransactionHash')
+  );
+  assert.match(formatterSource, /function formatMonitorAge\(value, now = Date\.now\(\)\)/);
+  assert.match(formatterSource, /Math\.floor\(\(now - timestamp\) \/ 1000\)/);
+  assert.match(formatterSource, /return `\$\{seconds\} 秒前`/);
+  assert.doesNotMatch(formatterSource, /刚刚';|分钟前|formatDateTime\(timestamp\)/);
+  assert.match(appJs, /<time class="social-post-time"[^>]*data-live-timestamp="\$\{escapeHtml\(String\(post\.publishedAt \?\? ''\)\)\}"[^>]*aria-live="off"/);
+  assert.match(appJs, /<time datetime="\$\{escapeHtml\(String\(eventTime \?\? ''\)\)\}" data-live-timestamp="\$\{escapeHtml\(String\(eventTime \?\? ''\)\)\}"[^>]*aria-live="off"/);
+
+  const updaterSource = appJs.slice(
+    appJs.indexOf('function updateLiveRelativeTimes'),
+    appJs.indexOf('function normalizeTransactionHash')
+  );
+  assert.match(updaterSource, /document\.querySelectorAll\('time\[data-live-timestamp\]'\)/);
+  assert.match(updaterSource, /const label = formatMonitorAge\(time\.dataset\.liveTimestamp, now\);\s+if \(time\.textContent !== label\) time\.textContent = label/);
+  assert.match(updaterSource, /renderMonitorHealth\(\)/);
+  assert.match(updaterSource, /renderSocialBridgeStatus\(\)/);
+  assert.doesNotMatch(updaterSource, /renderMonitorEvents\(|renderSocialFeed\(|renderSocialMonitor\(|innerHTML/);
+
+  const tickSource = appJs.slice(
+    appJs.indexOf('state.monitorTickTimer = setInterval'),
+    appJs.indexOf('void startSocialMonitor({ manual })')
+  );
+  assert.match(tickSource, /synchronizeMonitorAlerts\(\);\s+updateLiveRelativeTimes\(\);\s+}, 1_000\)/);
+  assert.doesNotMatch(tickSource, /renderMonitorEvents\(|renderSocialFeed\(|renderSocialMonitor\(|innerHTML/);
+  assert.ok(
+    appJs.indexOf('state.monitorTickTimer = setInterval') < appJs.indexOf("fetchChainJson(context, '/monitor?limit=200')"),
+    'the live UI clock must start before the initial monitor request'
+  );
+  assert.match(appJs, /function applySocialBridgeStatus\(bridge\)[\s\S]*state\.socialBridgeObservedAt = performance\.now\(\)/);
+  assert.match(appJs, /const reportedHeartbeatAgeMs = finiteNumber\(bridge\.heartbeatAgeMs\);[\s\S]*performance\.now\(\) - bridgeObservedAt[\s\S]*reportedHeartbeatAgeMs \+ elapsedSinceObservationMs/);
+  assert.match(appJs, /document\.addEventListener\('visibilitychange', updateVisibleLiveRelativeTimes\)/);
+  assert.match(appJs, /window\.addEventListener\('focus', updateVisibleLiveRelativeTimes\)/);
+  assert.match(appJs, /window\.addEventListener\('pageshow', \(event\) => \{[\s\S]*event\.persisted[\s\S]*void startMonitorPage\(\)/);
+  assert.match(stylesCss, /\.social-post-time \{[\s\S]*font-variant-numeric: tabular-nums/);
+});
+
 test('social snapshot and SSE lifecycle stay pinned to the Robinhood host service', () => {
   assert.match(appJs, /const APP_BASE = \/\^\\\/robinhood-radar\(\?:\\\/\|\$\)\/\.test\(window\.location\.pathname\)/);
   assert.match(appJs, /const SOCIAL_API_ROOT = `\$\{APP_BASE\}\/api\/social`/);

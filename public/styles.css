@@ -3387,6 +3387,7 @@ select:hover {
   flex: 0 0 auto;
   color: var(--faint);
   font-size: 9px;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
