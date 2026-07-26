@@ -124,10 +124,10 @@ test('outbox persists only the post allowlist and never raw or credential fields
   assert.deepEqual(Object.keys(stored.media[0]).sort(), ['previewUrl', 'type', 'url']);
 });
 
-test('outbox preserves a sanitized follow target and omits targets from tweet records', async () => {
+test('outbox rejects relationship activity and omits unrelated targets from tweet records', async () => {
   const storage = new FakeStorage();
   const outbox = createPostOutbox({ storage });
-  await outbox.enqueue([
+  const result = await outbox.enqueue([
     post('follow:alice:bob', {
       kind: 'follow',
       target: {
@@ -146,15 +146,10 @@ test('outbox preserves a sanitized follow target and omits targets from tweet re
   ]);
 
   const records = (await outbox.readBatch()).records.map((record) => record.post);
-  assert.deepEqual(records[0].target, {
-    id: 'target-1',
-    handle: 'bob',
-    name: 'Bob',
-    avatarUrl: 'https://example.test/bob.png',
-    followersCount: 73,
-    url: 'https://x.com/bob'
-  });
-  assert.equal(Object.hasOwn(records[1], 'target'), false);
+  assert.equal(result.rejected, 1);
+  assert.equal(result.added, 1);
+  assert.deepEqual(records.map((record) => record.externalId), ['ordinary-tweet']);
+  assert.equal(Object.hasOwn(records[0], 'target'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-target-cookie'), false);
 });
 

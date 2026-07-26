@@ -3,6 +3,7 @@ const DEFAULT_MAX_RECORDS = 1_000;
 const DEFAULT_MAX_BYTES = 4 * 1024 * 1024;
 const DEFAULT_BATCH_LIMIT = 200;
 const SCHEMA_VERSION = 1;
+const TWEET_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete']);
 
 function text(value, maximum) {
   return String(value ?? '').slice(0, maximum);
@@ -13,15 +14,14 @@ function number(value) {
   return Number.isFinite(result) ? result : 0;
 }
 
-function account(value, { includeUrl = false } = {}) {
+function account(value) {
   const item = value && typeof value === 'object' ? value : {};
   return {
     id: text(item.id, 240),
     handle: text(item.handle, 240),
     name: text(item.name, 500),
     avatarUrl: text(item.avatarUrl, 2_000),
-    followersCount: number(item.followersCount),
-    ...(includeUrl ? { url: text(item.url, 2_000) } : {})
+    followersCount: number(item.followersCount)
   };
 }
 
@@ -36,7 +36,6 @@ function persistedPost(value) {
     externalId: text(post.externalId, 240),
     kind: text(post.kind, 20),
     author: account(author),
-    ...(['follow', 'unfollow'].includes(post.kind) ? { target: account(post.target, { includeUrl: true }) } : {}),
     content: text(post.content, 100_000),
     translatedContent: text(post.translatedContent, 100_000),
     url: text(post.url, 2_000),
@@ -58,6 +57,7 @@ function persistedPost(value) {
     quotedExternalId: text(post.quotedExternalId, 240),
     repostExternalId: text(post.repostExternalId, 240),
     publishedAt: number(post.publishedAt),
+    discoveredAt: number(post.discoveredAt || post.receivedAt),
     receivedAt: number(post.receivedAt),
     sourceUpdatedAt: number(post.sourceUpdatedAt),
     deleted: post.deleted === true,
@@ -80,7 +80,7 @@ function stableStringify(value) {
 function versionValue(post) {
   // receivedAt describes when this browser observed a post, not a source
   // revision. Excluding it prevents every polling pass from creating a copy.
-  const { receivedAt: _receivedAt, ...sourceVersion } = post;
+  const { receivedAt: _receivedAt, discoveredAt: _discoveredAt, ...sourceVersion } = post;
   return sourceVersion;
 }
 
@@ -131,7 +131,7 @@ function normalizeState(value) {
   for (const candidate of value.records) {
     if (!candidate || typeof candidate !== 'object') continue;
     const post = persistedPost(candidate.post);
-    if (!post.source || !post.externalId) continue;
+    if (!post.source || !post.externalId || !TWEET_KINDS.has(post.kind)) continue;
     const key = text(candidate.key, 160);
     if (!key || seenKeys.has(key)) continue;
     seenKeys.add(key);
@@ -190,7 +190,10 @@ export function createPostOutbox({
 
   async function load() {
     const stored = await storage.get(resolvedStorageKey);
-    return normalizeState(stored?.[resolvedStorageKey]);
+    const raw = stored?.[resolvedStorageKey];
+    const normalized = normalizeState(raw);
+    if (raw && JSON.stringify(raw) !== JSON.stringify(normalized)) await persist(normalized);
+    return normalized;
   }
 
   function stateBytes(state) {
@@ -223,7 +226,7 @@ export function createPostOutbox({
 
         for (const value of input) {
           const post = persistedPost(value);
-          if (!post.source || !post.externalId) {
+          if (!post.source || !post.externalId || !TWEET_KINDS.has(post.kind)) {
             rejected += 1;
             continue;
           }

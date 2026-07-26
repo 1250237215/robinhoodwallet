@@ -190,10 +190,11 @@ test('social posts API persists merged feed membership and filters featured and 
   assert.equal((await invalid.json()).code, 'INVALID_SOCIAL_DATA');
 });
 
-test('social posts API returns canonical follow and unfollow activities with their targets', async (t) => {
+test('social posts API filters non-tweet activity without blocking real tweets', async (t) => {
   const token = 'relationship-device-token';
   const { baseUrl } = await withSocialServer(t, { token });
   const encodedUnfollow = Buffer.from('unfollow:star_okx:bankrbot').toString('base64url');
+  const discoveredAt = Date.parse('2026-07-17T12:00:00.123Z');
   const response = await fetch(`${baseUrl}/api/social/bridge/posts`, {
     method: 'POST',
     headers: auth(token),
@@ -221,32 +222,53 @@ test('social posts API returns canonical follow and unfollow activities with the
           targetHandle: 'enzoinsidee',
           feedSource: 'my',
           publishedAt: '2026-07-17T12:01:00Z'
+        },
+        {
+          source: 'twitter',
+          id: 'profile:star_okx:1785048000000',
+          kind: 'profile',
+          authorHandle: 'star_okx'
+        },
+        {
+          source: 'twitter',
+          id: '1900000000000000000',
+          kind: 'post',
+          authorHandle: 'star_okx',
+          text: 'A real tweet',
+          feedSource: 'my',
+          debotDiscoveredAt: discoveredAt,
+          publishedAt: '2026-07-17T12:02:00Z'
         }
       ]
     })
   });
   assert.equal(response.status, 200);
-  assert.equal((await response.json()).summary.created, 2);
+  const ingestion = await response.json();
+  assert.deepEqual(ingestion.summary, {
+    created: 1,
+    updated: 0,
+    deleted: 0,
+    restored: 0,
+    unchanged: 0,
+    filtered: 3
+  });
+  assert.deepEqual(ingestion.filtered.map((item) => item.reason), [
+    'non-tweet:unfollow',
+    'non-tweet:follow',
+    'non-tweet:profile'
+  ]);
 
   const payload = await (await fetch(`${baseUrl}/api/social/posts?feedSource=my`)).json();
-  const byId = new Map(payload.posts.map((post) => [post.externalId, post]));
-  const unfollow = byId.get('unfollow:star_okx:bankrbot');
-  assert.equal(unfollow.kind, 'unfollow');
-  assert.deepEqual(unfollow.target, {
-    id: 'bankr-user',
-    handle: 'bankrbot',
-    name: 'Bankr',
-    avatarUrl: '',
-    followers: 12_345,
-    url: 'https://x.com/bankrbot'
-  });
-  const follow = byId.get('follow:star_okx:enzoinsidee');
-  assert.equal(follow.kind, 'follow');
-  assert.equal(follow.target.handle, 'enzoinsidee');
-  assert.equal(follow.target.name, '');
+  assert.deepEqual(payload.posts.map((post) => post.externalId), ['1900000000000000000']);
+  assert.equal(payload.posts[0].debotDiscoveredAt, discoveredAt);
+  assert.equal(payload.posts[0].discoveredAt, discoveredAt);
+  assert.equal(payload.posts[0].receivedAt, discoveredAt);
+  assert.equal(payload.posts[0].vpsIngestedAt >= discoveredAt, true);
+  assert.equal(payload.posts[0].ingestedAt, payload.posts[0].vpsIngestedAt);
+  assert.equal(payload.posts[0].storedAt, payload.posts[0].vpsIngestedAt);
 
   const searched = await (await fetch(`${baseUrl}/api/social/posts?q=bankrbot`)).json();
-  assert.deepEqual(searched.posts.map((post) => post.externalId), ['unfollow:star_okx:bankrbot']);
+  assert.deepEqual(searched.posts, []);
 });
 
 test('DeBot analysis bridge uses bearer-only claims, inflight dedupe and short result caching', async (t) => {
@@ -459,6 +481,7 @@ test('DeBot result endpoint enforces payload limits and stores only coarse remot
 test('social SSE sends an initial snapshot and live normalized changes', async (t) => {
   const token = 'stream-device-token';
   const { baseUrl } = await withSocialServer(t, { token });
+  const discoveredAt = Date.parse('2026-07-17T12:00:00.456Z');
   const controller = new AbortController();
   const response = await fetch(`${baseUrl}/api/social/stream`, { signal: controller.signal });
   assert.equal(response.status, 200);
@@ -473,7 +496,9 @@ test('social SSE sends an initial snapshot and live normalized changes', async (
   await fetch(`${baseUrl}/api/social/bridge/posts`, {
     method: 'POST',
     headers: auth(token),
-    body: JSON.stringify({ posts: [{ source: 'twitter', id: 'stream-1', text: 'live' }] })
+    body: JSON.stringify({
+      posts: [{ source: 'twitter', id: 'stream-1', text: 'live', debotDiscoveredAt: discoveredAt }]
+    })
   });
   while (!received.includes('event: post.created')) {
     const chunk = await reader.read();
@@ -482,6 +507,8 @@ test('social SSE sends an initial snapshot and live normalized changes', async (
   }
   assert.match(received, /event: post\.created/);
   assert.match(received, /"externalId":"stream-1"/);
+  assert.match(received, new RegExp(`"debotDiscoveredAt":${discoveredAt}`));
+  assert.match(received, /"vpsIngestedAt":\d+/);
   controller.abort();
 });
 

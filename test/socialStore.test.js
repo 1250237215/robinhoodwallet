@@ -109,56 +109,69 @@ test('follow and unfollow activity IDs normalize without splitting underscored h
   });
   assert.equal(explicitRelationship.externalId, 'follow:alice:bob');
   assert.equal(explicitRelationship.authorFollowers, 123);
-  assert.throws(() => normalizeSocialPost({
+  const missingActor = normalizeSocialPost({
     source: 'twitter',
     id: 'missing-actor',
     kind: 'follow',
     target: { handle: 'bob' }
-  }), /requires valid actor and target/);
-  assert.throws(() => normalizeSocialPost({
+  });
+  assert.equal(missingActor._nonTweetReason, 'non-tweet:follow');
+  const missingTarget = normalizeSocialPost({
     source: 'twitter',
     id: 'missing-target',
     kind: 'unfollow',
     author: { handle: 'alice' }
-  }), /requires valid actor and target/);
+  });
+  assert.equal(missingTarget._nonTweetReason, 'non-tweet:unfollow');
 });
 
-test('activity inference rejects a Base64URL ID whose actor differs from the author', () => {
+test('activity inference flags conflicting relationship identities for filtering', () => {
   const mismatched = Buffer.from('follow:alice:bob').toString('base64url');
   assert.equal(parseSocialActivityIdentity(mismatched, 'charlie'), null);
 
-  assert.throws(() => normalizeSocialPost({
+  const actorMismatch = normalizeSocialPost({
     source: 'twitter',
     id: mismatched,
     authorHandle: 'charlie',
     kind: 'follow',
     target: { handle: 'bob' }
-  }), /identity conflicts/);
+  });
+  assert.equal(actorMismatch._nonTweetReason, 'non-tweet:follow');
 
   const targetMismatch = Buffer.from('follow:alice:bob').toString('base64url');
-  assert.throws(() => normalizeSocialPost({
+  const conflictingTarget = normalizeSocialPost({
     source: 'twitter',
     id: targetMismatch,
     authorHandle: 'alice',
     kind: 'follow',
     target: { handle: 'charlie' }
-  }), /target conflicts/);
+  });
+  assert.equal(conflictingTarget._nonTweetReason, 'non-tweet:follow');
 });
 
 test('social posts are normalized, deduplicated, updated and tombstoned in place', (t) => {
   const { store, setNow } = fixture(t);
+  const discoveredAt = Date.parse('2026-07-17T11:59:30.123Z');
+  const ingestedAt = Date.parse('2026-07-17T12:00:00Z');
   const created = store.upsertPosts([{
     source: 'x',
     tweetId: 'tweet-42',
     author: { id: 'user-1', username: 'alice', name: 'Alice', followersCount: 12_345 },
     text: 'New CA 0x1111111111111111111111111111111111111111',
     createdAt: '2026-07-17T11:59:00Z',
+    debotDiscoveredAt: discoveredAt,
     url: 'https://x.com/alice/status/tweet-42'
   }])[0];
   assert.equal(created.action, 'created');
   assert.equal(created.post.source, 'twitter');
   assert.equal(created.post.author.handle, 'alice');
   assert.equal(created.post.contractAddresses[0].address, '0x1111111111111111111111111111111111111111');
+  assert.equal(created.post.debotDiscoveredAt, discoveredAt);
+  assert.equal(created.post.discoveredAt, discoveredAt);
+  assert.equal(created.post.receivedAt, discoveredAt);
+  assert.equal(created.post.vpsIngestedAt, ingestedAt);
+  assert.equal(created.post.ingestedAt, ingestedAt);
+  assert.equal(created.post.storedAt, ingestedAt);
 
   setNow(Date.parse('2026-07-17T12:01:00Z'));
   const duplicate = store.upsertPosts([{
@@ -279,235 +292,87 @@ test('feed membership survives database reopen and legacy schema migration', (t)
 
   const legacy = new DatabaseSync(filename);
   legacy.exec('ALTER TABLE social_posts DROP COLUMN feed_sources_json');
+  legacy.exec('ALTER TABLE social_posts DROP COLUMN discovered_at');
+  legacy.exec('ALTER TABLE social_posts DROP COLUMN ingested_at');
   legacy.close();
 
   store = createSocialStore(filename);
-  assert.deepEqual(store.getPost('twitter', 'persisted-feed').feedSources, ['all']);
+  const migrated = store.getPost('twitter', 'persisted-feed');
+  assert.deepEqual(migrated.feedSources, ['all']);
+  assert.equal(migrated.debotDiscoveredAt, migrated.receivedAt);
+  assert.equal(migrated.vpsIngestedAt, migrated.storedAt);
   const column = store.db.prepare('PRAGMA table_info(social_posts)').all()
     .find((item) => item.name === 'feed_sources_json');
   assert.equal(Boolean(column), true);
+  const timestampColumns = store.db.prepare('PRAGMA table_info(social_posts)').all()
+    .filter((item) => ['discovered_at', 'ingested_at'].includes(item.name));
+  assert.equal(timestampColumns.length, 2);
   store.close();
 });
 
-test('relationship targets survive database reopen with complete metadata', (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-social-target-persistence-'));
-  const filename = path.join(directory, 'social.sqlite');
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-
+test('ingestion filters relationship and profile activity while preserving real posts', (t) => {
+  const { store } = fixture(t);
   const encoded = Buffer.from('unfollow:star_okx:bankrbot').toString('base64url');
-  let store = createSocialStore(filename);
-  const created = store.upsertPosts([{
-    source: 'twitter',
-    id: encoded,
-    author: {
-      id: 'actor-1',
-      handle: 'star_okx',
-      name: 'Star_OKX',
-      avatarUrl: 'https://cdn.example.test/star.png',
-      followersCount: 234_880
+  const results = store.upsertPosts([
+    {
+      source: 'twitter',
+      id: encoded,
+      authorHandle: 'star_okx',
+      targetHandle: 'bankrbot'
     },
-    target: {
-      id: 'target-1',
-      handle: 'bankrbot',
-      name: 'Bankr',
-      avatarUrl: 'https://cdn.example.test/bankr.png',
-      followersCount: 98_765,
-      url: 'https://x.com/bankrbot'
+    {
+      source: 'twitter',
+      id: 'profile:star_okx:1785048000000',
+      kind: 'profile',
+      authorHandle: 'star_okx'
     },
-    publishedAt: '2026-07-17T11:59:00Z'
-  }])[0].post;
-  assert.equal(created.externalId, 'unfollow:star_okx:bankrbot');
-  assert.equal(created.kind, 'unfollow');
-  const sparseUpdate = store.upsertPosts([{
-    source: 'twitter',
-    id: 'unfollow:star_okx:bankrbot',
-    author: {
-      id: '',
-      handle: 'star_okx',
-      name: '',
-      avatarUrl: '',
-      followersCount: 0
+    {
+      source: 'twitter',
+      id: 'rename-event',
+      kind: 'reName',
+      authorHandle: 'star_okx'
     },
-    target: { handle: 'bankrbot' },
-    sourceUpdatedAt: '2026-07-17T11:59:00Z'
-  }])[0].post;
-  assert.equal(sparseUpdate.target.name, 'Bankr');
-  assert.equal(sparseUpdate.target.avatarUrl, 'https://cdn.example.test/bankr.png');
-  assert.equal(sparseUpdate.target.followers, 98_765);
-  assert.deepEqual(sparseUpdate.author, {
-    id: 'actor-1',
-    handle: 'star_okx',
-    name: 'Star_OKX',
-    avatarUrl: 'https://cdn.example.test/star.png',
-    followers: 234_880
-  });
-  store.close();
+    {
+      source: 'twitter',
+      id: 'avatar-event',
+      type: 'reImage',
+      authorHandle: 'star_okx'
+    },
+    {
+      source: 'twitter',
+      id: 'avatar-alias-event',
+      type: 'reAvatar',
+      authorHandle: 'star_okx'
+    },
+    {
+      source: 'twitter',
+      id: 'tweet-allowed',
+      kind: 'post',
+      authorHandle: 'star_okx',
+      text: 'A real tweet'
+    }
+  ]);
 
-  store = createSocialStore(filename);
-  const reopened = store.getPost('twitter', 'unfollow:star_okx:bankrbot');
-  assert.deepEqual(reopened.target, {
-    id: 'target-1',
-    handle: 'bankrbot',
-    name: 'Bankr',
-    avatarUrl: 'https://cdn.example.test/bankr.png',
-    followers: 98_765,
-    url: 'https://x.com/bankrbot'
-  });
-  assert.equal(reopened.author.name, 'Star_OKX');
-  assert.equal(reopened.author.avatarUrl, 'https://cdn.example.test/star.png');
-  assert.equal(reopened.author.followers, 234_880);
-  assert.deepEqual(store.listPosts({ query: 'bankrbot' }).map((post) => post.id), [reopened.id]);
-  store.close();
+  assert.deepEqual(results.map((result) => result.action), [
+    'filtered',
+    'filtered',
+    'filtered',
+    'filtered',
+    'filtered',
+    'created'
+  ]);
+  assert.deepEqual(results.slice(0, 5).map((result) => result.reason), [
+    'non-tweet:unfollow',
+    'non-tweet:profile',
+    'non-tweet:profile',
+    'non-tweet:profile',
+    'non-tweet:profile'
+  ]);
+  assert.deepEqual(store.listPosts().map((post) => post.externalId), ['tweet-allowed']);
+  assert.deepEqual(store.listChanges().map((change) => change.type), ['post.created']);
 });
 
-test('legacy plain and Base64URL relationship rows migrate to one canonical record', (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-social-activity-migration-'));
-  const filename = path.join(directory, 'social.sqlite');
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-
-  let store = createSocialStore(filename);
-  store.close();
-
-  const legacy = new DatabaseSync(filename);
-  const insert = legacy.prepare(`
-    INSERT INTO social_posts(
-      source, external_id, kind, author_id, author_handle, author_name, author_avatar_url,
-      author_followers, content, feed_sources_json, target_json,
-      published_at, received_at, source_updated_at, raw_json, stored_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  const encoded = Buffer.from('unfollow:crypto_cat888:robinhood_cn').toString('base64url');
-  insert.run(
-    'twitter',
-    encoded,
-    'post',
-    'actor-1',
-    'crypto_cat888',
-    'Crypto Cat',
-    'https://cdn.example.test/crypto-cat.png',
-    12_345,
-    'older encoded activity',
-    '["all"]',
-    '{}',
-    100,
-    110,
-    120,
-    '{}',
-    130,
-    140
-  );
-  insert.run(
-    'twitter',
-    'unfollow_crypto_cat888_robinhood_cn',
-    'post',
-    '',
-    'crypto_cat888',
-    '',
-    '',
-    0,
-    'newer plain activity',
-    '["featured","my"]',
-    '{"id":"target-2","handle":"robinhood_cn","name":"Robinhood CN","avatarUrl":"","followers":321,"url":"https://x.com/robinhood_cn"}',
-    100,
-    110,
-    120,
-    '{}',
-    230,
-    240
-  );
-  legacy.close();
-
-  store = createSocialStore(filename);
-  const posts = store.listPosts({ includeDeleted: true });
-  assert.equal(posts.length, 1);
-  assert.equal(posts[0].externalId, 'unfollow:crypto_cat888:robinhood_cn');
-  assert.equal(posts[0].kind, 'unfollow');
-  assert.equal(posts[0].content, 'newer plain activity');
-  assert.deepEqual(posts[0].author, {
-    id: 'actor-1',
-    handle: 'crypto_cat888',
-    name: 'Crypto Cat',
-    avatarUrl: 'https://cdn.example.test/crypto-cat.png',
-    followers: 12_345
-  });
-  assert.deepEqual(posts[0].feedSources, ['all', 'featured', 'my']);
-  assert.deepEqual(posts[0].target, {
-    id: 'target-2',
-    handle: 'robinhood_cn',
-    name: 'Robinhood CN',
-    avatarUrl: '',
-    followers: 321,
-    url: 'https://x.com/robinhood_cn'
-  });
-  assert.equal(
-    store.db.prepare('SELECT COUNT(*) AS count FROM social_posts').get().count,
-    1
-  );
-  store.close();
-
-  store = createSocialStore(filename);
-  assert.equal(store.getCounts().posts, 1);
-  assert.equal(store.listPosts()[0].author.name, 'Crypto Cat');
-  assert.equal(store.listPosts()[0].author.followers, 12_345);
-  store.close();
-});
-
-test('legacy relationship migration preserves distinct source occurrences and is idempotent', (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-social-activity-occurrences-'));
-  const filename = path.join(directory, 'social.sqlite');
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-
-  let store = createSocialStore(filename);
-  store.close();
-  const legacy = new DatabaseSync(filename);
-  const insert = legacy.prepare(`
-    INSERT INTO social_posts(
-      source, external_id, kind, author_handle, feed_sources_json, target_json,
-      published_at, received_at, source_updated_at, raw_json, stored_at, updated_at
-    ) VALUES (?, ?, 'post', ?, ?, '{}', ?, ?, ?, '{}', ?, ?)
-  `);
-  const encoded = Buffer.from('unfollow:connectfarm1:fartcoinofsol').toString('base64url');
-  const firstOccurrence = Date.parse('2026-07-24T06:57:57.016Z');
-  const secondOccurrence = Date.parse('2026-07-26T05:32:48.182Z');
-  insert.run(
-    'twitter',
-    'unfollow_connectfarm1_fartcoinofsol',
-    'connectfarm1',
-    '["my"]',
-    firstOccurrence - 16,
-    firstOccurrence,
-    firstOccurrence,
-    firstOccurrence,
-    firstOccurrence
-  );
-  insert.run(
-    'twitter',
-    encoded,
-    'connectfarm1',
-    '["all"]',
-    secondOccurrence - 182,
-    secondOccurrence,
-    secondOccurrence,
-    secondOccurrence,
-    secondOccurrence
-  );
-  legacy.close();
-
-  store = createSocialStore(filename);
-  const expectedIds = [
-    'unfollow:connectfarm1:fartcoinofsol',
-    `unfollow:connectfarm1:fartcoinofsol:${secondOccurrence}`
-  ];
-  assert.deepEqual(store.listPosts().map((post) => post.externalId).sort(), expectedIds.sort());
-  store.close();
-
-  store = createSocialStore(filename);
-  assert.deepEqual(store.listPosts().map((post) => post.externalId).sort(), expectedIds.sort());
-  assert.equal(store.getCounts().posts, 2);
-  store.close();
-});
-
-test('legacy profile changes migrate without becoming posts or collapsing later updates', (t) => {
+test('legacy non-tweet cleanup is safe, durable and idempotent', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-social-profile-migration-'));
   const filename = path.join(directory, 'social.sqlite');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -526,7 +391,7 @@ test('legacy profile changes migrate without becoming posts or collapsing later 
   const encodedCrypto = Buffer.from(
     '@Crypto_Cat888_https://pbs.twimg.com/profile_images/old_https://pbs.twimg.com/profile_images/new_LazyCat'
   ).toString('base64url');
-  insert.run(
+  const firstProfile = insert.run(
     'profile_crypto_cat888_LazyCat_profile_payload',
     'actor-profile-1',
     'crypto_cat888',
@@ -540,102 +405,62 @@ test('legacy profile changes migrate without becoming posts or collapsing later 
     cryptoAt,
     cryptoAt
   );
-  insert.run(encodedCrypto, '', 'Crypto_Cat888', '', '', 0, '["all","my"]', cryptoAt, cryptoAt, cryptoAt, cryptoAt, cryptoAt + 1);
-  const vladFirstAt = Date.parse('2026-07-23T17:24:14.249Z');
-  const vladSecondAt = Date.parse('2026-07-24T02:08:10.211Z');
-  insert.run('profile_vladtenev_first_payload', '', 'vladtenev', '', '', 0, '["my"]', vladFirstAt, vladFirstAt, vladFirstAt, vladFirstAt, vladFirstAt);
-  insert.run('profile_vladtenev_second_payload', '', 'vladtenev', '', '', 0, '["my"]', vladSecondAt, vladSecondAt, vladSecondAt, vladSecondAt, vladSecondAt);
+  const profileAlias = insert.run(encodedCrypto, '', 'Crypto_Cat888', '', '', 0, '["all","my"]', cryptoAt, cryptoAt, cryptoAt, cryptoAt, cryptoAt + 1);
+  const relationshipAt = Date.parse('2026-07-23T17:24:14.249Z');
+  const relationship = insert.run('follow_star_okx_bankrbot', '', 'star_okx', '', '', 0, '["my"]', relationshipAt, relationshipAt, relationshipAt, relationshipAt, relationshipAt);
+  const avatarChange = insert.run('opaque-avatar-change', '', 'star_okx', '', '', 0, '["my"]', relationshipAt + 1, relationshipAt + 1, relationshipAt + 1, relationshipAt + 1, relationshipAt + 1);
+  legacy.prepare('UPDATE social_posts SET raw_json = ? WHERE id = ?').run(
+    JSON.stringify({ tw_type: 'reAvatar' }),
+    avatarChange.lastInsertRowid
+  );
+  const postAt = Date.parse('2026-07-24T02:08:10.211Z');
+  const realPost = insert.run('1900000000000000000', '', 'star_okx', 'Star', '', 100, '["my"]', postAt, postAt, postAt, postAt, postAt);
+  const insertChange = legacy.prepare(`
+    INSERT INTO social_changes(event_type, entity_type, entity_id, payload_json, created_at)
+    VALUES ('post.created', 'post', ?, '{}', ?)
+  `);
+  insertChange.run(String(firstProfile.lastInsertRowid), cryptoAt);
+  insertChange.run(String(profileAlias.lastInsertRowid), cryptoAt + 1);
+  insertChange.run(String(relationship.lastInsertRowid), relationshipAt);
+  insertChange.run(String(avatarChange.lastInsertRowid), relationshipAt + 1);
+  insertChange.run(String(realPost.lastInsertRowid), postAt);
+  insertChange.run('999001', relationshipAt);
+  legacy.prepare('UPDATE social_changes SET payload_json = ? WHERE entity_id = ?').run(
+    JSON.stringify({
+      source: 'twitter',
+      externalId: 'follow:star_okx:bankrbot',
+      kind: 'post',
+      author: { handle: 'star_okx' }
+    }),
+    '999001'
+  );
+  insertChange.run('999002', postAt);
+  legacy.prepare('UPDATE social_changes SET payload_json = ? WHERE entity_id = ?').run(
+    JSON.stringify({
+      source: 'twitter',
+      externalId: '1900000000000000001',
+      kind: 'post',
+      author: { handle: 'star_okx' },
+      content: 'A retained orphaned tweet change'
+    }),
+    '999002'
+  );
   legacy.close();
 
-  const expectedIds = [
-    `profile:crypto_cat888:${cryptoAt}`,
-    `profile:vladtenev:${vladFirstAt}`,
-    `profile:vladtenev:${vladSecondAt}`
-  ].sort();
   store = createSocialStore(filename);
-  const migrated = store.listPosts();
-  assert.deepEqual(migrated.map((post) => post.externalId).sort(), expectedIds);
-  assert.equal(migrated.every((post) => post.kind === 'profile'), true);
-  assert.deepEqual(
-    migrated.find((post) => post.externalId === `profile:crypto_cat888:${cryptoAt}`).feedSources,
-    ['all', 'my']
-  );
-  assert.deepEqual(
-    migrated.find((post) => post.externalId === `profile:crypto_cat888:${cryptoAt}`).author,
-    {
-      id: 'actor-profile-1',
-      handle: 'Crypto_Cat888',
-      name: 'Crypto Cat',
-      avatarUrl: 'https://cdn.example.test/crypto-profile.png',
-      followers: 54_321
-    }
-  );
+  assert.deepEqual(store.listPosts().map((post) => post.externalId), ['1900000000000000000']);
+  assert.equal(store.initialNonTweetPurge.postsDeleted, 4);
+  assert.equal(store.initialNonTweetPurge.changesDeleted, 5);
+  assert.equal(store.listChanges().length, 2);
+  assert.equal(store.listChanges().some((change) => change.entityId === '999001'), false);
+  assert.equal(store.listChanges().some((change) => change.entityId === '999002'), true);
+  assert.deepEqual(store.purgeNonTweetEvents(), { postsDeleted: 0, changesDeleted: 0 });
   store.close();
 
   store = createSocialStore(filename);
-  assert.deepEqual(store.listPosts().map((post) => post.externalId).sort(), expectedIds);
-  assert.equal(store.getCounts().posts, 3);
-  assert.equal(
-    store.getPost('twitter', `profile:crypto_cat888:${cryptoAt}`).author.name,
-    'Crypto Cat'
-  );
+  assert.deepEqual(store.listPosts().map((post) => post.externalId), ['1900000000000000000']);
+  assert.deepEqual(store.initialNonTweetPurge, { postsDeleted: 0, changesDeleted: 0 });
   store.close();
-});
-
-test('repeated relationship actions remain separate while source-identical aliases deduplicate', (t) => {
-  const { store, setNow } = fixture(t);
-  const firstOccurrence = Date.parse('2026-07-21T06:50:59Z');
-  const secondOccurrence = Date.parse('2026-07-22T03:17:00Z');
-  const encoded = Buffer.from('unfollow:crypto_cat888:rh67car').toString('base64url');
-
-  store.upsertPosts([{
-    source: 'twitter',
-    id: 'unfollow_crypto_cat888_rh67car',
-    authorHandle: 'crypto_cat888',
-    publishedAt: firstOccurrence,
-    sourceUpdatedAt: firstOccurrence,
-    feedSource: 'my'
-  }]);
-  store.upsertPosts([{
-    source: 'twitter',
-    id: encoded,
-    authorHandle: 'crypto_cat888',
-    publishedAt: firstOccurrence + 52_000,
-    sourceUpdatedAt: firstOccurrence,
-    feedSource: 'all'
-  }]);
-  assert.equal(store.getCounts().posts, 1);
-  assert.deepEqual(store.listPosts()[0].feedSources, ['all', 'my']);
-
-  store.upsertPosts([{
-    source: 'twitter',
-    id: encoded,
-    authorHandle: 'crypto_cat888',
-    publishedAt: secondOccurrence,
-    sourceUpdatedAt: secondOccurrence,
-    feedSource: 'my'
-  }]);
-  const posts = store.listPosts();
-  assert.equal(posts.length, 2);
-  assert.equal(posts.some((post) => post.externalId === 'unfollow:crypto_cat888:rh67car'), true);
-  assert.equal(posts.some((post) => post.externalId === `unfollow:crypto_cat888:rh67car:${secondOccurrence}`), true);
-
-  setNow(secondOccurrence + 1_000);
-  const deletedFirst = store.deletePost('twitter', 'unfollow:crypto_cat888:rh67car');
-  assert.equal(deletedFirst.action, 'deleted');
-  assert.equal(deletedFirst.post.externalId, 'unfollow:crypto_cat888:rh67car');
-  assert.equal(store.getCounts().posts, 2);
-  assert.equal(store.getPost('twitter', `unfollow:crypto_cat888:rh67car:${secondOccurrence}`).deleted, false);
-
-  setNow(secondOccurrence + 2_000);
-  const deletedSecond = store.deletePost(
-    'twitter',
-    `unfollow:crypto_cat888:rh67car:${secondOccurrence}`
-  );
-  assert.equal(deletedSecond.action, 'deleted');
-  assert.equal(deletedSecond.post.externalId, `unfollow:crypto_cat888:rh67car:${secondOccurrence}`);
-  assert.equal(store.getCounts().posts, 2);
-  assert.equal(store.getCounts().deletedPosts, 2);
 });
 
 test('watchlist intents create authenticated bridge commands and acknowledgements update sync state', (t) => {

@@ -1125,30 +1125,31 @@ test('social monitoring replaces the visible same-token aggregation panel with a
   assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.social-feed \{[\s\S]*height: 68svh/);
 });
 
-test('social relationship activity identifies, deduplicates and renders the exact target action', () => {
-  assert.match(appJs, /const SOCIAL_ACTIVITY_KINDS = new Set\(\['follow', 'unfollow'\]\)/);
-  assert.match(appJs, /function decodeSocialActivityExternalId\(value\)[\s\S]*atob\(/);
-  assert.match(appJs, /const prefix = `\$\{plainKind\}_\$\{authorHandle\}_`/);
-  assert.match(appJs, /const baseId = `\$\{activity\.kind\}:\$\{activity\.actorHandle\.toLowerCase\(\)\}:\$\{activity\.targetHandle\.toLowerCase\(\)\}`/);
-  assert.match(appJs, /return `\$\{source\}:activity:\$\{baseId\}:\$\{occurrence\}`/);
-  assert.match(appJs, /if \(kind === 'follow'\) return '关注'/);
-  assert.match(appJs, /if \(kind === 'unfollow'\) return '取消关注'/);
-  assert.match(appJs, /if \(kind === 'profile'\) return '资料更新'/);
-  assert.match(appJs, /const actionLabel = activity\.kind === 'follow' \? '关注了' : '取消关注了'/);
-  assert.match(appJs, /data-lucide="\$\{icon\}"/);
-  assert.match(appJs, /https:\/\/x\.com\/\$\{encodeURIComponent\(targetHandle\)\}/);
-  assert.match(appJs, />@\$\{escapeHtml\(targetHandle\)\}<\/a>/);
-  assert.match(appJs, /\$\{activityMarkup \|\| profileActivityMarkup \|\| \(post\.content/);
-  assert.match(appJs, /\$\{!nonPostActivity && postUrl \? `<footer/);
-  assert.match(appJs, /data-kind="\$\{escapeHtml\(kind\)\}"/);
-  assert.match(appJs, /function socialProfileActivityMarkup\(post\)[\s\S]*更新了账号资料/);
-  assert.match(appJs, /post\.target\?\.name,[\s\S]*post\.target\?\.handle/);
-  assert.match(appJs, /const incomingIsNewer = compareRecency\(incoming, current\) >= 0/);
+test('social feed defensively filters relationship and profile activity from snapshots and SSE', () => {
+  assert.match(appJs, /const SOCIAL_TWEET_KINDS = new Set\(\['post', 'reply', 'quote', 'repost', 'delete'\]\)/);
+  assert.match(appJs, /function isSocialTweet\(post\)/);
+  assert.match(appJs, /if \(!SOCIAL_TWEET_KINDS\.has\(kind\)\) return false/);
+  assert.match(appJs, /if \(socialActivityIdentity\(post\)\) return false/);
+  assert.match(appJs, /\^\(\?:follow\|unfollow\|profile\)\(\?:\:\|_\)/);
+  assert.equal((appJs.match(/if \(!isSocialTweet\(post\)\) continue/g) || []).length, 2);
+  assert.match(appJs, /function visibleSocialPosts\(\)[\s\S]*if \(!isSocialTweet\(post\)\) return false/);
   assert.match(appJs, /if \(id !== null && id <= state\.socialLatestChangeId\) return/);
-  assert.match(stylesCss, /\.social-post\[data-kind="follow"\]/);
-  assert.match(stylesCss, /\.social-post\[data-kind="unfollow"\]/);
-  assert.match(stylesCss, /\.social-post\[data-kind="profile"\]/);
-  assert.match(stylesCss, /\.social-activity-content,[\s\S]*\.social-profile-activity \{/);
+});
+
+test('social cards show DeBot discovery, VPS ingestion and browser receipt latency in milliseconds', () => {
+  assert.match(appJs, /fractionalSecondDigits: 3/);
+  assert.match(appJs, /function formatSocialLatencyMs\(start, end\)/);
+  assert.match(appJs, /return `\$\{sign\}\$\{Math\.abs\(difference\)\.toLocaleString\('en-US'\)\}ms`/);
+  assert.match(appJs, /post\.debotDiscoveredAt \?\? post\.discoveredAt \?\? post\.receivedAt/);
+  assert.match(appJs, /post\.vpsIngestedAt \?\? post\.ingestedAt \?\? post\.storedAt/);
+  assert.match(appJs, /webReceiptMode: 'snapshot'/);
+  assert.match(appJs, /webReceiptMode: 'live'/);
+  assert.match(appJs, /<div class="social-latency-trace" aria-label="消息传输时间">/);
+  assert.match(appJs, /<b>DeBot 发现<\/b>/);
+  assert.match(appJs, /<b>VPS 入库<\/b>/);
+  assert.match(appJs, /const webLabel = post\.webReceiptMode === 'live' \? '网页接收' : '网页载入'/);
+  assert.match(stylesCss, /\.social-latency-trace \{[\s\S]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
+  assert.match(stylesCss, /\.social-latency-trace em \{[\s\S]*font-variant-numeric|\.social-latency-trace \{[\s\S]*font-variant-numeric: tabular-nums/);
 });
 
 test('chain and social elapsed times advance every second without rerendering either feed', () => {

@@ -1,9 +1,14 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const DEFAULT_TYPES = 'tweet|retweet|quote|reName|reImage|reDescription|delTweet|follow|unfollow|reply';
+  const DEFAULT_TYPES = 'tweet|retweet|quote|delTweet|reply';
+  const TWEET_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete']);
+  const PRIMARY_POLL_INTERVAL_MS = 2_000;
+  const PRIMARY_API_TIMEOUT_MS = 3_500;
+  const OPTIONAL_POLL_INTERVAL_MS = 15_000;
+  const WATCHLIST_POLL_INTERVAL_MS = 30_000;
   const API_TIMEOUT_MS = 20_000;
-  const DELIVERY_TIMEOUT_MS = 20_000;
+  const DELIVERY_TIMEOUT_MS = 2_000;
   const DELIVERY_RETRY_BASE_MS = 2_000;
   const DELIVERY_RETRY_MAX_MS = 30_000;
   const ERROR_TYPES = new Set(['AUTH', 'TIMEOUT', 'NETWORK', 'DEBOT']);
@@ -70,7 +75,9 @@
     if (type === 'reply') return 'reply';
     if (type === 'follow') return 'follow';
     if (type === 'unfollow') return 'unfollow';
-    if (['rename', 'reimage', 'redescription'].includes(type)) return 'profile';
+    if (['rename', 'reimage', 'reavatar', 'redescription', 'profile', 'profileupdate'].includes(type)) {
+      return 'profile';
+    }
     if (['delete', 'deleted', 'deltweet', 'deletepost'].includes(type)) return 'delete';
     return '';
   }
@@ -125,7 +132,7 @@
   function eventType(payload, identity) {
     const tweet = payload?.tweet || {};
     if (identity?.kind) return identity.kind;
-    const explicitTypes = [
+    const rawExplicitTypes = [
       payload?.tw_type,
       payload?.twType,
       payload?.twitter_type,
@@ -135,61 +142,47 @@
       payload?.type,
       payload?.tweet_type,
       tweet.tweet_type
-    ].map(normalizedEventType).filter(Boolean);
+    ].filter((value) => value !== null && value !== undefined && String(value).trim() !== '');
+    const explicitTypes = rawExplicitTypes.map(normalizedEventType).filter(Boolean);
     const specific = explicitTypes.find((type) => type !== 'post');
     if (specific) return specific;
     if (payload?.is_deleted === true) return 'delete';
     if (tweet.is_reply) return 'reply';
     if (tweet.is_quote) return 'quote';
     if (tweet.is_retweet) return 'repost';
-    return 'post';
-  }
-
-  function targetValue(payload) {
-    const candidates = [
-      payload?.target,
-      payload?.target_user,
-      payload?.targetUser,
-      payload?.follow_user,
-      payload?.followUser,
-      payload?.followed_user,
-      payload?.followedUser,
-      payload?.unfollow_user,
-      payload?.unfollowUser,
-      payload?.to_user,
-      payload?.toUser,
-      payload?.object_user,
-      payload?.objectUser
-    ];
-    return candidates.find((value) => value !== null && value !== undefined && value !== '') || {};
-  }
-
-  function normalizeTarget(payload, identity) {
-    const raw = targetValue(payload);
-    const target = raw && typeof raw === 'object' ? raw : {};
-    const scalarHandle = typeof raw === 'string' ? raw : '';
-    const handle = handleText(
-      target.username
-        || target.screen_name
-        || target.screenName
-        || target.handle
-        || payload.target_username
-        || payload.targetUsername
-        || payload.target_screen_name
-        || payload.follow_username
-        || payload.unfollow_username
-        || payload.to_username
-        || scalarHandle
-        || identity?.target
+    if (explicitTypes.includes('post')) return 'post';
+    if (payload?.profile && typeof payload.profile === 'object') return 'profile';
+    const hasTweetPayload = tweet && typeof tweet === 'object' && Boolean(
+      tweet.tweet_id
+        || tweet.id
+        || tweet.text
+        || tweet.link
+        || tweet.date
+        || tweet.created_at
+        || (Array.isArray(tweet.media) && tweet.media.length)
+        || (Array.isArray(tweet.medias) && tweet.medias.length)
+        || (Array.isArray(tweet.attachments) && tweet.attachments.length)
     );
-    return {
-      id: String(target.id || target.user_id || target.userId || payload.target_user_id || ''),
-      handle,
-      name: String(target.name || target.display_name || target.displayName || payload.target_name || ''),
-      avatarUrl: String(target.avatar || target.avatar_url || target.profile_image_url_https || ''),
-      followersCount: Number(target.followers_count || target.profile_info?.Stats?.Followers || 0),
-      url: String(target.url || target.profile_url || (handle ? `https://x.com/${handle}` : ''))
-    };
+    if (rawExplicitTypes.length) {
+      const tweetId = String(tweet.tweet_id || tweet.id || '').trim();
+      const link = String(tweet.link || payload?.link || '').trim();
+      const hasPublishedEvidence = Boolean(tweet.date || tweet.created_at)
+        || /^https?:\/\/(?:www\.)?(?:x|twitter)\.com\/[^/]+\/status\/[^/?#]+/i.test(link);
+      const hasNonTweetStructure = [
+        payload?.target,
+        payload?.target_user,
+        payload?.targetUser,
+        payload?.follow_user,
+        payload?.followUser,
+        payload?.followed_user,
+        payload?.followedUser,
+        payload?.unfollow_user,
+        payload?.unfollowUser,
+        payload?.profile
+      ].some((value) => value !== null && value !== undefined && value !== '');
+      return tweetId && hasPublishedEvidence && !hasNonTweetStructure ? 'post' : '';
+    }
+    return hasTweetPayload ? 'post' : '';
   }
 
   function normalizePost(payload, feedSource = 'my') {
@@ -202,38 +195,25 @@
     const identity = eventIdentity(rawExternalId, handle);
     if (identity?.invalid) return null;
     const kind = eventType(payload, identity);
-    const target = ['follow', 'unfollow'].includes(kind) ? normalizeTarget(payload, identity) : null;
-    if (identity?.target && target?.handle
-      && identity.target.toLowerCase() !== target.handle.toLowerCase()) return null;
-    const identityAuthor = handleText(handle || identity?.author).toLowerCase();
-    const identityTarget = handleText(target?.handle || identity?.target).toLowerCase();
-    if (['follow', 'unfollow'].includes(kind)
-      && (!/^[a-z0-9_]{1,15}$/i.test(identityAuthor) || !/^[a-z0-9_]{1,15}$/i.test(identityTarget))) {
-      return null;
-    }
+    if (!TWEET_KINDS.has(kind)) return null;
+    const discoveredAt = Date.now();
     const publishedAt = timestamp(payload.publish_timestamp || payload.index_time || tweet.date || payload.date);
     const sourceUpdatedAt = timestamp(payload.save_time || payload.index_time, publishedAt);
-    const externalId = ['follow', 'unfollow'].includes(kind) && identityAuthor && identityTarget
-      ? `${kind}:${identityAuthor}:${identityTarget}`
-      : kind === 'profile' && identityAuthor
-        ? `profile:${identityAuthor}:${sourceUpdatedAt}`
-      : rawExternalId;
     const platform = Number(payload.platform ?? 0);
-    const content = String(tweet.text || payload.text || payload.profile?.new_description || '').trim();
+    const content = String(tweet.text || payload.text || '').trim();
     const mentioned = Array.isArray(payload.mentioned_ca) ? payload.mentioned_ca : [];
     const deleted = kind === 'delete' || payload.is_deleted === true;
     return {
       source: platform === 1 ? 'binance' : 'twitter',
-      externalId,
+      externalId: rawExternalId,
       kind,
       author: {
         id: String(user.id || user.user_id || ''),
-        handle: handle || identity?.author || '',
+        handle,
         name: String(user.name || user.display_name || user.displayName || ''),
         avatarUrl: String(user.avatar || user.profile_image_url_https || ''),
         followersCount: Number(user.followers_count || user.profile_info?.Stats?.Followers || 0)
       },
-      ...(target ? { target } : {}),
       content,
       translatedContent: String(translation(tweet) || payload.translated_text || ''),
       url: String(tweet.link || payload.link || (handle && tweet.tweet_id ? `https://x.com/${handle}/status/${tweet.tweet_id}` : '')),
@@ -247,37 +227,26 @@
       quotedExternalId: String(tweet.quoted_post?.tweet_id || ''),
       repostExternalId: String(tweet.retweeted_post?.tweet_id || ''),
       publishedAt,
-      receivedAt: Date.now(),
+      discoveredAt,
+      receivedAt: discoveredAt,
       sourceUpdatedAt,
       deleted,
-      deletedAt: deleted ? Date.now() : null,
+      deletedAt: deleted ? discoveredAt : null,
       feedSources: [feedSource]
     };
   }
 
   function postIdentity(post) {
-    const occurrence = ['follow', 'unfollow'].includes(post.kind)
-      ? `:${Number(post.sourceUpdatedAt || post.publishedAt || 0)}`
-      : '';
-    return `${post.source}:${post.externalId}${occurrence}`;
+    return `${post.source}:${post.externalId}`;
   }
 
   function postFingerprint(post) {
-    const accountMetadata = ['profile', 'follow', 'unfollow'].includes(post.kind) ? {
-      id: post.author?.id || '',
-      handle: post.author?.handle || '',
-      name: post.author?.name || '',
-      avatarUrl: post.author?.avatarUrl || '',
-      followersCount: Number(post.author?.followersCount || 0)
-    } : null;
     return JSON.stringify([
       post.sourceUpdatedAt,
       post.deleted,
       post.kind,
       post.content,
       post.translatedContent,
-      accountMetadata,
-      post.target,
       post.feedSources
     ]);
   }
@@ -306,12 +275,15 @@
       ...older,
       ...newer,
       author: mergeSocialAccount(older.author, newer.author),
+      discoveredAt: Math.min(
+        Number(older.discoveredAt || older.receivedAt || Number.MAX_SAFE_INTEGER),
+        Number(newer.discoveredAt || newer.receivedAt || Number.MAX_SAFE_INTEGER)
+      ),
       feedSources: Array.from(new Set([
         ...(older.feedSources || []),
         ...(newer.feedSources || [])
       ])).sort()
     };
-    if (older.target || newer.target) merged.target = mergeSocialAccount(older.target, newer.target);
     return merged;
   }
 
@@ -460,17 +432,22 @@
   }
 
   async function api(path, options = {}) {
+    const requestedTimeout = Number(options.timeoutMs);
+    const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
+      ? requestedTimeout
+      : API_TIMEOUT_MS;
+    const { timeoutMs: _timeoutMs, ...requestOptions } = options;
     const controller = typeof AbortController === 'function' ? new AbortController() : null;
     const timeoutId = controller && typeof setTimeout === 'function'
-      ? setTimeout(() => controller.abort(), API_TIMEOUT_MS)
+      ? setTimeout(() => controller.abort(), timeoutMs)
       : null;
     let response;
     let body;
     try {
       response = await fetch(`/api/${String(path).replace(/^\/+/, '')}`, {
         credentials: 'include',
-        headers: { accept: 'application/json', ...(options.body ? { 'content-type': 'application/json' } : {}) },
-        ...options,
+        headers: { accept: 'application/json', ...(requestOptions.body ? { 'content-type': 'application/json' } : {}) },
+        ...requestOptions,
         ...(controller ? { signal: controller.signal } : {})
       });
       try {
@@ -826,7 +803,9 @@
       params.set('config_ids', configIds.join('|'));
       path = `${feedSource === 'my' ? 'social/twitter/timeline' : 'social/twitter/all/timeline'}?${params}`;
     }
-    const data = await api(path);
+    const data = await api(path, {
+      timeoutMs: feedSource === 'my' ? PRIMARY_API_TIMEOUT_MS : API_TIMEOUT_MS
+    });
     const feeds = Array.isArray(data?.feeds) ? data.feeds : [];
     return feeds.map((item) => normalizePost(item, feedSource)).filter(Boolean);
   }
@@ -880,7 +859,7 @@
       deliverPosts(await fetchTimeline('my', configIds));
       emit('heartbeat', {
         bridgeId: 'debot-browser-extension',
-        version: '1.1.2',
+        version: '1.1.3',
         sessionId: String(Date.now()),
         capabilities: ['posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1']
       });
@@ -889,7 +868,7 @@
       const errorType = coarseErrorType(error);
       emit('heartbeat', {
         bridgeId: 'debot-browser-extension',
-        version: '1.1.2',
+        version: '1.1.3',
         capabilities: ['debot-analysis-v1', 'error'],
         error: errorType
       });
@@ -908,8 +887,6 @@
       }
     });
     pollInFlight = operation;
-    void refreshWatchlistIfNeeded();
-    void pollOptionalTimelines();
     return operation;
   }
 
@@ -1002,7 +979,7 @@
       return;
     }
     void socketFrameText(frame).then(observeSocketText).catch(() => {
-      // The five-second fallback poll covers unreadable binary frames.
+      // The two-second primary fallback poll covers unreadable binary frames.
     });
   }
 
@@ -1017,7 +994,7 @@
     });
   }
 
-  const requestImmediatePoll = () => void fallbackPoll();
+  const requestImmediatePoll = () => requestPrimaryFollowUp();
   window.addEventListener('online', requestImmediatePoll);
   window.addEventListener('pageshow', requestImmediatePoll);
   window.addEventListener('focus', requestImmediatePoll);
@@ -1068,5 +1045,9 @@
   });
 
   void fallbackPoll();
-  setInterval(() => void fallbackPoll(), 5_000);
+  void refreshWatchlistIfNeeded();
+  void pollOptionalTimelines();
+  setInterval(() => requestPrimaryFollowUp(), PRIMARY_POLL_INTERVAL_MS);
+  setInterval(() => void pollOptionalTimelines(), OPTIONAL_POLL_INTERVAL_MS);
+  setInterval(() => void refreshWatchlistIfNeeded(), WATCHLIST_POLL_INTERVAL_MS);
 })();

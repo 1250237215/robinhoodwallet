@@ -1,5 +1,6 @@
 import { createPostOutbox } from './post-outbox.js';
 import { createAnalysisResultOutbox } from './analysis-result-outbox.js';
+import { postUploadRetryDelay } from './post-retry-policy.js';
 
 const DEFAULT_SERVER_BASE = 'https://radar.217-116-171-250.sslip.io/robinhood-radar/api/social';
 const SOCIAL_API_PATH = '/robinhood-radar/api/social';
@@ -12,11 +13,12 @@ const RECOVERY_LOAD_GRACE_MS = 45_000;
 const RECOVERY_PROBE_TIMEOUT_MS = 25_000;
 const RECOVERY_RELOAD_BACKOFF_MS = [60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000];
 const SOCIAL_REQUEST_TIMEOUT_MS = 15_000;
+const POST_UPLOAD_REQUEST_TIMEOUT_MS = 2_000;
 const MAX_ANALYSIS_CONCURRENCY = 4;
 const MAX_ANALYSIS_RESULT_BYTES = 256 * 1024;
 const ANALYSIS_RESULT_BATCH_SIZE = 20;
 const ANALYSIS_RESULT_UPLOAD_CONCURRENCY = 4;
-const POST_FLUSH_RETRY_DELAYS_MS = [2_000, 4_000, 8_000];
+const TWEET_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete']);
 const ANALYSIS_ERROR_TYPES = new Set([
   'AUTH',
   'TIMEOUT',
@@ -76,29 +78,27 @@ function safeContracts(value) {
   }));
 }
 
-function safeSocialAccount(value, { includeUrl = false } = {}) {
+function safeSocialAccount(value) {
   const account = value && typeof value === 'object' ? value : {};
   return {
     id: text(account.id, 240),
     handle: text(account.handle, 240),
     name: text(account.name, 500),
     avatarUrl: text(account.avatarUrl, 2_000),
-    followersCount: number(account.followersCount),
-    ...(includeUrl ? { url: text(account.url, 2_000) } : {})
+    followersCount: number(account.followersCount)
   };
 }
 
 function safePost(value) {
   const post = value && typeof value === 'object' ? value : {};
+  const kind = text(post.kind, 20).toLowerCase();
+  if (!TWEET_KINDS.has(kind)) return null;
   const author = post.author && typeof post.author === 'object' ? post.author : {};
   return {
     source: text(post.source, 40),
     externalId: text(post.externalId, 240),
-    kind: text(post.kind, 20),
+    kind,
     author: safeSocialAccount(author),
-    ...(['follow', 'unfollow'].includes(post.kind)
-      ? { target: safeSocialAccount(post.target, { includeUrl: true }) }
-      : {}),
     content: text(post.content),
     translatedContent: text(post.translatedContent),
     url: text(post.url, 2_000),
@@ -109,6 +109,7 @@ function safePost(value) {
     quotedExternalId: text(post.quotedExternalId, 240),
     repostExternalId: text(post.repostExternalId, 240),
     publishedAt: number(post.publishedAt),
+    discoveredAt: number(post.discoveredAt || post.receivedAt),
     receivedAt: number(post.receivedAt),
     sourceUpdatedAt: number(post.sourceUpdatedAt),
     deleted: post.deleted === true,
@@ -429,12 +430,16 @@ async function updateBadge(text, color) {
   }
 }
 
-async function socialRequest(path, { method = 'GET', body = null } = {}) {
+async function socialRequest(path, {
+  method = 'GET',
+  body = null,
+  timeoutMs = SOCIAL_REQUEST_TIMEOUT_MS
+} = {}) {
   const config = await settings();
   if (!config.bridgeToken) throw new Error('Bridge token is not configured');
   const normalizedPath = String(path || '').startsWith('/') ? String(path) : `/${path}`;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SOCIAL_REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   let responseText;
   try {
@@ -479,9 +484,8 @@ function clearPostFlushRetry({ resetAttempt = false } = {}) {
 
 function schedulePostFlushRetry() {
   if (postFlushRetryTimer !== null) return;
-  const delay = POST_FLUSH_RETRY_DELAYS_MS[
-    Math.min(postFlushRetryAttempt, POST_FLUSH_RETRY_DELAYS_MS.length - 1)
-  ];
+  const delay = postUploadRetryDelay(postFlushRetryAttempt);
+  if (delay === null) return;
   postFlushRetryAttempt += 1;
   postFlushRetryTimer = setTimeout(() => {
     postFlushRetryTimer = null;
@@ -493,7 +497,8 @@ async function uploadPostRecords(records) {
   try {
     const acknowledgement = await socialRequest('/bridge/posts', {
       method: 'POST',
-      body: { posts: records.map((record) => record.post) }
+      body: { posts: records.map((record) => record.post) },
+      timeoutMs: POST_UPLOAD_REQUEST_TIMEOUT_MS
     });
     if (acknowledgement?.ok !== true) {
       throw new Error('Radar social API did not acknowledge the post batch');
@@ -557,7 +562,7 @@ function requestPostFlush() {
 async function queuePosts(value) {
   const posts = (Array.isArray(value) ? value : [])
     .map(safePost)
-    .filter((post) => post.source && post.externalId)
+    .filter((post) => post?.source && post.externalId)
     .slice(0, 200)
     .sort((left, right) => (left.sourceUpdatedAt || left.publishedAt) - (right.sourceUpdatedAt || right.publishedAt));
   if (!posts.length) return { queued: 0, skipped: true };

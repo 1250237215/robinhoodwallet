@@ -11,6 +11,11 @@ import {
   ANALYSIS_RESULT_OUTBOX_LIMITS,
   createAnalysisResultOutbox
 } from '../bridge/debot-social-bridge/analysis-result-outbox.js';
+import { createPostOutbox } from '../bridge/debot-social-bridge/post-outbox.js';
+import {
+  POST_UPLOAD_RETRY_DELAYS_MS,
+  postUploadRetryDelay
+} from '../bridge/debot-social-bridge/post-retry-policy.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const bridgeDirectory = path.join(root, 'bridge', 'debot-social-bridge');
@@ -84,7 +89,7 @@ function jsonResponse(data) {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.1.2');
+  assert.equal(manifest.version, '1.1.3');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -99,6 +104,14 @@ test('extension manifest, configuration and scripts are valid and narrowly scope
   assert.equal(pageScript.run_at, 'document_start');
   assert.equal(relayScript.world, undefined);
   assert.equal(relayScript.run_at, 'document_start');
+  const pageSource = bridgeSource('debot-page.js');
+  const backgroundSource = bridgeSource('background.js');
+  assert.match(pageSource, /const PRIMARY_POLL_INTERVAL_MS = 2_000/);
+  assert.match(pageSource, /const PRIMARY_API_TIMEOUT_MS = 3_500/);
+  assert.match(pageSource, /const DELIVERY_TIMEOUT_MS = 2_000/);
+  assert.match(pageSource, /timeoutMs: feedSource === 'my' \? PRIMARY_API_TIMEOUT_MS : API_TIMEOUT_MS/);
+  assert.match(backgroundSource, /const POST_UPLOAD_REQUEST_TIMEOUT_MS = 2_000/);
+  assert.match(backgroundSource, /timeoutMs: POST_UPLOAD_REQUEST_TIMEOUT_MS/);
 
   const exampleUrl = `${pathToFileURL(path.join(bridgeDirectory, 'config.example.js')).href}?test=${Date.now()}`;
   const example = (await import(exampleUrl)).default;
@@ -272,6 +285,64 @@ test('analysis result outbox durably deduplicates claims and removes only acknow
   ]);
 });
 
+test('social post outbox accepts only tweet activity and preserves first discovery time', async () => {
+  const stored = {};
+  const storage = {
+    async get(key) {
+      return { [key]: structuredClone(stored[key]) };
+    },
+    async set(value) {
+      Object.assign(stored, structuredClone(value));
+    }
+  };
+  const outbox = createPostOutbox({ storage, now: () => 5_000 });
+  const first = await outbox.enqueue({
+    source: 'twitter',
+    externalId: 'tweet-one',
+    kind: 'post',
+    content: 'real tweet',
+    discoveredAt: 1_000,
+    receivedAt: 1_000,
+    sourceUpdatedAt: 900
+  });
+  assert.equal(first.added, 1);
+  const duplicate = await outbox.enqueue({
+    source: 'twitter',
+    externalId: 'tweet-one',
+    kind: 'post',
+    content: 'real tweet',
+    discoveredAt: 9_000,
+    receivedAt: 9_000,
+    sourceUpdatedAt: 900
+  });
+  assert.equal(duplicate.duplicates, 1);
+  assert.equal((await outbox.readBatch()).records[0].post.discoveredAt, 1_000);
+
+  const rejected = await outbox.enqueue([
+    { source: 'twitter', externalId: 'follow-one', kind: 'follow' },
+    { source: 'twitter', externalId: 'unfollow-one', kind: 'unfollow' },
+    { source: 'twitter', externalId: 'profile-one', kind: 'profile' },
+    { source: 'twitter', externalId: 'unknown-one', kind: '' }
+  ]);
+  assert.equal(rejected.rejected, 4);
+  assert.equal(rejected.queued, 1);
+  assert.deepEqual(POST_UPLOAD_RETRY_DELAYS_MS, [2_000, 4_000, 8_000]);
+  assert.deepEqual([0, 1, 2, 3].map(postUploadRetryDelay), [2_000, 4_000, 8_000, null]);
+
+  stored.debotSocialPostOutboxV1.records.push({
+    key: 'legacy-follow',
+    source: 'twitter',
+    externalId: 'follow:alice:bob',
+    fingerprint: 'legacy',
+    enqueuedAt: 1,
+    sequence: 2,
+    post: { source: 'twitter', externalId: 'follow:alice:bob', kind: 'follow' }
+  });
+  stored.debotSocialPostOutboxV1.nextSequence = 3;
+  assert.equal((await outbox.stats()).queued, 1);
+  assert.equal(stored.debotSocialPostOutboxV1.records.some((record) => record.key === 'legacy-follow'), false);
+});
+
 test('DeBot page bridge polls while hidden, consumes the expected channels and uses the observed API payloads', async () => {
   const window = new FakeWindow('https://debot.ai');
   window.WebSocket = FakeWebSocket;
@@ -288,6 +359,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   };
   const calls = [];
   const timers = new Map();
+  const intervals = [];
   let nextTimerId = 1;
   const setPageTimeout = (callback, delay) => {
     const id = nextTimerId;
@@ -297,7 +369,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   };
   const clearPageTimeout = (id) => timers.delete(id);
   const runPageTimer = (delay) => {
-    const match = [...timers.entries()].find(([, timer]) => timer.delay === delay);
+    const match = [...timers.entries()].findLast(([, timer]) => timer.delay === delay);
     assert.ok(match, `Expected a ${delay}ms page timer`);
     timers.delete(match[0]);
     match[1].callback();
@@ -323,6 +395,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   };
   let subscribedAccounts = [account];
   let resolveDeferredFeatured = null;
+  let resolveDeferredPrimary = null;
   let fetchMode = 'ok';
   const fetchImpl = async (url, options = {}) => {
     calls.push({ url: String(url), options });
@@ -357,6 +430,12 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
         resolveDeferredFeatured = () => resolve(jsonResponse({ feeds: [] }));
       });
     }
+    if (fetchMode === 'deferred-primary'
+      && String(url).startsWith('/api/social/twitter/timeline?')) {
+      return new Promise((resolve) => {
+        resolveDeferredPrimary = () => resolve(jsonResponse({ feeds: [] }));
+      });
+    }
     if (String(url).startsWith('/api/social/subscribe/list?')) {
       return jsonResponse({ list: subscribedAccounts.map((value) => ({ ...value })) });
     }
@@ -389,7 +468,10 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     window,
     document,
     fetch: fetchImpl,
-    setInterval: () => 1,
+    setInterval(callback, delay) {
+      intervals.push({ callback, delay });
+      return intervals.length;
+    },
     setTimeout: setPageTimeout,
     clearTimeout: clearPageTimeout,
     Blob,
@@ -406,6 +488,11 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   assert.ok(calls.some((call) => call.url.startsWith('/api/social/twitter/timeline?')));
   assert.ok(calls.some((call) => call.url.startsWith('/api/social/twitter/hot/timeline?')));
   assert.ok(calls.some((call) => call.url.startsWith('/api/social/twitter/all/timeline?')));
+  assert.equal(calls
+    .filter((call) => call.url.startsWith('/api/social/twitter/'))
+    .every((call) => new URL(call.url, 'https://debot.ai').searchParams.get('tw_types')
+      === 'tweet|retweet|quote|delTweet|reply'), true);
+  assert.deepEqual(intervals.map((interval) => interval.delay), [2_000, 15_000, 30_000]);
   assert.equal(calls.every((call) => call.options.credentials === 'include'), true);
 
   window.dispatchMessage({
@@ -450,6 +537,8 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   fetchMode = 'deferred-featured';
   window.messages.length = 0;
   calls.length = 0;
+  intervals.find((interval) => interval.delay === 15_000).callback();
+  await eventually(() => assert.equal(typeof resolveDeferredFeatured, 'function'));
   window.dispatchMessage({
     source: 'debot-social-relay',
     type: 'force-poll',
@@ -462,7 +551,6 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     message.type === 'force-poll-result'
       && message.payload.requestId === 'page-deferred-featured-probe'
       && message.payload.ok === true), true));
-  assert.equal(typeof resolveDeferredFeatured, 'function');
   const unblockedHeartbeatCount = window.messages.filter((message) => message.type === 'heartbeat').length;
   for (const listener of window.listeners.get('online') || []) listener({ type: 'online' });
   await eventually(() => assert.equal(
@@ -483,11 +571,24 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   fetchMode = 'ok';
 
   calls.length = 0;
+  fetchMode = 'deferred-primary';
+  intervals.find((interval) => interval.delay === 2_000).callback();
+  await eventually(() => assert.equal(typeof resolveDeferredPrimary, 'function'));
+  intervals.find((interval) => interval.delay === 2_000).callback();
+  assert.equal(calls.filter((call) => call.url.startsWith('/api/social/twitter/timeline?')).length, 1);
+  fetchMode = 'ok';
+  resolveDeferredPrimary();
+  await eventually(() => assert.equal(
+    calls.filter((call) => call.url.startsWith('/api/social/twitter/timeline?')).length,
+    2
+  ));
+
+  calls.length = 0;
   let expectedTimelineCalls = 0;
   for (const type of ['online', 'pageshow', 'focus']) {
     const heartbeatCount = window.messages.filter((message) => message.type === 'heartbeat').length;
     for (const listener of window.listeners.get(type) || []) listener({ type });
-    expectedTimelineCalls += 3;
+    expectedTimelineCalls += 1;
     await eventually(() => assert.equal(
       calls.filter((call) => call.url.startsWith('/api/social/twitter/')).length,
       expectedTimelineCalls
@@ -500,7 +601,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const heartbeatCount = window.messages.filter((message) => message.type === 'heartbeat').length;
   document.visibilityState = 'visible';
   document.dispatch('visibilitychange');
-  expectedTimelineCalls += 3;
+  expectedTimelineCalls += 1;
   await eventually(() => assert.equal(
     calls.filter((call) => call.url.startsWith('/api/social/twitter/')).length,
     expectedTimelineCalls
@@ -545,317 +646,91 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   ])}`);
   assert.equal(window.messages.filter((message) => message.type === 'posts').length, acknowledgedCount);
 
-  const encodedFollowId = 'Zm9sbG93OnN0YXJfb2t4OmVuem9pbnNpZGVl';
-  const followEvent = {
-    doc_id: encodedFollowId,
-    platform: 0,
-    user: {
-      username: 'star_okx',
-      name: 'Star_OKX',
-      avatar: 'https://example.test/star.png',
-      followers_count: 234_880
-    },
-    publish_timestamp: 1_784_304_645,
-    save_time: 1_784_304_646
-  };
-  socket.receive(`42${JSON.stringify([
-    'social-user-twitter',
-    { Payload: JSON.stringify({ data: followEvent }) }
-  ])}`);
-  const followDelivery = window.messages
-    .filter((message) => message.type === 'posts')
-    .find((message) => message.payload.posts[0].externalId === 'follow:star_okx:enzoinsidee');
-  assert.equal(followDelivery.payload.posts[0].kind, 'follow');
-  assert.deepEqual({ ...followDelivery.payload.posts[0].target }, {
-    id: '',
-    handle: 'enzoinsidee',
-    name: '',
-    avatarUrl: '',
-    followersCount: 0,
-    url: 'https://x.com/enzoinsidee'
-  });
-  window.dispatchMessage({
-    source: 'debot-social-relay',
-    type: 'posts-delivery-result',
-    payload: { deliveryId: followDelivery.payload.deliveryId, ok: true }
-  });
-  const followCount = window.messages.filter((message) =>
-    message.type === 'posts'
-      && message.payload.posts[0].externalId === 'follow:star_okx:enzoinsidee').length;
-  socket.receive(`42${JSON.stringify([
-    'social-user-twitter',
-    { Payload: JSON.stringify({ data: { ...followEvent, doc_id: 'follow_star_okx_enzoinsidee' } }) }
-  ])}`);
-  assert.equal(window.messages.filter((message) =>
-    message.type === 'posts'
-      && message.payload.posts[0].externalId === 'follow:star_okx:enzoinsidee').length, followCount);
-
-  const unfollowEvent = {
-    ...followEvent,
-    doc_id: 'dW5mb2xsb3c6c3Rhcl9va3g6YmFua3Jib3Q',
-    event_type: 'unfollow',
-    target_user: {
-      id: 'target-user-1',
-      username: 'bankrbot',
-      name: 'Bankr',
-      avatar: 'https://example.test/bankr.png',
-      followers_count: 99
-    }
-  };
-  socket.receive(`42${JSON.stringify([
-    'social-user-twitter',
-    { Payload: JSON.stringify({ data: unfollowEvent }) }
-  ])}`);
-  const unfollow = window.messages
-    .filter((message) => message.type === 'posts')
-    .find((message) => message.payload.posts[0].externalId === 'unfollow:star_okx:bankrbot')
-    .payload.posts[0];
-  assert.equal(unfollow.kind, 'unfollow');
-  assert.deepEqual({ ...unfollow.target }, {
-    id: 'target-user-1',
-    handle: 'bankrbot',
-    name: 'Bankr',
-    avatarUrl: 'https://example.test/bankr.png',
-    followersCount: 99,
-    url: 'https://x.com/bankrbot'
-  });
-
-  const relationCountBeforeConflicts = window.messages.filter((message) => message.type === 'posts').length;
-  socket.receive(`42${JSON.stringify([
-    'social-user-twitter',
-    {
-      Payload: JSON.stringify({
-        data: {
-          ...followEvent,
-          doc_id: Buffer.from('follow:another_actor:bankrbot').toString('base64url'),
-          event_type: 'follow',
-          target_user: { username: 'bankrbot' }
-        }
-      })
-    }
-  ])}`);
-  socket.receive(`42${JSON.stringify([
-    'social-user-twitter',
-    {
-      Payload: JSON.stringify({
-        data: {
-          ...followEvent,
-          doc_id: encodedFollowId,
-          event_type: 'follow',
-          target_user: { username: 'different_target' }
-        }
-      })
-    }
-  ])}`);
-  socket.receive(`42${JSON.stringify([
-    'social-user-twitter',
-    {
-      Payload: JSON.stringify({
-        data: {
-          doc_id: 'opaque-follow-without-actor',
-          event_type: 'follow',
-          target_user: { username: 'bankrbot' },
-          publish_timestamp: 1_784_304_647,
-          save_time: 1_784_304_647
-        }
-      })
-    }
-  ])}`);
-  socket.receive(`42${JSON.stringify([
-    'social-user-twitter',
-    {
-      Payload: JSON.stringify({
-        data: {
-          doc_id: 'opaque-follow-without-target',
-          event_type: 'follow',
-          user: { username: 'star_okx' },
-          publish_timestamp: 1_784_304_648,
-          save_time: 1_784_304_648
-        }
-      })
-    }
-  ])}`);
-  assert.equal(window.messages.filter((message) => message.type === 'posts').length, relationCountBeforeConflicts);
-
-  socket.receive(`42${JSON.stringify([
-    'social-user-twitter',
-    {
-      Payload: JSON.stringify({
-        data: {
-          ...followEvent,
-          doc_id: 'follow_star_okx_raw_target',
-          event_type: 'follow',
-          user: { username: 'star_okx' },
-          target_user: { username: 'raw_target', name: 'Raw target' }
-        }
-      })
-    }
-  ])}`);
-  const rawTargetFollow = window.messages
-    .filter((message) => message.type === 'posts')
-    .find((message) => message.payload.posts[0].externalId === 'follow:star_okx:raw_target')
-    .payload.posts[0];
-  assert.equal(rawTargetFollow.target.handle, 'raw_target');
-  assert.equal(rawTargetFollow.target.name, 'Raw target');
-  assert.equal(rawTargetFollow.author.name, '');
-
-  const authorOnlyId = Buffer.from('follow:star_okx:authoronly').toString('base64url');
-  const authorOnlyTimestamp = 1_784_304_680;
-  const sparseAuthorEvent = {
-    ...followEvent,
-    doc_id: authorOnlyId,
-    user: { username: 'star_okx' },
-    target_user: { username: 'authoronly' },
-    publish_timestamp: authorOnlyTimestamp,
-    save_time: authorOnlyTimestamp
-  };
-  socket.receive(`42${JSON.stringify([
-    'social-user-twitter',
-    { Payload: JSON.stringify({ data: sparseAuthorEvent }) }
-  ])}`);
-  const sparseAuthorDelivery = window.messages
-    .filter((message) => message.type === 'posts')
-    .findLast((message) => message.payload.posts[0].externalId === 'follow:star_okx:authoronly');
-  assert.equal(sparseAuthorDelivery.payload.posts[0].author.name, '');
-  window.dispatchMessage({
-    source: 'debot-social-relay',
-    type: 'posts-delivery-result',
-    payload: { deliveryId: sparseAuthorDelivery.payload.deliveryId, ok: true }
-  });
-  socket.receive(`42${JSON.stringify([
-    'social-user-twitter',
-    {
-      Payload: JSON.stringify({
-        data: {
-          ...sparseAuthorEvent,
-          doc_id: 'follow_star_okx_authoronly',
-          user: {
-            id: 'star-user-id',
-            username: 'star_okx',
-            name: 'Star_OKX',
-            avatar: 'https://example.test/star-rich.png',
-            followers_count: 234_881
-          }
-        }
-      })
-    }
-  ])}`);
-  const richAuthorDelivery = window.messages
-    .filter((message) => message.type === 'posts')
-    .findLast((message) => message.payload.posts[0].externalId === 'follow:star_okx:authoronly');
-  assert.notEqual(richAuthorDelivery.payload.deliveryId, sparseAuthorDelivery.payload.deliveryId);
-  assert.deepEqual({ ...richAuthorDelivery.payload.posts[0].author }, {
-    id: 'star-user-id',
-    handle: 'star_okx',
-    name: 'Star_OKX',
-    avatarUrl: 'https://example.test/star-rich.png',
-    followersCount: 234_881
-  });
-  window.dispatchMessage({
-    source: 'debot-social-relay',
-    type: 'posts-delivery-result',
-    payload: { deliveryId: richAuthorDelivery.payload.deliveryId, ok: true }
-  });
-
-  const mergedTargetId = Buffer.from('follow:star_okx:mergedtarget').toString('base64url');
-  const sparseTargetEvent = {
-    ...followEvent,
-    doc_id: mergedTargetId,
-    publish_timestamp: 1_784_304_700,
-    save_time: 1_784_304_700
-  };
-  socket.receive(`42${JSON.stringify([
-    'social-user-twitter',
-    { Payload: JSON.stringify({ data: sparseTargetEvent }) }
-  ])}`);
-  const sparseTargetDelivery = window.messages
-    .filter((message) => message.type === 'posts')
-    .findLast((message) => message.payload.posts[0].externalId === 'follow:star_okx:mergedtarget');
-  assert.equal(sparseTargetDelivery.payload.posts[0].target.name, '');
-  window.dispatchMessage({
-    source: 'debot-social-relay',
-    type: 'posts-delivery-result',
-    payload: { deliveryId: sparseTargetDelivery.payload.deliveryId, ok: true }
-  });
+  const firstDiscoveredAt = myPosts.payload.posts[0].discoveredAt;
+  assert.equal(Number.isSafeInteger(firstDiscoveredAt), true);
+  await new Promise((resolve) => setTimeout(resolve, 5));
   socket.receive(`42${JSON.stringify([
     'social-hot-twitter',
-    {
-      Payload: JSON.stringify({
-        data: {
-          ...sparseTargetEvent,
-          doc_id: 'follow_star_okx_mergedtarget',
-          user: { username: 'star_okx' },
-          target_user: {
-            id: 'merged-target-id',
-            username: 'mergedtarget',
-            name: 'Merged Target',
-            avatar: 'https://example.test/merged-target.png',
-            followers_count: 456
-          }
-        }
-      })
-    }
+    { Payload: JSON.stringify({ data: incoming }) }
   ])}`);
-  const enrichedTargetDelivery = window.messages
+  const mergedFeedDelivery = window.messages
     .filter((message) => message.type === 'posts')
-    .findLast((message) => message.payload.posts[0].externalId === 'follow:star_okx:mergedtarget');
-  assert.notEqual(enrichedTargetDelivery.payload.deliveryId, sparseTargetDelivery.payload.deliveryId);
-  assert.deepEqual(Array.from(enrichedTargetDelivery.payload.posts[0].feedSources), ['featured', 'my']);
-  assert.equal(enrichedTargetDelivery.payload.posts[0].author.name, 'Star_OKX');
-  assert.equal(enrichedTargetDelivery.payload.posts[0].author.avatarUrl, 'https://example.test/star.png');
-  assert.equal(enrichedTargetDelivery.payload.posts[0].author.followersCount, 234_880);
-  assert.deepEqual({ ...enrichedTargetDelivery.payload.posts[0].target }, {
-    id: 'merged-target-id',
-    handle: 'mergedtarget',
-    name: 'Merged Target',
-    avatarUrl: 'https://example.test/merged-target.png',
-    followersCount: 456,
-    url: 'https://x.com/mergedtarget'
-  });
-  const enrichedCount = window.messages.filter((message) =>
-    message.type === 'posts'
-      && message.payload.posts[0].externalId === 'follow:star_okx:mergedtarget').length;
+    .findLast((message) => message.payload.posts[0].externalId === 'document-1');
+  assert.deepEqual(Array.from(mergedFeedDelivery.payload.posts[0].feedSources), ['featured', 'my']);
+  assert.equal(mergedFeedDelivery.payload.posts[0].discoveredAt, firstDiscoveredAt);
   window.dispatchMessage({
     source: 'debot-social-relay',
     type: 'posts-delivery-result',
-    payload: { deliveryId: enrichedTargetDelivery.payload.deliveryId, ok: false }
-  });
-  runPageTimer(2_000);
-  assert.equal(window.messages.filter((message) =>
-    message.type === 'posts'
-      && message.payload.posts[0].externalId === 'follow:star_okx:mergedtarget').length, enrichedCount + 1);
-  const retriedEnrichedDelivery = window.messages
-    .filter((message) => message.type === 'posts')
-    .findLast((message) => message.payload.posts[0].externalId === 'follow:star_okx:mergedtarget');
-  assert.equal(retriedEnrichedDelivery.payload.posts[0].target.name, 'Merged Target');
-  window.dispatchMessage({
-    source: 'debot-social-relay',
-    type: 'posts-delivery-result',
-    payload: { deliveryId: retriedEnrichedDelivery.payload.deliveryId, ok: true }
+    payload: { deliveryId: mergedFeedDelivery.payload.deliveryId, ok: true }
   });
 
-  const profileSourceUpdatedAt = 1_784_304_800_000;
+  const nonTweetCount = window.messages.filter((message) => message.type === 'posts').length;
+  const nonTweetEvents = [
+    {
+      doc_id: 'Zm9sbG93OnN0YXJfb2t4OmVuem9pbnNpZGVl',
+      platform: 0,
+      event_type: 'follow',
+      user: { username: 'star_okx' },
+      target_user: { username: 'enzoinsidee' },
+      tweet: { tweet_id: 'stale-tweet-must-not-change-follow-kind', text: 'stale content' }
+    },
+    {
+      doc_id: 'dW5mb2xsb3c6c3Rhcl9va3g6YmFua3Jib3Q',
+      platform: 0,
+      event_type: 'unfollow',
+      user: { username: 'star_okx' },
+      target_user: { username: 'bankrbot' }
+    },
+    { doc_id: 'rename-event', tw_type: 'reName', user: { username: 'alice' } },
+    { doc_id: 'avatar-event', tw_type: 'reImage', user: { username: 'alice' } },
+    { doc_id: 'avatar-event-alias', event_type: 'reAvatar', user: { username: 'alice' } },
+    { doc_id: 'description-event', tw_type: 'reDescription', user: { username: 'alice' } },
+    { doc_id: 'unknown-activity', event_type: 'list_update', user: { username: 'alice' } },
+    {
+      doc_id: 'unknown-stale-text',
+      event_type: 'list_update',
+      user: { username: 'alice' },
+      tweet: { text: 'cached text is not a strong tweet identity' }
+    },
+    {
+      doc_id: 'unknown-target-with-stale-tweet',
+      event_type: 'list_update',
+      user: { username: 'alice' },
+      target_user: { username: 'bob' },
+      tweet: { tweet_id: 'cached-tweet', text: 'cached text', date: 1_784_300_000 }
+    }
+  ];
+  for (const event of nonTweetEvents) {
+    socket.receive(`42${JSON.stringify([
+      'social-user-twitter',
+      { Payload: JSON.stringify({ data: event }) }
+    ])}`);
+  }
+  assert.equal(window.messages.filter((message) => message.type === 'posts').length, nonTweetCount);
+
   socket.receive(`42${JSON.stringify([
     'social-user-twitter',
     {
       Payload: JSON.stringify({
         data: {
-          ...followEvent,
-          doc_id: 'legacy-profile-event',
-          tw_type: 'reName',
-          publish_timestamp: profileSourceUpdatedAt,
-          save_time: profileSourceUpdatedAt,
-          profile: { new_name: 'Star OKX' }
+          ...incoming,
+          doc_id: 'unknown-metadata-real-tweet',
+          type: 'twitter-event-v2',
+          tweet: { ...incoming.tweet, tweet_id: 'unknown-metadata-tweet' }
         }
       })
     }
   ])}`);
-  const profileUpdate = window.messages
+  const forwardCompatibleTweet = window.messages
     .filter((message) => message.type === 'posts')
-    .find((message) => message.payload.posts[0].externalId === `profile:star_okx:${profileSourceUpdatedAt}`)
-    .payload.posts[0];
-  assert.equal(profileUpdate.kind, 'profile');
-  assert.equal(Object.hasOwn(profileUpdate, 'target'), false);
+    .findLast((message) => message.payload.posts[0].externalId === 'unknown-metadata-real-tweet');
+  assert.equal(forwardCompatibleTweet.payload.posts[0].kind, 'post');
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'posts-delivery-result',
+    payload: { deliveryId: forwardCompatibleTweet.payload.deliveryId, ok: true }
+  });
+
 
   for (const [externalId, tweetOverrides, expectedKind, expectedDeleted] of [
     ['reply-event', { is_reply: true }, 'reply', false],
@@ -1547,6 +1422,7 @@ test('background uses the bridge secret only as authorization and submits allowl
   let failPostRequests = false;
   let postResponseMode = 'ok';
   let resolveDeferredPost = null;
+  let hangingPostAbortedAt = 0;
   let failAnalysisResultRequests = false;
   let analysisResultResponseStatus = 200;
   const analysisJob = {
@@ -1655,6 +1531,16 @@ test('background uses the bridge secret only as authorization and submits allowl
     const isAnalysisResultRequest = /\/bridge\/debot\/jobs\/\d+\/result$/.test(requestUrl);
     if (failPostRequests && isPostRequest) {
       throw new TypeError('temporary network failure');
+    }
+    if (isPostRequest && postResponseMode === 'hang') {
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          hangingPostAbortedAt = Date.now();
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      });
     }
     if (failAnalysisResultRequests && isAnalysisResultRequest) {
       throw new TypeError('temporary analysis network failure');
@@ -1864,6 +1750,22 @@ test('background uses the bridge secret only as authorization and submits allowl
   await eventually(() => assert.equal(saved.debotAnalysisResultOutboxV1?.records?.length, 0));
   analysisResultResponseStatus = 200;
 
+  const requestsBeforeFilteredActivities = requests.filter((request) => /\/bridge\/posts$/.test(request.url)).length;
+  const filteredActivities = await send({
+    source: 'debot-social-relay',
+    type: 'posts',
+    payload: {
+      posts: [
+        { source: 'twitter', externalId: 'follow:alice:bob', kind: 'follow' },
+        { source: 'twitter', externalId: 'unfollow:alice:bob', kind: 'unfollow' },
+        { source: 'twitter', externalId: 'profile:alice:1', kind: 'profile' }
+      ]
+    }
+  });
+  assert.equal(filteredActivities.ok, true);
+  assert.equal(filteredActivities.payload.skipped, true);
+  assert.equal(requests.filter((request) => /\/bridge\/posts$/.test(request.url)).length, requestsBeforeFilteredActivities);
+
   await send({
     source: 'debot-social-relay',
     type: 'posts',
@@ -1871,16 +1773,11 @@ test('background uses the bridge secret only as authorization and submits allowl
       posts: [{
         source: 'twitter',
         externalId: 'safe-post',
-        kind: 'follow',
+        kind: 'post',
         content: 'public content',
+        discoveredAt: 1_784_300_001_234,
+        receivedAt: 1_784_300_001_234,
         author: { handle: 'alice', cookie: 'debot-cookie-value' },
-        target: {
-          id: 'target-1',
-          handle: 'bob',
-          name: 'Bob',
-          url: 'https://x.com/bob',
-          cookie: 'target-cookie-must-not-leave'
-        },
         raw: { sub_token: 'debot-session-value' },
         authorization: 'Bearer debot-auth-value'
       }]
@@ -1895,15 +1792,8 @@ test('background uses the bridge secret only as authorization and submits allowl
   const postBody = JSON.parse(postRequest.options.body);
   assert.equal(Object.hasOwn(postBody.posts[0], 'raw'), false);
   assert.equal(Object.hasOwn(postBody.posts[0], 'authorization'), false);
-  assert.deepEqual(postBody.posts[0].target, {
-    id: 'target-1',
-    handle: 'bob',
-    name: 'Bob',
-    avatarUrl: '',
-    followersCount: 0,
-    url: 'https://x.com/bob'
-  });
-  assert.equal(postRequest.options.body.includes('target-cookie-must-not-leave'), false);
+  assert.equal(Object.hasOwn(postBody.posts[0], 'target'), false);
+  assert.equal(postBody.posts[0].discoveredAt, 1_784_300_001_234);
   await eventually(() => assert.equal(saved.debotSocialPostOutboxV1?.records?.length, 0));
 
   postResponseMode = 'reject-invalid';
@@ -1913,9 +1803,9 @@ test('background uses the bridge secret only as authorization and submits allowl
     type: 'posts',
     payload: {
       posts: [
-        { source: 'twitter', externalId: 'valid-before-poison', content: 'valid before' },
-        { source: 'twitter', externalId: 'poison-post', content: 'permanently invalid' },
-        { source: 'twitter', externalId: 'valid-after-poison', content: 'valid after' }
+        { source: 'twitter', externalId: 'valid-before-poison', kind: 'post', content: 'valid before' },
+        { source: 'twitter', externalId: 'poison-post', kind: 'post', content: 'permanently invalid' },
+        { source: 'twitter', externalId: 'valid-after-poison', kind: 'post', content: 'valid after' }
       ]
     }
   });
@@ -1934,13 +1824,13 @@ test('background uses the bridge secret only as authorization and submits allowl
   await send({
     source: 'debot-social-relay',
     type: 'posts',
-    payload: { posts: [{ source: 'twitter', externalId: 'flush-race-one', content: 'first durable post' }] }
+    payload: { posts: [{ source: 'twitter', externalId: 'flush-race-one', kind: 'post', content: 'first durable post' }] }
   });
   await eventually(() => assert.equal(typeof resolveDeferredPost, 'function'));
   await send({
     source: 'debot-social-relay',
     type: 'posts',
-    payload: { posts: [{ source: 'twitter', externalId: 'flush-race-two', content: 'second durable post' }] }
+    payload: { posts: [{ source: 'twitter', externalId: 'flush-race-two', kind: 'post', content: 'second durable post' }] }
   });
   assert.equal(requests.filter((request) => /\/bridge\/posts$/.test(request.url)).length, postRequestCount + 1);
   postResponseMode = 'ok';
@@ -1949,6 +1839,22 @@ test('background uses the bridge secret only as authorization and submits allowl
     requests.filter((request) => /\/bridge\/posts$/.test(request.url)).length,
     postRequestCount + 2
   ));
+  await eventually(() => assert.equal(saved.debotSocialPostOutboxV1?.records?.length, 0));
+
+  postResponseMode = 'hang';
+  const hangingPostStartedAt = Date.now();
+  await send({
+    source: 'debot-social-relay',
+    type: 'posts',
+    payload: { posts: [{ source: 'twitter', externalId: 'hanging-upload', kind: 'post', content: 'durable while stalled' }] }
+  });
+  await eventually(() => assert.ok(hangingPostAbortedAt > 0), 3_000);
+  assert.ok(hangingPostAbortedAt - hangingPostStartedAt >= 1_800);
+  assert.ok(hangingPostAbortedAt - hangingPostStartedAt < 2_800);
+  assert.equal(saved.debotSocialPostOutboxV1.records.some((record) =>
+    record.post.externalId === 'hanging-upload'), true);
+  postResponseMode = 'ok';
+  alarmListener({ name: 'debot-social-bridge-recovery' });
   await eventually(() => assert.equal(saved.debotSocialPostOutboxV1?.records?.length, 0));
 
   await send({
@@ -1985,7 +1891,7 @@ test('background uses the bridge secret only as authorization and submits allowl
     source: 'debot-social-relay',
     type: 'posts',
     payload: {
-      posts: [{ source: 'twitter', externalId: 'queued-during-outage', content: 'public queued post' }]
+      posts: [{ source: 'twitter', externalId: 'queued-during-outage', kind: 'post', content: 'public queued post' }]
     }
   });
   assert.equal(queuedDuringOutage.ok, true);
@@ -2005,7 +1911,7 @@ test('background uses the bridge secret only as authorization and submits allowl
   await send({
     source: 'debot-social-relay',
     type: 'posts',
-    payload: { posts: [{ source: 'twitter', externalId: 'negative-ack', content: 'must remain queued' }] }
+    payload: { posts: [{ source: 'twitter', externalId: 'negative-ack', kind: 'post', content: 'must remain queued' }] }
   });
   await eventually(() => assert.ok(requests.filter((request) => /\/bridge\/posts$/.test(request.url)).length > postRequestCount));
   await eventually(() => assert.equal(saved.debotSocialPostOutboxV1?.records?.some((record) =>
@@ -2017,7 +1923,7 @@ test('background uses the bridge secret only as authorization and submits allowl
   await send({
     source: 'debot-social-relay',
     type: 'posts',
-    payload: { posts: [{ source: 'twitter', externalId: 'invalid-ack', content: 'must also remain queued' }] }
+    payload: { posts: [{ source: 'twitter', externalId: 'invalid-ack', kind: 'post', content: 'must also remain queued' }] }
   });
   await eventually(() => assert.ok(requests.filter((request) => /\/bridge\/posts$/.test(request.url)).length > postRequestCount));
   await eventually(() => assert.equal(saved.debotSocialPostOutboxV1?.records?.some((record) =>

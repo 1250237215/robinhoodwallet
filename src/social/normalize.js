@@ -13,6 +13,21 @@ const SOURCE_ALIASES = new Map([
 
 const POST_KINDS = new Set(['post', 'reply', 'quote', 'repost', 'follow', 'unfollow', 'profile', 'delete']);
 const SOCIAL_ACTIVITY_KINDS = new Set(['follow', 'unfollow']);
+const NON_TWEET_KIND_ALIASES = new Map([
+  ['follow', 'follow'],
+  ['unfollow', 'unfollow'],
+  ['profile', 'profile'],
+  ['profilechange', 'profile'],
+  ['profileupdate', 'profile'],
+  ['rename', 'profile'],
+  ['reimage', 'profile'],
+  ['reavatar', 'profile'],
+  ['redescription', 'profile'],
+  ['namechange', 'profile'],
+  ['avatarchange', 'profile'],
+  ['imagechange', 'profile'],
+  ['biochange', 'profile']
+]);
 const CHAIN_TAGS = new Set(['robinhood', 'base', 'solana']);
 const FEED_SOURCE_ORDER = Object.freeze(['all', 'featured', 'my']);
 const FEED_SOURCE_ALIASES = new Map([
@@ -94,6 +109,32 @@ function activityCandidate(value) {
   } catch {
     return '';
   }
+}
+
+function nonTweetKind(value) {
+  const candidate = text(value, 80).toLowerCase().replace(/[-_\s]+/g, '');
+  return NON_TWEET_KIND_ALIASES.get(candidate) || '';
+}
+
+function legacyProfileCandidate(externalId, authorHandle = '') {
+  const candidate = text(externalId, 240);
+  if (/^profile(?::|_)/i.test(candidate)) return true;
+  if (!/^[a-z0-9_-]{12,}$/i.test(candidate)) return false;
+  try {
+    const decoded = Buffer.from(candidate, 'base64url').toString('utf8');
+    const handle = text(authorHandle, 240).replace(/^@/, '').toLowerCase();
+    const normalized = decoded.toLowerCase();
+    return Boolean(handle)
+      && normalized.startsWith(`@${handle}_`)
+      && normalized.includes('https://pbs.twimg.com/profile_images/');
+  } catch {
+    return false;
+  }
+}
+
+function relationshipOccurrenceCandidate(externalId) {
+  return /^(?:follow|unfollow):[a-z0-9_]{1,15}:[a-z0-9_]{1,15}:\d{10,16}$/i
+    .test(text(externalId, 240));
 }
 
 export function parseSocialActivityIdentity(externalId, authorHandle = '') {
@@ -269,10 +310,8 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
     firstValue(input, ['authorHandle', 'username', 'handle'], authorInput.handle || authorInput.username),
     240
   ).replace(/^@/, '');
+  const suppliedActivityCandidate = activityCandidate(suppliedExternalId);
   const activityIdentity = parseSocialActivityIdentity(suppliedExternalId, suppliedAuthorHandle);
-  if (activityCandidate(suppliedExternalId) && !activityIdentity) {
-    throw new TypeError('Social activity identity conflicts with its author');
-  }
   const authorHandle = suppliedAuthorHandle || activityIdentity?.actorHandle || '';
   let externalId = activityIdentity?.canonicalId || suppliedExternalId;
   const content = text(firstValue(input, ['content', 'text', 'body']), 100_000);
@@ -290,25 +329,35 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
     : null;
   const kindCandidate = text(firstValue(input, ['kind', 'postType', 'type'], 'post'), 20).toLowerCase();
   const kind = activityIdentity?.kind || (POST_KINDS.has(kindCandidate) ? kindCandidate : 'post');
+  const filteredKind = nonTweetKind(firstValue(input, ['kind', 'postType', 'type']))
+    || (source === 'twitter' ? activityIdentity?.kind : '')
+    || (source === 'twitter' && suppliedActivityCandidate ? 'relationship' : '')
+    || (source === 'twitter' && relationshipOccurrenceCandidate(suppliedExternalId) ? 'relationship' : '')
+    || (source === 'twitter' && legacyProfileCandidate(suppliedExternalId, authorHandle) ? 'profile' : '');
   const target = normalizeSocialTarget(
     input,
     SOCIAL_ACTIVITY_KINDS.has(kind) ? activityIdentity?.targetHandle : ''
   );
-  if (activityIdentity && target.handle
+  if (!filteredKind && activityIdentity && target.handle
     && target.handle.toLowerCase() !== activityIdentity.targetHandle.toLowerCase()) {
     throw new TypeError('Social activity target conflicts with its externalId');
   }
   if (SOCIAL_ACTIVITY_KINDS.has(kind)) {
-    if (!/^[a-z0-9_]{1,15}$/i.test(authorHandle) || !/^[a-z0-9_]{1,15}$/i.test(target.handle)) {
+    const completeIdentity = /^[a-z0-9_]{1,15}$/i.test(authorHandle)
+      && /^[a-z0-9_]{1,15}$/i.test(target.handle);
+    if (!completeIdentity && !filteredKind) {
       throw new TypeError('Social activity requires valid actor and target handles');
     }
-    externalId = `${kind}:${authorHandle.toLowerCase()}:${target.handle.toLowerCase()}`;
+    if (completeIdentity) externalId = `${kind}:${authorHandle.toLowerCase()}:${target.handle.toLowerCase()}`;
   }
   const publishedAt = normalizeTimestamp(
     firstValue(input, ['publishedAt', 'createdAt', 'postTimestamp', 'timestamp']),
     now
   );
-  const receivedAt = normalizeTimestamp(firstValue(input, ['receivedAt', 'detectedAt']), now);
+  const discoveredAt = normalizeTimestamp(
+    firstValue(input, ['debotDiscoveredAt', 'discoveredAt', 'receivedAt', 'detectedAt']),
+    now
+  );
   const sourceUpdatedAt = normalizeTimestamp(
     firstValue(input, ['sourceUpdatedAt', 'updatedAt', 'editedAt']),
     deletedAt || publishedAt
@@ -411,11 +460,13 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
     repostExternalId: text(firstValue(input, ['repostExternalId', 'repostedId']), 240),
     target,
     publishedAt,
-    receivedAt,
+    discoveredAt,
+    receivedAt: discoveredAt,
     sourceUpdatedAt,
     deletedAt,
     raw: firstValue(input, ['raw', 'payload'], input),
-    _provided: provided
+    _provided: provided,
+    _nonTweetReason: filteredKind ? `non-tweet:${filteredKind}` : ''
   };
 }
 

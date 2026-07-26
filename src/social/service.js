@@ -305,12 +305,15 @@ export function createSocialService({ config, store = null, now = () => Date.now
       const latestBefore = activeStore.getLatestChangeId();
       const results = activeStore.upsertPosts(posts);
       const changes = publishAfter(latestBefore);
-      const summary = { created: 0, updated: 0, deleted: 0, restored: 0, unchanged: 0 };
+      const summary = { created: 0, updated: 0, deleted: 0, restored: 0, unchanged: 0, filtered: 0 };
       for (const result of results) summary[result.action] += 1;
       return {
         ok: true,
         summary,
-        posts: results.map((result) => result.post),
+        posts: results.map((result) => result.post).filter(Boolean),
+        filtered: results
+          .filter((result) => result.action === 'filtered')
+          .map(({ source, externalId, reason }) => ({ source, externalId, reason })),
         changes,
         counts: activeStore.getCounts()
       };

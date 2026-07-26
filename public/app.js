@@ -79,6 +79,7 @@ const SOCIAL_SEARCH_DEBOUNCE_MS = 180;
 const SOCIAL_STREAM_RETRY_MS = 2_000;
 const SOCIAL_STATUS_REFRESH_MS = 5_000;
 const SOCIAL_REALTIME_HEARTBEAT_MAX_AGE_MS = 45_000;
+const SOCIAL_TWEET_KINDS = new Set(['post', 'reply', 'quote', 'repost', 'delete']);
 let MONITOR_THRESHOLD_STORAGE_KEY = 'robinhood-monitor-threshold';
 const MONITOR_SOUNDS = new Set(['alarm', 'bell', 'electronic', 'glass']);
 const MONITOR_EVENT_TYPES = Object.freeze(['buy', 'sell', 'transfer', 'token_create']);
@@ -390,6 +391,13 @@ const numberFormatter = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 
 const compactNumberFormatter = new Intl.NumberFormat('en-US', {
   notation: 'compact',
   maximumFractionDigits: 2
+});
+const socialClockFormatter = new Intl.DateTimeFormat('zh-CN', {
+  hour12: false,
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  fractionalSecondDigits: 3
 });
 
 class ApiError extends Error {
@@ -1293,6 +1301,18 @@ function socialActivityIdentity(post) {
   };
 }
 
+function isSocialTweet(post) {
+  if (!post || typeof post !== 'object') return false;
+  const kind = String(post.kind || (post.deleted ? 'delete' : 'post')).toLowerCase();
+  if (!SOCIAL_TWEET_KINDS.has(kind)) return false;
+  if (socialActivityIdentity(post)) return false;
+  const externalId = String(post.externalId || post.id || '').trim();
+  const decodedId = decodeSocialActivityExternalId(externalId);
+  if (/^(?:follow|unfollow|profile)(?::|_)/i.test(externalId)) return false;
+  if (/^(?:follow|unfollow|profile)(?::|_)/i.test(decodedId)) return false;
+  return true;
+}
+
 function socialPostKey(post) {
   const source = String(post?.source || 'debot').toLowerCase();
   const activity = socialActivityIdentity(post);
@@ -1348,15 +1368,25 @@ function mergeSocialPosts(posts) {
     }
     const feedSources = [...new Set([...socialFeedSources(older), ...socialFeedSources(newer)])];
     if (feedSources.length) merged.feedSources = feedSources;
+    const liveReceipts = [older, newer]
+      .filter((post) => post.webReceiptMode === 'live')
+      .map((post) => monitorTimestampMs(post.webReceivedAt))
+      .filter((value) => value !== null);
+    if (liveReceipts.length) {
+      merged.webReceivedAt = Math.min(...liveReceipts);
+      merged.webReceiptMode = 'live';
+    }
     return merged;
   };
   const byKey = new Map();
   for (const post of state.socialPosts) {
+    if (!isSocialTweet(post)) continue;
     const key = socialPostKey(post);
     if (!key.endsWith(':')) byKey.set(key, mergeRecord(byKey.get(key), post));
   }
   let added = 0;
   for (const post of Array.isArray(posts) ? posts : []) {
+    if (!isSocialTweet(post)) continue;
     const key = socialPostKey(post);
     if (key.endsWith(':')) continue;
     if (!byKey.has(key)) added += 1;
@@ -1386,7 +1416,14 @@ function applySocialBridgeStatus(bridge) {
 
 function applySocialSnapshot(payload) {
   const record = unwrapRecord(payload || {});
-  if (Array.isArray(record.posts)) mergeSocialPosts(record.posts);
+  if (Array.isArray(record.posts)) {
+    const webReceivedAt = Date.now();
+    mergeSocialPosts(record.posts.map((post) => ({
+      ...post,
+      webReceivedAt,
+      webReceiptMode: 'snapshot'
+    })));
+  }
   if (Array.isArray(record.watchlist)) {
     state.socialWatchlist = record.watchlist
       .filter((entry) => entry?.desiredState !== 'removed')
@@ -1406,7 +1443,11 @@ function applySocialChange(change) {
   if (id !== null && id <= state.socialLatestChangeId) return;
   if (id !== null) state.socialLatestChangeId = Math.max(state.socialLatestChangeId, id);
   if (change.entityType === 'post' && change.data) {
-    const added = mergeSocialPosts([change.data]);
+    const added = mergeSocialPosts([{
+      ...change.data,
+      webReceivedAt: Date.now(),
+      webReceiptMode: 'live'
+    }]);
     if (added > 0) {
       const previous = finiteNumber(state.socialCounts.posts) ?? Math.max(0, state.socialPosts.length - added);
       state.socialCounts.posts = previous + added;
@@ -1459,6 +1500,34 @@ function socialInitials(post) {
   return value.slice(0, 2).toUpperCase() || 'S';
 }
 
+function formatSocialClock(value) {
+  const timestamp = monitorTimestampMs(value);
+  return timestamp === null ? '--:--:--.---' : socialClockFormatter.format(new Date(timestamp));
+}
+
+function formatSocialLatencyMs(start, end) {
+  const from = monitorTimestampMs(start);
+  const to = monitorTimestampMs(end);
+  if (from === null || to === null) return '--';
+  const difference = Math.round(to - from);
+  const sign = difference >= 0 ? '+' : '-';
+  return `${sign}${Math.abs(difference).toLocaleString('en-US')}ms`;
+}
+
+function socialLatencyMarkup(post) {
+  const discoveredAt = post.debotDiscoveredAt ?? post.discoveredAt ?? post.receivedAt;
+  const ingestedAt = post.vpsIngestedAt ?? post.ingestedAt ?? post.storedAt;
+  const webReceivedAt = post.webReceivedAt;
+  const webLabel = post.webReceiptMode === 'live' ? '网页接收' : '网页载入';
+  return `
+    <div class="social-latency-trace" aria-label="消息传输时间">
+      <span><b>DeBot 发现</b><time datetime="${escapeHtml(String(discoveredAt ?? ''))}">${escapeHtml(formatSocialClock(discoveredAt))}</time></span>
+      <span><b>VPS 入库</b><time datetime="${escapeHtml(String(ingestedAt ?? ''))}">${escapeHtml(formatSocialClock(ingestedAt))}</time><em>${escapeHtml(formatSocialLatencyMs(discoveredAt, ingestedAt))}</em></span>
+      <span data-receipt-mode="${escapeHtml(post.webReceiptMode || 'unknown')}"><b>${webLabel}</b><time datetime="${escapeHtml(String(webReceivedAt ?? ''))}">${escapeHtml(formatSocialClock(webReceivedAt))}</time><em>${escapeHtml(formatSocialLatencyMs(ingestedAt, webReceivedAt))}</em></span>
+    </div>
+  `;
+}
+
 function socialActivityMarkup(post) {
   const activity = socialActivityIdentity(post);
   if (!activity) return '';
@@ -1486,6 +1555,7 @@ function socialProfileActivityMarkup(post) {
 function visibleSocialPosts() {
   const query = state.socialSearchQuery.trim().toLowerCase();
   return state.socialPosts.filter((post) => {
+    if (!isSocialTweet(post)) return false;
     if (state.socialPlatformFilter !== 'all' && post.source !== state.socialPlatformFilter) return false;
     if (state.socialChainFilter !== 'all' && !(Array.isArray(post.chainTags) && post.chainTags.includes(state.socialChainFilter))) return false;
     const feeds = socialFeedSources(post);
@@ -1645,6 +1715,7 @@ function renderSocialFeed() {
             </div>
             <time class="social-post-time" datetime="${escapeHtml(String(post.publishedAt ?? ''))}" data-live-timestamp="${escapeHtml(String(post.publishedAt ?? ''))}" title="${escapeHtml(formatDateTime(post.publishedAt))}" aria-live="off">${escapeHtml(formatMonitorAge(post.publishedAt))}</time>
           </header>
+          ${socialLatencyMarkup(post)}
           ${activityMarkup || profileActivityMarkup || (post.content ? `<p class="social-post-content">${escapeHtml(post.content)}</p>` : '')}
           ${!nonPostActivity && post.translatedContent && post.translatedContent !== post.content ? `<p class="social-post-translation">${escapeHtml(post.translatedContent)}</p>` : ''}
           ${contractMarkup ? `<div class="social-post-contracts">${contractMarkup}</div>` : ''}

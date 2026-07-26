@@ -33,6 +33,8 @@ function boolean(value) {
 
 function postFromRow(row) {
   if (!row) return null;
+  const debotDiscoveredAt = Number(row.discovered_at || row.received_at);
+  const vpsIngestedAt = Number(row.ingested_at || row.stored_at);
   return {
     id: Number(row.id),
     source: row.source,
@@ -57,6 +59,10 @@ function postFromRow(row) {
     repostExternalId: row.repost_external_id,
     target: parseJson(row.target_json, {}),
     publishedAt: Number(row.published_at),
+    debotDiscoveredAt,
+    vpsIngestedAt,
+    discoveredAt: debotDiscoveredAt,
+    ingestedAt: vpsIngestedAt,
     receivedAt: Number(row.received_at),
     sourceUpdatedAt: Number(row.source_updated_at),
     deleted: row.deleted_at !== null,
@@ -448,6 +454,119 @@ function migrateProfileActivities(db) {
   });
 }
 
+function nonTweetRowReason(row) {
+  const kind = String(row.kind || '').trim().toLowerCase().replace(/[-_\s]+/g, '');
+  if (['follow', 'unfollow'].includes(kind)) return `non-tweet:${kind}`;
+  if ([
+    'profile',
+    'profilechange',
+    'profileupdate',
+    'rename',
+    'reimage',
+    'reavatar',
+    'redescription',
+    'namechange',
+    'avatarchange',
+    'imagechange',
+    'biochange'
+  ].includes(kind)) return 'non-tweet:profile';
+
+  if (row.source === 'twitter' && parseSocialActivityIdentity(row.external_id, row.author_handle)) {
+    return 'non-tweet:relationship';
+  }
+  if (row.source === 'twitter'
+    && /^(?:follow|unfollow):[a-z0-9_]{1,15}:[a-z0-9_]{1,15}:\d{10,16}$/i.test(String(row.external_id || ''))) {
+    return 'non-tweet:relationship';
+  }
+  if (row.source === 'twitter' && legacyProfileIdentity(row)) return 'non-tweet:profile';
+
+  const raw = parseJson(row.raw_json, {});
+  const rawTweet = raw?.tweet && typeof raw.tweet === 'object' ? raw.tweet : {};
+  const rawTypes = [
+    raw?.kind,
+    raw?.postType,
+    raw?.tw_type,
+    raw?.twType,
+    raw?.twitter_type,
+    raw?.event_type,
+    raw?.eventType,
+    raw?.action,
+    raw?.type,
+    raw?.tweet_type,
+    rawTweet?.tweet_type
+  ];
+  for (const value of rawTypes) {
+    const candidate = String(value || '').trim().toLowerCase().replace(/[-_\s]+/g, '');
+    if (['follow', 'unfollow'].includes(candidate)) return `non-tweet:${candidate}`;
+    if ([
+      'profile',
+      'profilechange',
+      'profileupdate',
+      'rename',
+      'reimage',
+      'reavatar',
+      'redescription',
+      'namechange',
+      'avatarchange',
+      'imagechange',
+      'biochange'
+    ].includes(candidate)) return 'non-tweet:profile';
+  }
+  return '';
+}
+
+function nonTweetChangeReason(row) {
+  const payload = parseJson(row.payload_json, {});
+  const author = payload?.author && typeof payload.author === 'object' ? payload.author : {};
+  return nonTweetRowReason({
+    source: payload?.source,
+    external_id: payload?.externalId || payload?.external_id,
+    kind: payload?.kind,
+    author_handle: author.handle || payload?.authorHandle,
+    content: payload?.content,
+    url: payload?.url,
+    published_at: payload?.publishedAt,
+    source_updated_at: payload?.sourceUpdatedAt,
+    raw_json: json(payload?.raw || {})
+  });
+}
+
+function purgeNonTweetRows(db) {
+  const rows = db.prepare(`
+    SELECT id, source, external_id, kind, author_handle, content, url, published_at,
+           source_updated_at, raw_json
+    FROM social_posts
+  `).all();
+  const rejected = rows
+    .map((row) => ({ row, reason: nonTweetRowReason(row) }))
+    .filter((candidate) => candidate.reason);
+
+  const deleteChanges = db.prepare(`
+    DELETE FROM social_changes WHERE entity_type = 'post' AND entity_id = ?
+  `);
+  const deleteChange = db.prepare('DELETE FROM social_changes WHERE id = ?');
+  const deletePost = db.prepare('DELETE FROM social_posts WHERE id = ?');
+  return transaction(db, () => {
+    let changesDeleted = 0;
+    for (const { row } of rejected) {
+      changesDeleted += Number(deleteChanges.run(String(row.id)).changes || 0);
+      deletePost.run(row.id);
+    }
+    const orphanedNonTweets = db.prepare(`
+      SELECT social_changes.id, social_changes.payload_json
+      FROM social_changes
+      WHERE social_changes.entity_type = 'post'
+        AND NOT EXISTS (
+          SELECT 1 FROM social_posts WHERE CAST(social_posts.id AS TEXT) = social_changes.entity_id
+        )
+    `).all().filter((row) => nonTweetChangeReason(row));
+    for (const row of orphanedNonTweets) {
+      changesDeleted += Number(deleteChange.run(row.id).changes || 0);
+    }
+    return { postsDeleted: rejected.length, changesDeleted };
+  });
+}
+
 function resolveActivityOccurrence(db, normalized) {
   const activity = parseSocialActivityIdentity(normalized.externalId, normalized.authorHandle);
   if (!activity || normalized.source !== 'twitter') return normalized;
@@ -502,6 +621,8 @@ function postValues(post, raw, now) {
     json(post.target),
     post.publishedAt,
     post.receivedAt,
+    post.discoveredAt,
+    now,
     post.sourceUpdatedAt,
     post.deletedAt,
     json(raw),
@@ -542,6 +663,8 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       target_json TEXT NOT NULL DEFAULT '{}',
       published_at INTEGER NOT NULL,
       received_at INTEGER NOT NULL,
+      discovered_at INTEGER NOT NULL DEFAULT 0,
+      ingested_at INTEGER NOT NULL DEFAULT 0,
       source_updated_at INTEGER NOT NULL,
       deleted_at INTEGER,
       raw_json TEXT NOT NULL DEFAULT '{}',
@@ -645,7 +768,16 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
   if (!socialPostColumns.has('target_json')) {
     db.exec("ALTER TABLE social_posts ADD COLUMN target_json TEXT NOT NULL DEFAULT '{}'");
   }
+  if (!socialPostColumns.has('discovered_at')) {
+    db.exec('ALTER TABLE social_posts ADD COLUMN discovered_at INTEGER NOT NULL DEFAULT 0');
+    db.exec('UPDATE social_posts SET discovered_at = received_at WHERE discovered_at = 0');
+  }
+  if (!socialPostColumns.has('ingested_at')) {
+    db.exec('ALTER TABLE social_posts ADD COLUMN ingested_at INTEGER NOT NULL DEFAULT 0');
+    db.exec('UPDATE social_posts SET ingested_at = stored_at WHERE ingested_at = 0');
+  }
 
+  const initialNonTweetPurge = purgeNonTweetRows(db);
   migrateSocialActivities(db);
   migrateProfileActivities(db);
 
@@ -654,8 +786,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       source, external_id, kind, author_id, author_handle, author_name, author_avatar_url,
       author_followers, content, translated_content, url, media_json, contract_addresses_json,
       chain_tags_json, feed_sources_json, reply_to_external_id, quoted_external_id, repost_external_id,
-      target_json, published_at, received_at, source_updated_at, deleted_at, raw_json, stored_at, updated_at
-    ) VALUES (${Array(26).fill('?').join(', ')})
+      target_json, published_at, received_at, discovered_at, ingested_at, source_updated_at,
+      deleted_at, raw_json, stored_at, updated_at
+    ) VALUES (${Array(28).fill('?').join(', ')})
   `);
   const updatePost = db.prepare(`
     UPDATE social_posts SET
@@ -663,7 +796,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       author_followers = ?, content = ?, translated_content = ?, url = ?, media_json = ?,
       contract_addresses_json = ?, chain_tags_json = ?, feed_sources_json = ?, reply_to_external_id = ?,
       quoted_external_id = ?, repost_external_id = ?, target_json = ?, published_at = ?, received_at = ?,
-      source_updated_at = ?, deleted_at = ?, raw_json = ?, updated_at = ?
+      discovered_at = ?, source_updated_at = ?, deleted_at = ?, raw_json = ?, updated_at = ?
     WHERE id = ?
   `);
   const insertChange = db.prepare(`
@@ -678,6 +811,16 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
 
   function applyPost(input, timestamp) {
     const normalized = resolveActivityOccurrence(db, normalizeSocialPost(input, { now: timestamp }));
+    if (normalized._nonTweetReason) {
+      return {
+        action: 'filtered',
+        post: null,
+        change: null,
+        reason: normalized._nonTweetReason,
+        source: normalized.source,
+        externalId: normalized.externalId
+      };
+    }
     const existingRow = db.prepare('SELECT * FROM social_posts WHERE source = ? AND external_id = ?')
       .get(normalized.source, normalized.externalId);
     if (!existingRow) {
@@ -733,6 +876,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       repostExternalId: choose('repostExternalId', existing.repostExternalId),
       target: provided.has('target') ? mergeSocialTarget(existing.target, normalized.target) : existing.target,
       publishedAt: choose('publishedAt', existing.publishedAt),
+      discoveredAt: Math.min(existing.debotDiscoveredAt, normalized.discoveredAt),
       receivedAt: Math.min(existing.receivedAt, normalized.receivedAt),
       sourceUpdatedAt: Math.max(existing.sourceUpdatedAt, normalized.sourceUpdatedAt),
       deletedAt: choose('deletedAt', existing.deletedAt)
@@ -760,6 +904,8 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       repostExternalId: merged.repostExternalId,
       target: merged.target,
       publishedAt: merged.publishedAt,
+      debotDiscoveredAt: merged.discoveredAt,
+      discoveredAt: merged.discoveredAt,
       receivedAt: merged.receivedAt,
       sourceUpdatedAt: merged.sourceUpdatedAt,
       deleted: merged.deletedAt !== null,
@@ -793,6 +939,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       json(merged.target),
       merged.publishedAt,
       merged.receivedAt,
+      merged.discoveredAt,
       merged.sourceUpdatedAt,
       merged.deletedAt,
       json(normalized.raw),
@@ -918,6 +1065,10 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
 
   return {
     db,
+    initialNonTweetPurge,
+    purgeNonTweetEvents() {
+      return purgeNonTweetRows(db);
+    },
     upsertPosts(inputs) {
       if (!Array.isArray(inputs)) throw new TypeError('posts must be an array');
       const timestamp = now();
