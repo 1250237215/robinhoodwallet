@@ -108,27 +108,91 @@ function writeEvent(res, change) {
   res.write(`id: ${change.id}\nevent: ${change.type}\ndata: ${JSON.stringify(change)}\n\n`);
 }
 
-function openStream(req, res, service, after, onClose) {
+function writeEventWithBackpressure(res, change) {
+  if (res.destroyed || res.writableEnded) return false;
+  const writable = res.write(`id: ${change.id}\nevent: ${change.type}\ndata: ${JSON.stringify(change)}\n\n`);
+  if (writable) return true;
+  return new Promise((resolve) => {
+    const settle = (ready) => {
+      res.off('drain', onDrain);
+      res.off('close', onClose);
+      res.off('error', onClose);
+      resolve(ready);
+    };
+    const onDrain = () => settle(true);
+    const onClose = () => settle(false);
+    res.once('drain', onDrain);
+    res.once('close', onClose);
+    res.once('error', onClose);
+  });
+}
+
+function writeHeartbeat(res, latestChangeId, streamEpoch) {
+  res.write(`event: heartbeat\ndata: ${JSON.stringify({
+    serverTime: Date.now(),
+    latestChangeId,
+    streamEpoch
+  })}\n\n`);
+}
+
+function openStream(req, res, service, after, clientEpoch, streamEpoch, onClose) {
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
     'cache-control': 'no-store',
     connection: 'keep-alive',
     'x-accel-buffering': 'no'
   });
-  res.write(`event: snapshot\ndata: ${JSON.stringify(service.getSnapshot({ postLimit: 50 }))}\n\n`);
-  let latestId = after;
+  const serverLatestId = service.store.getLatestChangeId();
+  const resetRequired = after > serverLatestId
+    || (after > 0 && clientEpoch && clientEpoch !== streamEpoch);
+  let latestId = resetRequired ? 0 : after;
+  if (after === 0 || resetRequired) {
+    const snapshot = { ...service.getSnapshot({ postLimit: 100 }), streamEpoch };
+    latestId = Math.max(latestId, Number(snapshot.latestChangeId) || 0);
+    const eventName = resetRequired ? 'reset' : 'snapshot';
+    res.write(`event: ${eventName}\ndata: ${JSON.stringify(snapshot)}\n\n`);
+  }
+  let replaying = after > 0 && !resetRequired;
+  const bufferedChanges = [];
   const unsubscribe = service.subscribe((change) => {
     if (change.id <= latestId || res.destroyed) return;
+    if (replaying) {
+      bufferedChanges.push(change);
+      return;
+    }
     latestId = change.id;
     writeEvent(res, change);
   });
-  for (const change of service.listChanges({ after, limit: 1_000 })) {
-    if (change.id <= latestId) continue;
-    latestId = change.id;
-    writeEvent(res, change);
-  }
+  const replayChanges = async () => {
+    while (!res.destroyed) {
+      const changes = service.listChanges({ after: latestId, limit: 1_000 });
+      if (!changes.length) break;
+      for (const change of changes) {
+        if (change.id <= latestId) continue;
+        latestId = change.id;
+        const ready = writeEventWithBackpressure(res, change);
+        if (ready !== true && !(await ready)) return;
+      }
+      if (changes.length < 1_000) break;
+    }
+    while (!res.destroyed && bufferedChanges.length) {
+      const pending = bufferedChanges.splice(0).sort((left, right) => left.id - right.id);
+      for (const change of pending) {
+        if (change.id <= latestId) continue;
+        latestId = change.id;
+        const ready = writeEventWithBackpressure(res, change);
+        if (ready !== true && !(await ready)) return;
+      }
+    }
+    replaying = false;
+    if (!res.destroyed) writeHeartbeat(res, service.store.getLatestChangeId(), streamEpoch);
+  };
+  if (replaying) void replayChanges().catch(() => res.destroy());
+  else writeHeartbeat(res, service.store.getLatestChangeId(), streamEpoch);
   const heartbeat = setInterval(() => {
-    if (!res.destroyed) res.write(`: keepalive ${Date.now()}\n\n`);
+    if (!res.destroyed && !replaying) {
+      writeHeartbeat(res, service.store.getLatestChangeId(), streamEpoch);
+    }
   }, 15_000);
   heartbeat.unref?.();
   let closed = false;
@@ -158,6 +222,7 @@ function openStream(req, res, service, after, onClose) {
 export function createSocialApiHandler({ service, bridgeToken = '' }) {
   if (!service) throw new TypeError('Social service is required');
   const token = String(bridgeToken || '').trim();
+  const streamEpoch = crypto.randomUUID();
   const streams = new Set();
   async function handleSocialApi(req, res, url) {
     if (url.pathname !== '/api/social' && !url.pathname.startsWith('/api/social/')) return false;
@@ -165,7 +230,7 @@ export function createSocialApiHandler({ service, bridgeToken = '' }) {
       if (url.pathname === '/api/social' || url.pathname === '/api/social/snapshot') {
         method(req, ['GET']);
         const postLimit = integerParam(url.searchParams, 'postLimit', 50, 1, 100);
-        sendJson(res, 200, service.getSnapshot({ postLimit }));
+        sendJson(res, 200, { ...service.getSnapshot({ postLimit }), streamEpoch });
         return true;
       }
 
@@ -175,6 +240,8 @@ export function createSocialApiHandler({ service, bridgeToken = '' }) {
           ok: true,
           bridge: service.getConnection(),
           counts: service.store.getCounts(),
+          latestChangeId: service.store.getLatestChangeId(),
+          streamEpoch,
           serverTime: Date.now()
         });
         return true;
@@ -262,8 +329,9 @@ export function createSocialApiHandler({ service, bridgeToken = '' }) {
         const after = url.searchParams.has('after')
           ? integerParam(url.searchParams, 'after', 0, 0, Number.MAX_SAFE_INTEGER)
           : Number.isSafeInteger(headerAfter) && headerAfter > 0 ? headerAfter : 0;
+        const clientEpoch = String(url.searchParams.get('epoch') || '').slice(0, 100);
         let close = null;
-        close = openStream(req, res, service, after, () => streams.delete(close));
+        close = openStream(req, res, service, after, clientEpoch, streamEpoch, () => streams.delete(close));
         streams.add(close);
         return true;
       }

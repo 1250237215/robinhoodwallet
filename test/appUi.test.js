@@ -1189,8 +1189,10 @@ test('chain and social elapsed times advance every second without rerendering ei
   );
   assert.match(appJs, /function applySocialBridgeStatus\(bridge\)[\s\S]*state\.socialBridgeObservedAt = performance\.now\(\)/);
   assert.match(appJs, /const reportedHeartbeatAgeMs = finiteNumber\(bridge\.heartbeatAgeMs\);[\s\S]*performance\.now\(\) - bridgeObservedAt[\s\S]*reportedHeartbeatAgeMs \+ elapsedSinceObservationMs/);
-  assert.match(appJs, /document\.addEventListener\('visibilitychange', updateVisibleLiveRelativeTimes\)/);
-  assert.match(appJs, /window\.addEventListener\('focus', updateVisibleLiveRelativeTimes\)/);
+  assert.match(appJs, /function refreshVisibleRealtimeState\(\)[\s\S]*updateVisibleLiveRelativeTimes\(\)[\s\S]*void loadSocialStatus\(state\.socialSequence\)/);
+  assert.match(appJs, /document\.addEventListener\('visibilitychange', refreshVisibleRealtimeState\)/);
+  assert.match(appJs, /window\.addEventListener\('focus', refreshVisibleRealtimeState\)/);
+  assert.match(appJs, /window\.addEventListener\('online', refreshVisibleRealtimeState\)/);
   assert.match(appJs, /window\.addEventListener\('pageshow', \(event\) => \{[\s\S]*event\.persisted[\s\S]*void startMonitorPage\(\)/);
   assert.match(stylesCss, /\.social-post-time \{[\s\S]*font-variant-numeric: tabular-nums/);
   assert.match(stylesCss, /\.social-post-time \{[\s\S]*white-space: normal/);
@@ -1201,9 +1203,9 @@ test('social snapshot and SSE lifecycle stay pinned to the Robinhood host servic
   assert.match(appJs, /const APP_BASE = \/\^\\\/robinhood-radar\(\?:\\\/\|\$\)\/\.test\(window\.location\.pathname\)/);
   assert.match(appJs, /const SOCIAL_API_ROOT = `\$\{APP_BASE\}\/api\/social`/);
   assert.match(appJs, /fetchJson\(`\$\{SOCIAL_API_ROOT\}\?postLimit=100`, \{ signal: controller\.signal \}\)/);
-  assert.match(appJs, /fetchJson\(`\$\{SOCIAL_API_ROOT\}\/status`\)/);
-  assert.match(appJs, /new EventSource\(`\$\{SOCIAL_API_ROOT\}\/stream\?after=\$\{encodeURIComponent\(state\.socialLatestChangeId\)\}`\)/);
-  for (const eventType of ['snapshot', 'post.created', 'post.updated', 'post.deleted', 'post.restored', 'watchlist.updated']) {
+  assert.match(appJs, /fetchJson\(`\$\{SOCIAL_API_ROOT\}\/status`, \{ signal: controller\.signal \}\)/);
+  assert.match(appJs, /new EventSource\(`\$\{SOCIAL_API_ROOT\}\/stream\?after=\$\{encodeURIComponent\(state\.socialLatestChangeId\)\}&epoch=\$\{encodeURIComponent\(state\.socialStreamEpoch\)\}`\)/);
+  for (const eventType of ['snapshot', 'reset', 'heartbeat', 'post.created', 'post.updated', 'post.deleted', 'post.restored', 'watchlist.updated']) {
     assert.equal(appJs.includes(`'${eventType}'`), true, `missing social SSE event ${eventType}`);
   }
   assert.match(appJs, /function socialLifecycleIsCurrent\(sequence\)/);
@@ -1215,7 +1217,19 @@ test('social snapshot and SSE lifecycle stay pinned to the Robinhood host servic
   assert.match(appJs, /clearInterval\(state\.socialStatusTimer\)/);
   assert.match(appJs, /void startSocialMonitor\(\{ manual \}\)/);
   assert.match(appJs, /function stopMonitorTransport\(\)[\s\S]*stopSocialMonitor\(\)/);
-  assert.match(appJs, /state\.socialLatestChangeId = Math\.max\(0, Math\.trunc\(latestChangeId\)\)/);
+  assert.match(appJs, /state\.socialLatestChangeId = resetCursor\s+\? normalizedChangeId\s+: Math\.max\(state\.socialLatestChangeId, normalizedChangeId\)/);
+  assert.match(appJs, /applySocialSnapshot\(parseSocialStreamEvent\(event\), \{ resetCursor: true \}\)/);
+  assert.match(appJs, /const SOCIAL_STATUS_REFRESH_MS = 2_000/);
+  assert.match(appJs, /const SOCIAL_STATUS_TIMEOUT_MS = 1_500/);
+  assert.match(appJs, /const SOCIAL_SNAPSHOT_TIMEOUT_MS = 5_000/);
+  assert.match(appJs, /state\.socialStatusAbortController\?\.abort\(\)/);
+  assert.match(appJs, /const SOCIAL_STREAM_STALE_MS = 35_000/);
+  assert.match(appJs, /Math\.trunc\(remoteLatestChangeId\) > state\.socialLatestChangeId/);
+  assert.match(appJs, /if \(missedChanges \|\| cursorMovedBack \|\| streamEpochChanged \|\| streamIsSilent\) \{\s+recoverSocialStream\(expectedSequence, remoteLatestChangeId\)/);
+  assert.match(appJs, /function recoverSocialStream\(sequence, remoteLatestChangeId = state\.socialLatestChangeId\)/);
+  assert.match(appJs, /state\.socialRecoveryBusy[\s\S]{0,180}recoveryAgeMs < SOCIAL_RECOVERY_RETRY_MS \|\| streamActivityAgeMs < SOCIAL_RECOVERY_RETRY_MS/);
+  assert.match(appJs, /source\.addEventListener\('heartbeat'/);
+  assert.doesNotMatch(appJs, /state\.socialReconnectTimer = setTimeout\(async \(\) => \{[\s\S]{0,240}loadSocialSnapshot/);
   assert.match(appJs, /state\.socialExtensionReady = message\.configured === true/);
   assert.match(appJs, /if \(state\.socialExtensionReady\) return requestSocialExtension/);
   assert.match(appJs, /authorization: `Bearer \$\{token\}`/);

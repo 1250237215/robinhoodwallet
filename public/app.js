@@ -77,7 +77,11 @@ const SOCIAL_API_ROOT = `${APP_BASE}/api/social`;
 const SOCIAL_DEVICE_TOKEN_STORAGE_KEY = 'robinhood-social-device-token';
 const SOCIAL_SEARCH_DEBOUNCE_MS = 180;
 const SOCIAL_STREAM_RETRY_MS = 2_000;
-const SOCIAL_STATUS_REFRESH_MS = 5_000;
+const SOCIAL_STATUS_REFRESH_MS = 2_000;
+const SOCIAL_STATUS_TIMEOUT_MS = 1_500;
+const SOCIAL_SNAPSHOT_TIMEOUT_MS = 5_000;
+const SOCIAL_STREAM_STALE_MS = 35_000;
+const SOCIAL_RECOVERY_RETRY_MS = 3_000;
 const SOCIAL_REALTIME_HEARTBEAT_MAX_AGE_MS = 45_000;
 const SOCIAL_TWEET_KINDS = new Set(['post', 'reply', 'quote', 'repost', 'delete']);
 let MONITOR_THRESHOLD_STORAGE_KEY = 'robinhood-monitor-threshold';
@@ -365,8 +369,16 @@ const state = {
   socialEventSource: null,
   socialReconnectTimer: null,
   socialStatusTimer: null,
+  socialStatusBusy: false,
+  socialStatusRequestSequence: 0,
+  socialStatusAbortController: null,
   socialSnapshotAbortController: null,
   socialLatestChangeId: 0,
+  socialStreamEpoch: '',
+  socialLastStreamActivityAt: null,
+  socialRecoveryBusy: false,
+  socialRecoveryStartedAt: null,
+  socialRecoveryTargetId: 0,
   socialPosts: [],
   socialWatchlist: [],
   socialBridge: { state: 'loading', paired: false, online: false, readOnly: true },
@@ -1414,9 +1426,24 @@ function applySocialBridgeStatus(bridge) {
   state.socialBridgeObservedAt = performance.now();
 }
 
-function applySocialSnapshot(payload) {
+function markSocialStreamActivity() {
+  state.socialLastStreamActivityAt = performance.now();
+}
+
+function completeSocialRecovery(remoteLatestChangeId = state.socialLatestChangeId) {
+  if (!state.socialRecoveryBusy) return;
+  const remoteId = finiteNumber(remoteLatestChangeId);
+  const targetId = Math.max(state.socialRecoveryTargetId, remoteId === null ? 0 : Math.trunc(remoteId));
+  if (state.socialLatestChangeId < targetId) return;
+  state.socialRecoveryBusy = false;
+  state.socialRecoveryStartedAt = null;
+  state.socialRecoveryTargetId = 0;
+}
+
+function applySocialSnapshot(payload, { resetCursor = false } = {}) {
   const record = unwrapRecord(payload || {});
   if (Array.isArray(record.posts)) {
+    if (resetCursor) state.socialPosts = [];
     const webReceivedAt = Date.now();
     mergeSocialPosts(record.posts.map((post) => ({
       ...post,
@@ -1432,7 +1459,15 @@ function applySocialSnapshot(payload) {
   applySocialBridgeStatus(record.bridge);
   if (record.counts && typeof record.counts === 'object') state.socialCounts = { ...record.counts };
   const latestChangeId = finiteNumber(record.latestChangeId);
-  if (latestChangeId !== null) state.socialLatestChangeId = Math.max(0, Math.trunc(latestChangeId));
+  if (latestChangeId !== null) {
+    const normalizedChangeId = Math.max(0, Math.trunc(latestChangeId));
+    state.socialLatestChangeId = resetCursor
+      ? normalizedChangeId
+      : Math.max(state.socialLatestChangeId, normalizedChangeId);
+    if (resetCursor) state.socialRecoveryTargetId = normalizedChangeId;
+  }
+  if (record.streamEpoch) state.socialStreamEpoch = String(record.streamEpoch);
+  completeSocialRecovery(latestChangeId);
   state.socialConnected = record.ok !== false;
   renderSocialMonitor();
 }
@@ -1458,6 +1493,7 @@ function applySocialChange(change) {
     state.socialCounts.unsyncedWatchlist = state.socialWatchlist
       .filter((entry) => entry.syncStatus !== 'synced').length;
   }
+  completeSocialRecovery();
   renderSocialMonitor();
 }
 
@@ -2365,6 +2401,11 @@ async function loadSocialSnapshot({ quiet = false, expectedSequence = state.soci
   state.socialSnapshotAbortController?.abort();
   const controller = new AbortController();
   state.socialSnapshotAbortController = controller;
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, SOCIAL_SNAPSHOT_TIMEOUT_MS);
   if (!quiet) elements.socialRefreshButton.disabled = true;
   try {
     const payload = await fetchJson(`${SOCIAL_API_ROOT}?postLimit=100`, { signal: controller.signal });
@@ -2372,32 +2413,60 @@ async function loadSocialSnapshot({ quiet = false, expectedSequence = state.soci
     applySocialSnapshot(payload);
     return true;
   } catch (error) {
-    if (error?.name === 'AbortError' || !socialLifecycleIsCurrent(expectedSequence)) return false;
+    if ((error?.name === 'AbortError' && !timedOut) || !socialLifecycleIsCurrent(expectedSequence)) return false;
     state.socialConnected = false;
     renderSocialBridgeStatus();
-    elements.socialMonitorSummary.textContent = error.message;
-    if (!quiet) showToast(`社媒监控刷新失败：${error.message}`, 'error');
+    const message = timedOut ? '请求超时，正在切换实时流' : error.message;
+    elements.socialMonitorSummary.textContent = message;
+    if (!quiet) showToast(`社媒监控刷新失败：${message}`, 'error');
     return false;
   } finally {
+    clearTimeout(timeout);
     if (state.socialSnapshotAbortController === controller) state.socialSnapshotAbortController = null;
     if (socialLifecycleIsCurrent(expectedSequence)) elements.socialRefreshButton.disabled = false;
   }
 }
 
 async function loadSocialStatus(expectedSequence = state.socialSequence) {
-  if (!socialLifecycleIsCurrent(expectedSequence)) return;
+  if (!socialLifecycleIsCurrent(expectedSequence) || state.socialStatusBusy) return;
+  state.socialStatusBusy = true;
+  const requestSequence = ++state.socialStatusRequestSequence;
+  const controller = new AbortController();
+  state.socialStatusAbortController = controller;
+  const timeout = setTimeout(() => controller.abort(), SOCIAL_STATUS_TIMEOUT_MS);
   try {
-    const payload = unwrapRecord(await fetchJson(`${SOCIAL_API_ROOT}/status`));
+    const payload = unwrapRecord(await fetchJson(`${SOCIAL_API_ROOT}/status`, { signal: controller.signal }));
     if (!socialLifecycleIsCurrent(expectedSequence)) return;
     applySocialBridgeStatus(payload.bridge);
     if (payload.counts && typeof payload.counts === 'object') state.socialCounts = { ...payload.counts };
     state.socialConnected = payload.ok !== false;
+    const remoteLatestChangeId = finiteNumber(payload.latestChangeId);
+    const streamAgeMs = state.socialLastStreamActivityAt === null
+      ? Number.POSITIVE_INFINITY
+      : Math.max(0, performance.now() - state.socialLastStreamActivityAt);
+    const missedChanges = remoteLatestChangeId !== null
+      && Math.trunc(remoteLatestChangeId) > state.socialLatestChangeId;
+    const cursorMovedBack = remoteLatestChangeId !== null
+      && Math.trunc(remoteLatestChangeId) < state.socialLatestChangeId;
+    const streamEpochChanged = Boolean(payload.streamEpoch)
+      && Boolean(state.socialStreamEpoch)
+      && String(payload.streamEpoch) !== state.socialStreamEpoch;
+    const streamIsSilent = state.socialTransport === 'sse' && streamAgeMs > SOCIAL_STREAM_STALE_MS;
+    if (missedChanges || cursorMovedBack || streamEpochChanged || streamIsSilent) {
+      recoverSocialStream(expectedSequence, remoteLatestChangeId);
+    }
     renderSocialBridgeStatus();
     renderSocialWatchlist();
   } catch {
     if (!socialLifecycleIsCurrent(expectedSequence)) return;
     state.socialConnected = false;
     renderSocialBridgeStatus();
+  } finally {
+    clearTimeout(timeout);
+    if (requestSequence === state.socialStatusRequestSequence) {
+      state.socialStatusAbortController = null;
+      state.socialStatusBusy = false;
+    }
   }
 }
 
@@ -2414,12 +2483,41 @@ function scheduleSocialReconnect(sequence) {
   if (!socialLifecycleIsCurrent(sequence)) return;
   state.socialTransport = 'reconnecting';
   renderSocialBridgeStatus();
-  state.socialReconnectTimer = setTimeout(async () => {
+  state.socialReconnectTimer = setTimeout(() => {
     state.socialReconnectTimer = null;
     if (!socialLifecycleIsCurrent(sequence)) return;
-    await loadSocialSnapshot({ quiet: true, expectedSequence: sequence });
-    if (socialLifecycleIsCurrent(sequence)) connectSocialStream(sequence);
+    connectSocialStream(sequence);
   }, SOCIAL_STREAM_RETRY_MS);
+}
+
+function recoverSocialStream(sequence, remoteLatestChangeId = state.socialLatestChangeId) {
+  if (!socialLifecycleIsCurrent(sequence)) return false;
+  const remoteId = finiteNumber(remoteLatestChangeId);
+  if (remoteId !== null) {
+    state.socialRecoveryTargetId = Math.max(state.socialRecoveryTargetId, Math.trunc(remoteId));
+  }
+  const now = performance.now();
+  const recoveryAgeMs = state.socialRecoveryStartedAt === null
+    ? Number.POSITIVE_INFINITY
+    : Math.max(0, now - state.socialRecoveryStartedAt);
+  const streamActivityAgeMs = state.socialLastStreamActivityAt === null
+    ? Number.POSITIVE_INFINITY
+    : Math.max(0, now - state.socialLastStreamActivityAt);
+  if (state.socialRecoveryBusy
+    && (recoveryAgeMs < SOCIAL_RECOVERY_RETRY_MS || streamActivityAgeMs < SOCIAL_RECOVERY_RETRY_MS)) {
+    return false;
+  }
+  state.socialRecoveryBusy = true;
+  state.socialRecoveryStartedAt = now;
+  clearTimeout(state.socialReconnectTimer);
+  state.socialReconnectTimer = null;
+  if (state.socialEventSource) state.socialEventSource.close();
+  state.socialEventSource = null;
+  state.socialConnected = false;
+  state.socialTransport = 'reconnecting';
+  renderSocialBridgeStatus();
+  connectSocialStream(sequence);
+  return true;
 }
 
 function connectSocialStream(sequence = state.socialSequence) {
@@ -2433,20 +2531,29 @@ function connectSocialStream(sequence = state.socialSequence) {
     scheduleSocialReconnect(sequence);
     return;
   }
-  const source = new EventSource(`${SOCIAL_API_ROOT}/stream?after=${encodeURIComponent(state.socialLatestChangeId)}`);
+  const source = new EventSource(`${SOCIAL_API_ROOT}/stream?after=${encodeURIComponent(state.socialLatestChangeId)}&epoch=${encodeURIComponent(state.socialStreamEpoch)}`);
   state.socialEventSource = source;
   const isCurrent = () => state.socialEventSource === source && socialLifecycleIsCurrent(sequence);
   source.addEventListener('open', () => {
     if (!isCurrent()) return;
+    markSocialStreamActivity();
     state.socialConnected = true;
     state.socialTransport = 'sse';
     renderSocialBridgeStatus();
   });
   source.addEventListener('snapshot', (event) => {
-    if (isCurrent()) applySocialSnapshot(parseSocialStreamEvent(event));
+    if (!isCurrent()) return;
+    markSocialStreamActivity();
+    applySocialSnapshot(parseSocialStreamEvent(event));
+  });
+  source.addEventListener('reset', (event) => {
+    if (!isCurrent()) return;
+    markSocialStreamActivity();
+    applySocialSnapshot(parseSocialStreamEvent(event), { resetCursor: true });
   });
   const applyChange = (event) => {
     if (!isCurrent()) return;
+    markSocialStreamActivity();
     state.socialConnected = true;
     state.socialTransport = 'sse';
     applySocialChange(parseSocialStreamEvent(event));
@@ -2454,6 +2561,23 @@ function connectSocialStream(sequence = state.socialSequence) {
   for (const eventName of ['post.created', 'post.updated', 'post.deleted', 'post.restored', 'watchlist.updated']) {
     source.addEventListener(eventName, applyChange);
   }
+  source.addEventListener('heartbeat', (event) => {
+    if (!isCurrent()) return;
+    markSocialStreamActivity();
+    state.socialConnected = true;
+    state.socialTransport = 'sse';
+    const heartbeat = parseSocialStreamEvent(event);
+    const remoteLatestChangeId = finiteNumber(heartbeat?.latestChangeId);
+    const streamEpochChanged = Boolean(heartbeat?.streamEpoch)
+      && Boolean(state.socialStreamEpoch)
+      && String(heartbeat.streamEpoch) !== state.socialStreamEpoch;
+    if (streamEpochChanged || (remoteLatestChangeId !== null && remoteLatestChangeId !== state.socialLatestChangeId)) {
+      recoverSocialStream(sequence, remoteLatestChangeId);
+      return;
+    }
+    completeSocialRecovery(remoteLatestChangeId);
+    renderSocialBridgeStatus();
+  });
   source.addEventListener('error', () => {
     if (!isCurrent()) return;
     source.close();
@@ -2469,6 +2593,9 @@ async function startSocialMonitor({ manual = false } = {}) {
   stopSocialMonitor();
   state.socialStarted = true;
   state.socialTransport = 'connecting';
+  state.socialLatestChangeId = 0;
+  state.socialStreamEpoch = '';
+  state.socialLastStreamActivityAt = performance.now();
   const sequence = state.socialSequence;
   renderSocialMonitor();
   await loadSocialSnapshot({ quiet: !manual, expectedSequence: sequence });
@@ -2489,6 +2616,14 @@ function stopSocialMonitor() {
   state.socialSearchTimer = null;
   state.socialReconnectTimer = null;
   state.socialStatusTimer = null;
+  state.socialStatusAbortController?.abort();
+  state.socialStatusAbortController = null;
+  state.socialStatusRequestSequence += 1;
+  state.socialStatusBusy = false;
+  state.socialLastStreamActivityAt = null;
+  state.socialRecoveryBusy = false;
+  state.socialRecoveryStartedAt = null;
+  state.socialRecoveryTargetId = 0;
   state.socialSnapshotAbortController?.abort();
   state.socialSnapshotAbortController = null;
   if (state.socialEventSource) state.socialEventSource.close();
@@ -6005,14 +6140,22 @@ window.addEventListener('hashchange', () => {
   if (wallet) void loadWalletDetail(wallet);
 });
 
-document.addEventListener('visibilitychange', updateVisibleLiveRelativeTimes);
-window.addEventListener('focus', updateVisibleLiveRelativeTimes);
+function refreshVisibleRealtimeState() {
+  updateVisibleLiveRelativeTimes();
+  if (document.visibilityState === 'visible' && state.activeTab === 'monitor' && state.socialStarted) {
+    void loadSocialStatus(state.socialSequence);
+  }
+}
+
+document.addEventListener('visibilitychange', refreshVisibleRealtimeState);
+window.addEventListener('focus', refreshVisibleRealtimeState);
+window.addEventListener('online', refreshVisibleRealtimeState);
 window.addEventListener('pageshow', (event) => {
   if (event.persisted && state.activeTab === 'monitor' && !state.monitorStarted) {
     void startMonitorPage();
     return;
   }
-  updateVisibleLiveRelativeTimes();
+  refreshVisibleRealtimeState();
 });
 window.addEventListener('pagehide', stopMonitorTransport);
 

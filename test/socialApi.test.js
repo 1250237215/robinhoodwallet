@@ -512,6 +512,81 @@ test('social SSE sends an initial snapshot and live normalized changes', async (
   controller.abort();
 });
 
+test('social status exposes its cursor and SSE replays a backlog larger than one page', async (t) => {
+  const { baseUrl, socialService } = await withSocialServer(t, { token: 'replay-device-token' });
+  socialService.ingestPosts([{ source: 'twitter', id: 'replay-seed', text: 'seed' }]);
+  const after = socialService.store.getLatestChangeId();
+  const backlogSize = 1_005;
+  for (let offset = 0; offset < backlogSize; offset += 200) {
+    socialService.ingestPosts(Array.from(
+      { length: Math.min(200, backlogSize - offset) },
+      (_, index) => ({
+        source: 'twitter',
+        id: `replay-${offset + index}`,
+        text: `backlog ${offset + index}`
+      })
+    ));
+  }
+  const backlogLatest = socialService.store.getLatestChangeId();
+  assert.equal(backlogLatest, after + backlogSize);
+
+  const statusResponse = await fetch(`${baseUrl}/api/social/status`);
+  const status = await statusResponse.json();
+  assert.equal(statusResponse.status, 200);
+  assert.equal(status.latestChangeId, backlogLatest);
+  assert.match(status.streamEpoch, /^[0-9a-f-]{36}$/i);
+
+  const controller = new AbortController();
+  const response = await fetch(`${baseUrl}/api/social/stream?after=${after}`, { signal: controller.signal });
+  assert.equal(response.status, 200);
+  socialService.ingestPosts([{ source: 'twitter', id: 'replay-live', text: 'arrived during replay' }]);
+  const expectedLatest = socialService.store.getLatestChangeId();
+  assert.equal(expectedLatest, backlogLatest + 1);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let received = '';
+  const timeout = setTimeout(() => controller.abort(), 5_000);
+  try {
+    while (!received.includes('event: heartbeat')) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      received += decoder.decode(chunk.value, { stream: true });
+    }
+  } finally {
+    clearTimeout(timeout);
+    controller.abort();
+    await reader.cancel().catch(() => {});
+  }
+  const replayedIds = [...received.matchAll(/^id: (\d+)$/gm)].map((match) => Number(match[1]));
+  assert.equal(received.includes('event: snapshot'), false);
+  assert.equal(replayedIds.length, backlogSize + 1);
+  assert.equal(replayedIds[0], after + 1);
+  assert.equal(replayedIds.at(-1), expectedLatest);
+  assert.equal(new Set(replayedIds).size, backlogSize + 1);
+  assert.match(received, new RegExp(`"latestChangeId":${expectedLatest}`));
+
+  const resetController = new AbortController();
+  const resetResponse = await fetch(
+    `${baseUrl}/api/social/stream?after=${expectedLatest + 10}&epoch=${status.streamEpoch}`,
+    { signal: resetController.signal }
+  );
+  const resetReader = resetResponse.body.getReader();
+  const resetDecoder = new TextDecoder();
+  let resetText = '';
+  const resetTimeout = setTimeout(() => resetController.abort(), 2_000);
+  while (!resetText.includes('event: heartbeat')) {
+    const resetChunk = await resetReader.read();
+    if (resetChunk.done) break;
+    resetText += resetDecoder.decode(resetChunk.value, { stream: true });
+  }
+  clearTimeout(resetTimeout);
+  resetController.abort();
+  await resetReader.cancel().catch(() => {});
+  assert.match(resetText, /event: reset/);
+  assert.match(resetText, new RegExp(`"latestChangeId":${expectedLatest}`));
+  assert.match(resetText, new RegExp(`"streamEpoch":"${status.streamEpoch}"`));
+});
+
 test('server shutdown drains active social SSE before closing its store', async (t) => {
   const { baseUrl, server, socialService } = await withSocialServer(t, {
     token: 'shutdown-device-token'
