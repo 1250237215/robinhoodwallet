@@ -769,7 +769,13 @@ function formatMonitorAge(value, now = Date.now()) {
   const timestamp = monitorTimestampMs(value);
   if (timestamp === null) return '刚刚检测';
   const seconds = Math.max(0, Math.floor((now - timestamp) / 1000));
-  return `${seconds} 秒前`;
+  if (seconds < 60) return `${seconds} 秒前`;
+  const remainingSeconds = String(seconds % 60).padStart(2, '0');
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分钟 ${remainingSeconds} 秒前`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = String(minutes % 60).padStart(2, '0');
+  return `${hours} 小时 ${remainingMinutes} 分钟 ${remainingSeconds} 秒前`;
 }
 
 function updateLiveRelativeTimes() {

@@ -1132,8 +1132,11 @@ test('chain and social elapsed times advance every second without rerendering ei
   );
   assert.match(formatterSource, /function formatMonitorAge\(value, now = Date\.now\(\)\)/);
   assert.match(formatterSource, /Math\.floor\(\(now - timestamp\) \/ 1000\)/);
-  assert.match(formatterSource, /return `\$\{seconds\} 秒前`/);
-  assert.doesNotMatch(formatterSource, /刚刚';|分钟前|formatDateTime\(timestamp\)/);
+  assert.match(formatterSource, /if \(seconds < 60\) return `\$\{seconds\} 秒前`/);
+  assert.match(formatterSource, /String\(seconds % 60\)\.padStart\(2, '0'\)/);
+  assert.match(formatterSource, /if \(minutes < 60\) return `\$\{minutes\} 分钟 \$\{remainingSeconds\} 秒前`/);
+  assert.match(formatterSource, /return `\$\{hours\} 小时 \$\{remainingMinutes\} 分钟 \$\{remainingSeconds\} 秒前`/);
+  assert.doesNotMatch(formatterSource, /刚刚';|formatDateTime\(timestamp\)/);
   assert.match(appJs, /<time class="social-post-time"[^>]*data-live-timestamp="\$\{escapeHtml\(String\(post\.publishedAt \?\? ''\)\)\}"[^>]*aria-live="off"/);
   assert.match(appJs, /<time datetime="\$\{escapeHtml\(String\(eventTime \?\? ''\)\)\}" data-live-timestamp="\$\{escapeHtml\(String\(eventTime \?\? ''\)\)\}"[^>]*aria-live="off"/);
 
@@ -1163,6 +1166,8 @@ test('chain and social elapsed times advance every second without rerendering ei
   assert.match(appJs, /window\.addEventListener\('focus', updateVisibleLiveRelativeTimes\)/);
   assert.match(appJs, /window\.addEventListener\('pageshow', \(event\) => \{[\s\S]*event\.persisted[\s\S]*void startMonitorPage\(\)/);
   assert.match(stylesCss, /\.social-post-time \{[\s\S]*font-variant-numeric: tabular-nums/);
+  assert.match(stylesCss, /\.social-post-time \{[\s\S]*white-space: normal/);
+  assert.match(stylesCss, /\.monitor-event-item time \{[\s\S]*white-space: normal/);
 });
 
 test('social snapshot and SSE lifecycle stay pinned to the Robinhood host service', () => {

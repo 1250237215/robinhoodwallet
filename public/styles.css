@@ -3385,10 +3385,13 @@ select:hover {
 
 .social-post-time {
   flex: 0 0 auto;
+  max-width: 112px;
   color: var(--faint);
   font-size: 9px;
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  line-height: 1.35;
+  text-align: right;
+  white-space: normal;
 }
 
 .social-post-meta {
@@ -3784,7 +3787,8 @@ select:hover {
   font-size: 10px;
   font-weight: 650;
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  line-height: 1.35;
+  white-space: normal;
 }
 
 .monitor-event-main {
