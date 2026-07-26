@@ -1,3 +1,5 @@
+import { Buffer } from 'node:buffer';
+
 const SOURCE_ALIASES = new Map([
   ['x', 'twitter'],
   ['twitter', 'twitter'],
@@ -9,7 +11,8 @@ const SOURCE_ALIASES = new Map([
   ['debot', 'debot']
 ]);
 
-const POST_KINDS = new Set(['post', 'reply', 'quote', 'repost']);
+const POST_KINDS = new Set(['post', 'reply', 'quote', 'repost', 'follow', 'unfollow', 'profile', 'delete']);
+const SOCIAL_ACTIVITY_KINDS = new Set(['follow', 'unfollow']);
 const CHAIN_TAGS = new Set(['robinhood', 'base', 'solana']);
 const FEED_SOURCE_ORDER = Object.freeze(['all', 'featured', 'my']);
 const FEED_SOURCE_ALIASES = new Map([
@@ -76,6 +79,85 @@ function normalizeUrl(value) {
   } catch {
     return '';
   }
+}
+
+function activityCandidate(value) {
+  const candidate = text(value, 240);
+  if (!candidate) return '';
+  if (/^(?:follow|unfollow)[:_]/i.test(candidate)) return candidate;
+  if (!/^[a-z0-9_-]{12,}$/i.test(candidate)) return '';
+  try {
+    const bytes = Buffer.from(candidate, 'base64url');
+    if (bytes.toString('base64url') !== candidate.replace(/=+$/, '')) return '';
+    const decoded = bytes.toString('utf8');
+    return decoded.includes('\ufffd') || !/^(?:follow|unfollow):/i.test(decoded) ? '' : decoded;
+  } catch {
+    return '';
+  }
+}
+
+export function parseSocialActivityIdentity(externalId, authorHandle = '') {
+  const candidate = activityCandidate(externalId);
+  if (!candidate) return null;
+  const expectedActor = text(authorHandle, 240).replace(/^@/, '');
+  const handlePattern = '[a-z0-9_]{1,15}';
+  const colon = candidate.match(new RegExp(`^(follow|unfollow):(${handlePattern}):(${handlePattern})$`, 'i'));
+  if (colon) {
+    const kind = colon[1].toLowerCase();
+    const actorHandle = text(colon[2], 240).replace(/^@/, '');
+    const targetHandle = text(colon[3], 240).replace(/^@/, '');
+    if (!actorHandle || !targetHandle || (expectedActor && actorHandle.toLowerCase() !== expectedActor.toLowerCase())) {
+      return null;
+    }
+    return {
+      kind,
+      actorHandle,
+      targetHandle,
+      canonicalId: `${kind}:${actorHandle.toLowerCase()}:${targetHandle.toLowerCase()}`
+    };
+  }
+
+  const kind = candidate.match(/^(follow|unfollow)_/i)?.[1]?.toLowerCase();
+  const actorHandle = expectedActor;
+  if (!kind || !actorHandle || !new RegExp(`^${handlePattern}$`, 'i').test(actorHandle)) return null;
+  const prefix = `${kind}_${actorHandle}_`;
+  if (!candidate.toLowerCase().startsWith(prefix.toLowerCase())) return null;
+  const targetHandle = text(candidate.slice(prefix.length), 240).replace(/^@/, '');
+  if (!new RegExp(`^${handlePattern}$`, 'i').test(targetHandle)) return null;
+  return {
+    kind,
+    actorHandle,
+    targetHandle,
+    canonicalId: `${kind}:${actorHandle.toLowerCase()}:${targetHandle.toLowerCase()}`
+  };
+}
+
+function normalizeSocialTarget(input, inferredTargetHandle = '') {
+  const targetInput = input.target && typeof input.target === 'object' && !Array.isArray(input.target)
+    ? input.target
+    : input.activityTarget && typeof input.activityTarget === 'object' && !Array.isArray(input.activityTarget)
+      ? input.activityTarget
+      : {};
+  const handle = text(
+    firstValue(input, ['targetHandle', 'targetUsername'], targetInput.handle || targetInput.username || inferredTargetHandle),
+    240
+  ).replace(/^@/, '');
+  return {
+    id: text(firstValue(input, ['targetId', 'targetUserId'], targetInput.id || targetInput.userId), 240),
+    handle,
+    name: text(firstValue(input, ['targetName'], targetInput.name || targetInput.displayName), 500),
+    avatarUrl: normalizeUrl(firstValue(
+      input,
+      ['targetAvatarUrl'],
+      targetInput.avatarUrl || targetInput.avatar || targetInput.profileImageUrl
+    )),
+    followers: integer(firstValue(
+      input,
+      ['targetFollowers', 'targetFollowersCount'],
+      targetInput.followers ?? targetInput.followersCount
+    )),
+    url: normalizeUrl(firstValue(input, ['targetUrl'], targetInput.url || targetInput.profileUrl))
+  };
 }
 
 function normalizeMedia(media) {
@@ -181,8 +263,18 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
   }
   const authorInput = input.author && typeof input.author === 'object' ? input.author : {};
   const source = normalizeSocialSource(firstValue(input, ['source', 'platform']));
-  const externalId = text(firstValue(input, ['externalId', 'postId', 'tweetId', 'signalId', 'id']), 240);
-  if (!externalId) throw new TypeError('Social post externalId is required');
+  const suppliedExternalId = text(firstValue(input, ['externalId', 'postId', 'tweetId', 'signalId', 'id']), 240);
+  if (!suppliedExternalId) throw new TypeError('Social post externalId is required');
+  const suppliedAuthorHandle = text(
+    firstValue(input, ['authorHandle', 'username', 'handle'], authorInput.handle || authorInput.username),
+    240
+  ).replace(/^@/, '');
+  const activityIdentity = parseSocialActivityIdentity(suppliedExternalId, suppliedAuthorHandle);
+  if (activityCandidate(suppliedExternalId) && !activityIdentity) {
+    throw new TypeError('Social activity identity conflicts with its author');
+  }
+  const authorHandle = suppliedAuthorHandle || activityIdentity?.actorHandle || '';
+  let externalId = activityIdentity?.canonicalId || suppliedExternalId;
   const content = text(firstValue(input, ['content', 'text', 'body']), 100_000);
   const translatedContent = text(
     firstValue(input, ['translatedContent', 'translatedText', 'translation']),
@@ -197,7 +289,21 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
     ? normalizeTimestamp(input.deletedAt, now)
     : null;
   const kindCandidate = text(firstValue(input, ['kind', 'postType', 'type'], 'post'), 20).toLowerCase();
-  const kind = POST_KINDS.has(kindCandidate) ? kindCandidate : 'post';
+  const kind = activityIdentity?.kind || (POST_KINDS.has(kindCandidate) ? kindCandidate : 'post');
+  const target = normalizeSocialTarget(
+    input,
+    SOCIAL_ACTIVITY_KINDS.has(kind) ? activityIdentity?.targetHandle : ''
+  );
+  if (activityIdentity && target.handle
+    && target.handle.toLowerCase() !== activityIdentity.targetHandle.toLowerCase()) {
+    throw new TypeError('Social activity target conflicts with its externalId');
+  }
+  if (SOCIAL_ACTIVITY_KINDS.has(kind)) {
+    if (!/^[a-z0-9_]{1,15}$/i.test(authorHandle) || !/^[a-z0-9_]{1,15}$/i.test(target.handle)) {
+      throw new TypeError('Social activity requires valid actor and target handles');
+    }
+    externalId = `${kind}:${authorHandle.toLowerCase()}:${target.handle.toLowerCase()}`;
+  }
   const publishedAt = normalizeTimestamp(
     firstValue(input, ['publishedAt', 'createdAt', 'postTimestamp', 'timestamp']),
     now
@@ -239,17 +345,41 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
     replyToExternalId: ['replyToExternalId', 'replyToId'],
     quotedExternalId: ['quotedExternalId', 'quotedId'],
     repostExternalId: ['repostExternalId', 'repostedId'],
+    target: [
+      'target',
+      'activityTarget',
+      'targetId',
+      'targetUserId',
+      'targetHandle',
+      'targetUsername',
+      'targetName',
+      'targetAvatarUrl',
+      'targetFollowers',
+      'targetFollowersCount',
+      'targetUrl'
+    ],
     raw: ['raw', 'payload']
   };
   for (const [name, keys] of Object.entries(aliases)) {
-    if (hasOwn(input, keys) || keys.some((key) => Object.hasOwn(authorInput, key))) provided.add(name);
+    if (hasOwn(input, keys)) provided.add(name);
+  }
+  const authorAliases = {
+    authorId: ['id', 'userId'],
+    authorHandle: ['handle', 'username'],
+    authorName: ['name', 'displayName'],
+    authorAvatarUrl: ['avatarUrl', 'avatar'],
+    authorFollowers: ['followersCount', 'followers']
+  };
+  for (const [name, keys] of Object.entries(authorAliases)) {
+    if (keys.some((key) => Object.hasOwn(authorInput, key))) provided.add(name);
   }
   if (hasOwn(input, ['kind', 'postType', 'type'])) provided.add('kind');
   if (hasOwn(input, ['publishedAt', 'createdAt', 'postTimestamp', 'timestamp'])) provided.add('publishedAt');
-  if (Object.keys(authorInput).length) {
-    for (const name of ['authorId', 'authorHandle', 'authorName', 'authorAvatarUrl', 'authorFollowers']) {
-      provided.add(name);
-    }
+  if (hasOwn(input, ['sourceUpdatedAt', 'updatedAt', 'editedAt'])) provided.add('sourceUpdatedAt');
+  if (activityIdentity) {
+    provided.add('kind');
+    provided.add('target');
+    if (!suppliedAuthorHandle) provided.add('authorHandle');
   }
   if (deletionSpecified) provided.add('deletedAt');
   return {
@@ -257,16 +387,17 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
     externalId,
     kind,
     authorId: text(firstValue(input, ['authorId', 'userId'], authorInput.id || authorInput.userId), 240),
-    authorHandle: text(
-      firstValue(input, ['authorHandle', 'username', 'handle'], authorInput.handle || authorInput.username),
-      240
-    ).replace(/^@/, ''),
+    authorHandle,
     authorName: text(firstValue(input, ['authorName', 'displayName'], authorInput.name || authorInput.displayName), 500),
     authorAvatarUrl: normalizeUrl(
       firstValue(input, ['authorAvatarUrl', 'avatarUrl'], authorInput.avatarUrl || authorInput.avatar)
     ),
     authorFollowers: integer(
-      firstValue(input, ['authorFollowers', 'followers', 'followersCount'], authorInput.followersCount)
+      firstValue(
+        input,
+        ['authorFollowers', 'followers', 'followersCount'],
+        authorInput.followersCount ?? authorInput.followers
+      )
     ),
     content,
     translatedContent,
@@ -278,6 +409,7 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
     replyToExternalId: text(firstValue(input, ['replyToExternalId', 'replyToId']), 240),
     quotedExternalId: text(firstValue(input, ['quotedExternalId', 'quotedId']), 240),
     repostExternalId: text(firstValue(input, ['repostExternalId', 'repostedId']), 240),
+    target,
     publishedAt,
     receivedAt,
     sourceUpdatedAt,

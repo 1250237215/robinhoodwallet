@@ -1245,8 +1245,66 @@ function renderMonitorHealth() {
   elements.monitorDeepDuration.textContent = `上轮 ${formatMonitorRangeDuration(health.deepLastRangeDurationMs)}`;
 }
 
+const SOCIAL_ACTIVITY_KINDS = new Set(['follow', 'unfollow']);
+const SOCIAL_HANDLE_PATTERN = /^[a-z0-9_]{1,15}$/i;
+
+function normalizeSocialHandle(value) {
+  return String(value || '').trim().replace(/^@/, '');
+}
+
+function decodeSocialActivityExternalId(value) {
+  const candidate = String(value || '').trim();
+  if (/^(?:follow|unfollow)[:_]/i.test(candidate)) return candidate;
+  if (!/^[a-z0-9_-]{12,}={0,2}$/i.test(candidate)) return '';
+  try {
+    const base64 = candidate.replace(/-/g, '+').replace(/_/g, '/').replace(/=+$/, '');
+    const decoded = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '='));
+    return /^(?:follow|unfollow):/i.test(decoded) ? decoded : '';
+  } catch {
+    return '';
+  }
+}
+
+function socialActivityIdentity(post) {
+  const authorHandle = normalizeSocialHandle(post?.author?.handle);
+  const expectedActor = authorHandle.toLowerCase();
+  const candidate = decodeSocialActivityExternalId(post?.externalId);
+  const colon = candidate.match(/^(follow|unfollow):([a-z0-9_]{1,15}):([a-z0-9_]{1,15})$/i);
+  if (colon && (!expectedActor || colon[2].toLowerCase() === expectedActor)) {
+    return { kind: colon[1].toLowerCase(), actorHandle: colon[2], targetHandle: colon[3] };
+  }
+  const plainKind = candidate.match(/^(follow|unfollow)_/i)?.[1]?.toLowerCase();
+  if (plainKind && authorHandle) {
+    const prefix = `${plainKind}_${authorHandle}_`;
+    if (candidate.toLowerCase().startsWith(prefix.toLowerCase())) {
+      const targetHandle = candidate.slice(prefix.length);
+      if (SOCIAL_HANDLE_PATTERN.test(targetHandle)) {
+        return { kind: plainKind, actorHandle: authorHandle, targetHandle };
+      }
+    }
+  }
+  const kind = String(post?.kind || '').toLowerCase();
+  if (!SOCIAL_ACTIVITY_KINDS.has(kind)) return null;
+  const targetHandle = normalizeSocialHandle(post?.target?.handle);
+  return {
+    kind,
+    actorHandle: SOCIAL_HANDLE_PATTERN.test(authorHandle) ? authorHandle : '',
+    targetHandle: SOCIAL_HANDLE_PATTERN.test(targetHandle) ? targetHandle : ''
+  };
+}
+
 function socialPostKey(post) {
-  return `${String(post?.source || 'debot')}:${String(post?.externalId || post?.id || '')}`;
+  const source = String(post?.source || 'debot').toLowerCase();
+  const activity = socialActivityIdentity(post);
+  if (activity?.actorHandle && activity.targetHandle) {
+    const baseId = `${activity.kind}:${activity.actorHandle.toLowerCase()}:${activity.targetHandle.toLowerCase()}`;
+    const externalId = String(post?.externalId || '').toLowerCase();
+    const occurrence = externalId.startsWith(`${baseId}:`)
+      ? externalId.slice(baseId.length + 1)
+      : 'base';
+    return `${source}:activity:${baseId}:${occurrence}`;
+  }
+  return `${source}:${String(post?.externalId || post?.id || '')}`;
 }
 
 function socialFeedSources(post) {
@@ -1255,13 +1313,54 @@ function socialFeedSources(post) {
 }
 
 function mergeSocialPosts(posts) {
-  const byKey = new Map(state.socialPosts.map((post) => [socialPostKey(post), post]));
+  const recency = (post) => [
+    monitorTimestampMs(post?.sourceUpdatedAt) ?? 0,
+    monitorTimestampMs(post?.publishedAt) ?? 0,
+    monitorTimestampMs(post?.updatedAt) ?? 0,
+    monitorTimestampMs(post?.receivedAt) ?? 0,
+    finiteNumber(post?.id) ?? 0
+  ];
+  const compareRecency = (left, right) => {
+    const leftRecency = recency(left);
+    const rightRecency = recency(right);
+    for (let index = 0; index < leftRecency.length; index += 1) {
+      if (leftRecency[index] !== rightRecency[index]) return leftRecency[index] - rightRecency[index];
+    }
+    return 0;
+  };
+  const mergeRecord = (current, incoming) => {
+    if (!current) return incoming;
+    const incomingIsNewer = compareRecency(incoming, current) >= 0;
+    const older = incomingIsNewer ? current : incoming;
+    const newer = incomingIsNewer ? incoming : current;
+    const merged = { ...older, ...newer };
+    merged.author = { ...(older.author || {}) };
+    for (const [name, value] of Object.entries(newer.author || {})) {
+      if (value !== '' && value !== null && value !== undefined && !(name === 'followers' && Number(value) === 0)) {
+        merged.author[name] = value;
+      }
+    }
+    merged.target = { ...(older.target || {}) };
+    for (const [name, value] of Object.entries(newer.target || {})) {
+      if (value !== '' && value !== null && value !== undefined && !(name === 'followers' && Number(value) === 0)) {
+        merged.target[name] = value;
+      }
+    }
+    const feedSources = [...new Set([...socialFeedSources(older), ...socialFeedSources(newer)])];
+    if (feedSources.length) merged.feedSources = feedSources;
+    return merged;
+  };
+  const byKey = new Map();
+  for (const post of state.socialPosts) {
+    const key = socialPostKey(post);
+    if (!key.endsWith(':')) byKey.set(key, mergeRecord(byKey.get(key), post));
+  }
   let added = 0;
   for (const post of Array.isArray(posts) ? posts : []) {
     const key = socialPostKey(post);
     if (key.endsWith(':')) continue;
     if (!byKey.has(key)) added += 1;
-    byKey.set(key, { ...(byKey.get(key) || {}), ...post });
+    byKey.set(key, mergeRecord(byKey.get(key), post));
   }
   state.socialPosts = [...byKey.values()]
     .sort((left, right) => Number(right.publishedAt || 0) - Number(left.publishedAt || 0) || Number(right.id || 0) - Number(left.id || 0))
@@ -1304,6 +1403,7 @@ function applySocialSnapshot(payload) {
 function applySocialChange(change) {
   if (!change || typeof change !== 'object') return;
   const id = finiteNumber(change.id);
+  if (id !== null && id <= state.socialLatestChangeId) return;
   if (id !== null) state.socialLatestChangeId = Math.max(state.socialLatestChangeId, id);
   if (change.entityType === 'post' && change.data) {
     const added = mergeSocialPosts([change.data]);
@@ -1328,9 +1428,13 @@ function socialSourceLabel(source) {
 
 function socialKindLabel(post) {
   if (post?.deleted) return '删推';
-  if (post?.kind === 'reply') return '回复';
-  if (post?.kind === 'quote') return '引用';
-  if (post?.kind === 'repost') return '转发';
+  const kind = socialActivityIdentity(post)?.kind || post?.kind;
+  if (kind === 'follow') return '关注';
+  if (kind === 'unfollow') return '取消关注';
+  if (kind === 'profile') return '资料更新';
+  if (kind === 'reply') return '回复';
+  if (kind === 'quote') return '引用';
+  if (kind === 'repost') return '转发';
   return '发帖';
 }
 
@@ -1355,6 +1459,30 @@ function socialInitials(post) {
   return value.slice(0, 2).toUpperCase() || 'S';
 }
 
+function socialActivityMarkup(post) {
+  const activity = socialActivityIdentity(post);
+  if (!activity) return '';
+  const author = post.author || {};
+  const actorLabel = String(author.name || (activity.actorHandle ? `@${activity.actorHandle}` : '该账号'));
+  const actionLabel = activity.kind === 'follow' ? '关注了' : '取消关注了';
+  const fallbackLabel = activity.kind === 'follow' ? '关注动态' : '取消关注动态';
+  const icon = activity.kind === 'follow' ? 'user-plus' : 'user-minus';
+  const targetHandle = activity.targetHandle;
+  if (!targetHandle) {
+    return `<p class="social-activity-content"><i data-lucide="${icon}" aria-hidden="true"></i><strong>${escapeHtml(actorLabel)}</strong><span>${fallbackLabel}</span></p>`;
+  }
+  const targetUrl = `https://x.com/${encodeURIComponent(targetHandle)}`;
+  return `<p class="social-activity-content"><i data-lucide="${icon}" aria-hidden="true"></i><strong>${escapeHtml(actorLabel)}</strong><span>${actionLabel}</span><a href="${escapeHtml(targetUrl)}" target="_blank" rel="noopener noreferrer">@${escapeHtml(targetHandle)}</a></p>`;
+}
+
+function socialProfileActivityMarkup(post) {
+  if (String(post?.kind || '').toLowerCase() !== 'profile') return '';
+  const author = post.author || {};
+  const handle = normalizeSocialHandle(author.handle);
+  const actorLabel = String(author.name || (handle ? `@${handle}` : '该账号'));
+  return `<p class="social-profile-activity"><i data-lucide="user" aria-hidden="true"></i><strong>${escapeHtml(actorLabel)}</strong><span>更新了账号资料</span></p>`;
+}
+
 function visibleSocialPosts() {
   const query = state.socialSearchQuery.trim().toLowerCase();
   return state.socialPosts.filter((post) => {
@@ -1363,7 +1491,16 @@ function visibleSocialPosts() {
     const feeds = socialFeedSources(post);
     if (state.socialFeedFilter !== 'all' && !feeds.includes(state.socialFeedFilter)) return false;
     if (!query) return true;
-    const searchable = [post.content, post.translatedContent, post.author?.name, post.author?.handle]
+    const activity = socialActivityIdentity(post);
+    const searchable = [
+      post.content,
+      post.translatedContent,
+      post.author?.name,
+      post.author?.handle,
+      post.target?.name,
+      post.target?.handle,
+      activity?.targetHandle
+    ]
       .map((value) => String(value || '').toLowerCase())
       .join('\n');
     return searchable.includes(query);
@@ -1464,6 +1601,11 @@ function renderSocialFeed() {
   }
   elements.socialFeed.innerHTML = posts.map((post) => {
     const author = post.author || {};
+    const activity = socialActivityIdentity(post);
+    const kind = activity?.kind || String(post.kind || 'post').toLowerCase();
+    const activityMarkup = socialActivityMarkup(post);
+    const profileActivityMarkup = socialProfileActivityMarkup(post);
+    const nonPostActivity = Boolean(activity || profileActivityMarkup);
     const profileUrl = safeHttpUrl(socialProfileUrl(post));
     const postUrl = safeHttpUrl(post.url);
     const avatarUrl = safeHttpUrl(author.avatarUrl);
@@ -1485,7 +1627,7 @@ function renderSocialFeed() {
         : `<img src="${escapeHtml(url)}" alt="" loading="lazy" />`;
     }).join('');
     return `
-      <article class="social-post${post.deleted ? ' is-deleted' : ''}" data-source="${escapeHtml(post.source || 'debot')}">
+      <article class="social-post${post.deleted ? ' is-deleted' : ''}" data-source="${escapeHtml(post.source || 'debot')}" data-kind="${escapeHtml(kind)}">
         <div class="social-avatar">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" loading="lazy" />` : escapeHtml(socialInitials(post))}</div>
         <div class="social-post-copy">
           <header class="social-post-head">
@@ -1503,11 +1645,11 @@ function renderSocialFeed() {
             </div>
             <time class="social-post-time" datetime="${escapeHtml(String(post.publishedAt ?? ''))}" data-live-timestamp="${escapeHtml(String(post.publishedAt ?? ''))}" title="${escapeHtml(formatDateTime(post.publishedAt))}" aria-live="off">${escapeHtml(formatMonitorAge(post.publishedAt))}</time>
           </header>
-          ${post.content ? `<p class="social-post-content">${escapeHtml(post.content)}</p>` : ''}
-          ${post.translatedContent && post.translatedContent !== post.content ? `<p class="social-post-translation">${escapeHtml(post.translatedContent)}</p>` : ''}
+          ${activityMarkup || profileActivityMarkup || (post.content ? `<p class="social-post-content">${escapeHtml(post.content)}</p>` : '')}
+          ${!nonPostActivity && post.translatedContent && post.translatedContent !== post.content ? `<p class="social-post-translation">${escapeHtml(post.translatedContent)}</p>` : ''}
           ${contractMarkup ? `<div class="social-post-contracts">${contractMarkup}</div>` : ''}
           ${mediaMarkup ? `<div class="social-post-media">${mediaMarkup}</div>` : ''}
-          ${postUrl ? `<footer class="social-post-footer"><a href="${escapeHtml(postUrl)}" target="_blank" rel="noopener noreferrer">查看原文<i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a></footer>` : ''}
+          ${!nonPostActivity && postUrl ? `<footer class="social-post-footer"><a href="${escapeHtml(postUrl)}" target="_blank" rel="noopener noreferrer">查看原文<i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a></footer>` : ''}
         </div>
       </article>
     `;

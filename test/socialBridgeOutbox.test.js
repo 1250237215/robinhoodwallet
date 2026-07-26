@@ -124,6 +124,40 @@ test('outbox persists only the post allowlist and never raw or credential fields
   assert.deepEqual(Object.keys(stored.media[0]).sort(), ['previewUrl', 'type', 'url']);
 });
 
+test('outbox preserves a sanitized follow target and omits targets from tweet records', async () => {
+  const storage = new FakeStorage();
+  const outbox = createPostOutbox({ storage });
+  await outbox.enqueue([
+    post('follow:alice:bob', {
+      kind: 'follow',
+      target: {
+        id: 'target-1',
+        handle: 'bob',
+        name: 'Bob',
+        avatarUrl: 'https://example.test/bob.png',
+        followersCount: 73,
+        url: 'https://x.com/bob',
+        cookie: 'private-target-cookie'
+      }
+    }),
+    post('ordinary-tweet', {
+      target: { handle: 'must-not-be-persisted' }
+    })
+  ]);
+
+  const records = (await outbox.readBatch()).records.map((record) => record.post);
+  assert.deepEqual(records[0].target, {
+    id: 'target-1',
+    handle: 'bob',
+    name: 'Bob',
+    avatarUrl: 'https://example.test/bob.png',
+    followersCount: 73,
+    url: 'https://x.com/bob'
+  });
+  assert.equal(Object.hasOwn(records[1], 'target'), false);
+  assert.equal(JSON.stringify(storage.value).includes('private-target-cookie'), false);
+});
+
 test('outbox preserves accepted records and rejects new records when its record limit overflows', async () => {
   const storage = new FakeStorage();
   const outbox = createPostOutbox({ storage, maxRecords: 3 });

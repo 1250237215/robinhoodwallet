@@ -84,7 +84,7 @@ function jsonResponse(data) {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.1.1');
+  assert.equal(manifest.version, '1.1.2');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -431,11 +431,12 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   await eventually(() => assert.ok(window.messages.some((message) =>
     message.type === 'force-poll-result'
       && message.payload.requestId === 'page-partial-probe'
-      && message.payload.ok === false
-      && message.payload.errorType === 'DEBOT')));
+      && message.payload.ok === true)));
   const partialHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.deepEqual(Array.from(partialHeartbeat.payload.capabilities), ['debot-analysis-v1', 'error']);
-  assert.equal(partialHeartbeat.payload.error, 'DEBOT');
+  assert.deepEqual(Array.from(partialHeartbeat.payload.capabilities), [
+    'posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1'
+  ]);
+  assert.equal(partialHeartbeat.payload.error, undefined);
   const partialDelivery = window.messages.find((message) =>
     message.type === 'posts'
       && message.payload.posts.some((post) => post.externalId === 'partial-poll-document'));
@@ -457,21 +458,20 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   await eventually(() => assert.ok(window.messages.some((message) =>
     message.type === 'posts'
       && message.payload.posts.some((post) => post.externalId === 'immediate-poll-document'))));
-  assert.equal(window.messages.some((message) =>
-    message.type === 'force-poll-result'
-      && message.payload.requestId === 'page-deferred-featured-probe'), false);
-  assert.equal(typeof resolveDeferredFeatured, 'function');
-  for (const type of ['online', 'pageshow', 'focus']) {
-    for (const listener of window.listeners.get(type) || []) listener({ type });
-  }
-  document.visibilityState = 'visible';
-  document.dispatch('visibilitychange');
-  assert.equal(calls.filter((call) => call.url.startsWith('/api/social/twitter/')).length, 3);
-  resolveDeferredFeatured();
-  await eventually(() => assert.ok(window.messages.some((message) =>
+  await eventually(() => assert.equal(window.messages.some((message) =>
     message.type === 'force-poll-result'
       && message.payload.requestId === 'page-deferred-featured-probe'
-      && message.payload.ok === true)));
+      && message.payload.ok === true), true));
+  assert.equal(typeof resolveDeferredFeatured, 'function');
+  const unblockedHeartbeatCount = window.messages.filter((message) => message.type === 'heartbeat').length;
+  for (const listener of window.listeners.get('online') || []) listener({ type: 'online' });
+  await eventually(() => assert.equal(
+    window.messages.filter((message) => message.type === 'heartbeat').length,
+    unblockedHeartbeatCount + 1
+  ));
+  assert.equal(calls.filter((call) => call.url.startsWith('/api/social/twitter/')).length, 4);
+  resolveDeferredFeatured();
+  await new Promise((resolve) => setTimeout(resolve, 0));
   const immediateDelivery = window.messages.find((message) =>
     message.type === 'posts'
       && message.payload.posts.some((post) => post.externalId === 'immediate-poll-document'));
@@ -544,6 +544,345 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     { Payload: JSON.stringify({ data: incoming }) }
   ])}`);
   assert.equal(window.messages.filter((message) => message.type === 'posts').length, acknowledgedCount);
+
+  const encodedFollowId = 'Zm9sbG93OnN0YXJfb2t4OmVuem9pbnNpZGVl';
+  const followEvent = {
+    doc_id: encodedFollowId,
+    platform: 0,
+    user: {
+      username: 'star_okx',
+      name: 'Star_OKX',
+      avatar: 'https://example.test/star.png',
+      followers_count: 234_880
+    },
+    publish_timestamp: 1_784_304_645,
+    save_time: 1_784_304_646
+  };
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    { Payload: JSON.stringify({ data: followEvent }) }
+  ])}`);
+  const followDelivery = window.messages
+    .filter((message) => message.type === 'posts')
+    .find((message) => message.payload.posts[0].externalId === 'follow:star_okx:enzoinsidee');
+  assert.equal(followDelivery.payload.posts[0].kind, 'follow');
+  assert.deepEqual({ ...followDelivery.payload.posts[0].target }, {
+    id: '',
+    handle: 'enzoinsidee',
+    name: '',
+    avatarUrl: '',
+    followersCount: 0,
+    url: 'https://x.com/enzoinsidee'
+  });
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'posts-delivery-result',
+    payload: { deliveryId: followDelivery.payload.deliveryId, ok: true }
+  });
+  const followCount = window.messages.filter((message) =>
+    message.type === 'posts'
+      && message.payload.posts[0].externalId === 'follow:star_okx:enzoinsidee').length;
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    { Payload: JSON.stringify({ data: { ...followEvent, doc_id: 'follow_star_okx_enzoinsidee' } }) }
+  ])}`);
+  assert.equal(window.messages.filter((message) =>
+    message.type === 'posts'
+      && message.payload.posts[0].externalId === 'follow:star_okx:enzoinsidee').length, followCount);
+
+  const unfollowEvent = {
+    ...followEvent,
+    doc_id: 'dW5mb2xsb3c6c3Rhcl9va3g6YmFua3Jib3Q',
+    event_type: 'unfollow',
+    target_user: {
+      id: 'target-user-1',
+      username: 'bankrbot',
+      name: 'Bankr',
+      avatar: 'https://example.test/bankr.png',
+      followers_count: 99
+    }
+  };
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    { Payload: JSON.stringify({ data: unfollowEvent }) }
+  ])}`);
+  const unfollow = window.messages
+    .filter((message) => message.type === 'posts')
+    .find((message) => message.payload.posts[0].externalId === 'unfollow:star_okx:bankrbot')
+    .payload.posts[0];
+  assert.equal(unfollow.kind, 'unfollow');
+  assert.deepEqual({ ...unfollow.target }, {
+    id: 'target-user-1',
+    handle: 'bankrbot',
+    name: 'Bankr',
+    avatarUrl: 'https://example.test/bankr.png',
+    followersCount: 99,
+    url: 'https://x.com/bankrbot'
+  });
+
+  const relationCountBeforeConflicts = window.messages.filter((message) => message.type === 'posts').length;
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    {
+      Payload: JSON.stringify({
+        data: {
+          ...followEvent,
+          doc_id: Buffer.from('follow:another_actor:bankrbot').toString('base64url'),
+          event_type: 'follow',
+          target_user: { username: 'bankrbot' }
+        }
+      })
+    }
+  ])}`);
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    {
+      Payload: JSON.stringify({
+        data: {
+          ...followEvent,
+          doc_id: encodedFollowId,
+          event_type: 'follow',
+          target_user: { username: 'different_target' }
+        }
+      })
+    }
+  ])}`);
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    {
+      Payload: JSON.stringify({
+        data: {
+          doc_id: 'opaque-follow-without-actor',
+          event_type: 'follow',
+          target_user: { username: 'bankrbot' },
+          publish_timestamp: 1_784_304_647,
+          save_time: 1_784_304_647
+        }
+      })
+    }
+  ])}`);
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    {
+      Payload: JSON.stringify({
+        data: {
+          doc_id: 'opaque-follow-without-target',
+          event_type: 'follow',
+          user: { username: 'star_okx' },
+          publish_timestamp: 1_784_304_648,
+          save_time: 1_784_304_648
+        }
+      })
+    }
+  ])}`);
+  assert.equal(window.messages.filter((message) => message.type === 'posts').length, relationCountBeforeConflicts);
+
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    {
+      Payload: JSON.stringify({
+        data: {
+          ...followEvent,
+          doc_id: 'follow_star_okx_raw_target',
+          event_type: 'follow',
+          user: { username: 'star_okx' },
+          target_user: { username: 'raw_target', name: 'Raw target' }
+        }
+      })
+    }
+  ])}`);
+  const rawTargetFollow = window.messages
+    .filter((message) => message.type === 'posts')
+    .find((message) => message.payload.posts[0].externalId === 'follow:star_okx:raw_target')
+    .payload.posts[0];
+  assert.equal(rawTargetFollow.target.handle, 'raw_target');
+  assert.equal(rawTargetFollow.target.name, 'Raw target');
+  assert.equal(rawTargetFollow.author.name, '');
+
+  const authorOnlyId = Buffer.from('follow:star_okx:authoronly').toString('base64url');
+  const authorOnlyTimestamp = 1_784_304_680;
+  const sparseAuthorEvent = {
+    ...followEvent,
+    doc_id: authorOnlyId,
+    user: { username: 'star_okx' },
+    target_user: { username: 'authoronly' },
+    publish_timestamp: authorOnlyTimestamp,
+    save_time: authorOnlyTimestamp
+  };
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    { Payload: JSON.stringify({ data: sparseAuthorEvent }) }
+  ])}`);
+  const sparseAuthorDelivery = window.messages
+    .filter((message) => message.type === 'posts')
+    .findLast((message) => message.payload.posts[0].externalId === 'follow:star_okx:authoronly');
+  assert.equal(sparseAuthorDelivery.payload.posts[0].author.name, '');
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'posts-delivery-result',
+    payload: { deliveryId: sparseAuthorDelivery.payload.deliveryId, ok: true }
+  });
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    {
+      Payload: JSON.stringify({
+        data: {
+          ...sparseAuthorEvent,
+          doc_id: 'follow_star_okx_authoronly',
+          user: {
+            id: 'star-user-id',
+            username: 'star_okx',
+            name: 'Star_OKX',
+            avatar: 'https://example.test/star-rich.png',
+            followers_count: 234_881
+          }
+        }
+      })
+    }
+  ])}`);
+  const richAuthorDelivery = window.messages
+    .filter((message) => message.type === 'posts')
+    .findLast((message) => message.payload.posts[0].externalId === 'follow:star_okx:authoronly');
+  assert.notEqual(richAuthorDelivery.payload.deliveryId, sparseAuthorDelivery.payload.deliveryId);
+  assert.deepEqual({ ...richAuthorDelivery.payload.posts[0].author }, {
+    id: 'star-user-id',
+    handle: 'star_okx',
+    name: 'Star_OKX',
+    avatarUrl: 'https://example.test/star-rich.png',
+    followersCount: 234_881
+  });
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'posts-delivery-result',
+    payload: { deliveryId: richAuthorDelivery.payload.deliveryId, ok: true }
+  });
+
+  const mergedTargetId = Buffer.from('follow:star_okx:mergedtarget').toString('base64url');
+  const sparseTargetEvent = {
+    ...followEvent,
+    doc_id: mergedTargetId,
+    publish_timestamp: 1_784_304_700,
+    save_time: 1_784_304_700
+  };
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    { Payload: JSON.stringify({ data: sparseTargetEvent }) }
+  ])}`);
+  const sparseTargetDelivery = window.messages
+    .filter((message) => message.type === 'posts')
+    .findLast((message) => message.payload.posts[0].externalId === 'follow:star_okx:mergedtarget');
+  assert.equal(sparseTargetDelivery.payload.posts[0].target.name, '');
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'posts-delivery-result',
+    payload: { deliveryId: sparseTargetDelivery.payload.deliveryId, ok: true }
+  });
+  socket.receive(`42${JSON.stringify([
+    'social-hot-twitter',
+    {
+      Payload: JSON.stringify({
+        data: {
+          ...sparseTargetEvent,
+          doc_id: 'follow_star_okx_mergedtarget',
+          user: { username: 'star_okx' },
+          target_user: {
+            id: 'merged-target-id',
+            username: 'mergedtarget',
+            name: 'Merged Target',
+            avatar: 'https://example.test/merged-target.png',
+            followers_count: 456
+          }
+        }
+      })
+    }
+  ])}`);
+  const enrichedTargetDelivery = window.messages
+    .filter((message) => message.type === 'posts')
+    .findLast((message) => message.payload.posts[0].externalId === 'follow:star_okx:mergedtarget');
+  assert.notEqual(enrichedTargetDelivery.payload.deliveryId, sparseTargetDelivery.payload.deliveryId);
+  assert.deepEqual(Array.from(enrichedTargetDelivery.payload.posts[0].feedSources), ['featured', 'my']);
+  assert.equal(enrichedTargetDelivery.payload.posts[0].author.name, 'Star_OKX');
+  assert.equal(enrichedTargetDelivery.payload.posts[0].author.avatarUrl, 'https://example.test/star.png');
+  assert.equal(enrichedTargetDelivery.payload.posts[0].author.followersCount, 234_880);
+  assert.deepEqual({ ...enrichedTargetDelivery.payload.posts[0].target }, {
+    id: 'merged-target-id',
+    handle: 'mergedtarget',
+    name: 'Merged Target',
+    avatarUrl: 'https://example.test/merged-target.png',
+    followersCount: 456,
+    url: 'https://x.com/mergedtarget'
+  });
+  const enrichedCount = window.messages.filter((message) =>
+    message.type === 'posts'
+      && message.payload.posts[0].externalId === 'follow:star_okx:mergedtarget').length;
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'posts-delivery-result',
+    payload: { deliveryId: enrichedTargetDelivery.payload.deliveryId, ok: false }
+  });
+  runPageTimer(2_000);
+  assert.equal(window.messages.filter((message) =>
+    message.type === 'posts'
+      && message.payload.posts[0].externalId === 'follow:star_okx:mergedtarget').length, enrichedCount + 1);
+  const retriedEnrichedDelivery = window.messages
+    .filter((message) => message.type === 'posts')
+    .findLast((message) => message.payload.posts[0].externalId === 'follow:star_okx:mergedtarget');
+  assert.equal(retriedEnrichedDelivery.payload.posts[0].target.name, 'Merged Target');
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'posts-delivery-result',
+    payload: { deliveryId: retriedEnrichedDelivery.payload.deliveryId, ok: true }
+  });
+
+  const profileSourceUpdatedAt = 1_784_304_800_000;
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    {
+      Payload: JSON.stringify({
+        data: {
+          ...followEvent,
+          doc_id: 'legacy-profile-event',
+          tw_type: 'reName',
+          publish_timestamp: profileSourceUpdatedAt,
+          save_time: profileSourceUpdatedAt,
+          profile: { new_name: 'Star OKX' }
+        }
+      })
+    }
+  ])}`);
+  const profileUpdate = window.messages
+    .filter((message) => message.type === 'posts')
+    .find((message) => message.payload.posts[0].externalId === `profile:star_okx:${profileSourceUpdatedAt}`)
+    .payload.posts[0];
+  assert.equal(profileUpdate.kind, 'profile');
+  assert.equal(Object.hasOwn(profileUpdate, 'target'), false);
+
+  for (const [externalId, tweetOverrides, expectedKind, expectedDeleted] of [
+    ['reply-event', { is_reply: true }, 'reply', false],
+    ['quote-event', { is_quote: true }, 'quote', false],
+    ['repost-event', { is_retweet: true }, 'repost', false],
+    ['delete-event', { tweet_type: 'delete_post' }, 'delete', true]
+  ]) {
+    socket.receive(`42${JSON.stringify([
+      'social-user-twitter',
+      {
+        Payload: JSON.stringify({
+          data: {
+            ...incoming,
+            doc_id: externalId,
+            tw_type: 'tweet',
+            tweet: { ...incoming.tweet, tweet_id: externalId, ...tweetOverrides }
+          }
+        })
+      }
+    ])}`);
+    const normalized = window.messages
+      .filter((message) => message.type === 'posts')
+      .find((message) => message.payload.posts[0].externalId === externalId)
+      .payload.posts[0];
+    assert.equal(normalized.kind, expectedKind);
+    assert.equal(normalized.deleted, expectedDeleted);
+  }
 
   socket.receive(`42${JSON.stringify([
     'social-hot-twitter',
@@ -1320,11 +1659,17 @@ test('background uses the bridge secret only as authorization and submits allowl
     if (failAnalysisResultRequests && isAnalysisResultRequest) {
       throw new TypeError('temporary analysis network failure');
     }
-    const responseStatus = isAnalysisResultRequest ? analysisResultResponseStatus : 200;
+    const rejectsInvalidPost = isPostRequest
+      && postResponseMode === 'reject-invalid'
+      && JSON.parse(options.body).posts.some((post) => post.externalId === 'poison-post');
+    const responseStatus = isAnalysisResultRequest
+      ? analysisResultResponseStatus
+      : rejectsInvalidPost ? 400 : 200;
     return {
       ok: responseStatus >= 200 && responseStatus < 300,
       status: responseStatus,
       async text() {
+        if (rejectsInvalidPost) return JSON.stringify({ error: 'invalid social post' });
         if (isPostRequest && postResponseMode === 'negative') return JSON.stringify({ ok: false });
         if (isPostRequest && postResponseMode === 'invalid') return '<html>temporary proxy page</html>';
         if (isPostRequest && postResponseMode === 'deferred') {
@@ -1526,8 +1871,16 @@ test('background uses the bridge secret only as authorization and submits allowl
       posts: [{
         source: 'twitter',
         externalId: 'safe-post',
+        kind: 'follow',
         content: 'public content',
         author: { handle: 'alice', cookie: 'debot-cookie-value' },
+        target: {
+          id: 'target-1',
+          handle: 'bob',
+          name: 'Bob',
+          url: 'https://x.com/bob',
+          cookie: 'target-cookie-must-not-leave'
+        },
         raw: { sub_token: 'debot-session-value' },
         authorization: 'Bearer debot-auth-value'
       }]
@@ -1542,7 +1895,39 @@ test('background uses the bridge secret only as authorization and submits allowl
   const postBody = JSON.parse(postRequest.options.body);
   assert.equal(Object.hasOwn(postBody.posts[0], 'raw'), false);
   assert.equal(Object.hasOwn(postBody.posts[0], 'authorization'), false);
+  assert.deepEqual(postBody.posts[0].target, {
+    id: 'target-1',
+    handle: 'bob',
+    name: 'Bob',
+    avatarUrl: '',
+    followersCount: 0,
+    url: 'https://x.com/bob'
+  });
+  assert.equal(postRequest.options.body.includes('target-cookie-must-not-leave'), false);
   await eventually(() => assert.equal(saved.debotSocialPostOutboxV1?.records?.length, 0));
+
+  postResponseMode = 'reject-invalid';
+  const isolationRequestCount = requests.filter((request) => /\/bridge\/posts$/.test(request.url)).length;
+  await send({
+    source: 'debot-social-relay',
+    type: 'posts',
+    payload: {
+      posts: [
+        { source: 'twitter', externalId: 'valid-before-poison', content: 'valid before' },
+        { source: 'twitter', externalId: 'poison-post', content: 'permanently invalid' },
+        { source: 'twitter', externalId: 'valid-after-poison', content: 'valid after' }
+      ]
+    }
+  });
+  await eventually(() => assert.equal(saved.debotSocialPostOutboxV1?.records?.length, 0));
+  const isolationRequests = requests
+    .filter((request) => /\/bridge\/posts$/.test(request.url))
+    .slice(isolationRequestCount)
+    .map((request) => JSON.parse(request.options.body).posts.map((post) => post.externalId));
+  assert.equal(isolationRequests.some((ids) => ids.length === 1 && ids[0] === 'poison-post'), true);
+  assert.equal(isolationRequests.some((ids) => ids.includes('valid-before-poison')), true);
+  assert.equal(isolationRequests.some((ids) => ids.includes('valid-after-poison')), true);
+  postResponseMode = 'ok';
 
   postResponseMode = 'deferred';
   let postRequestCount = requests.filter((request) => /\/bridge\/posts$/.test(request.url)).length;
@@ -1609,9 +1994,11 @@ test('background uses the bridge secret only as authorization and submits allowl
     record.post.externalId === 'queued-during-outage')));
   await new Promise((resolve) => setTimeout(resolve, 0));
   failPostRequests = false;
-  alarmListener({ name: 'debot-social-bridge-recovery' });
+  const outageRequestCount = requests.filter((request) => /\/bridge\/posts$/.test(request.url)).length;
+  await eventually(() => assert.ok(requests.filter((request) =>
+    /\/bridge\/posts$/.test(request.url)).length > outageRequestCount), 3_000);
   await eventually(() => assert.equal(saved.debotSocialPostOutboxV1?.records?.some((record) =>
-    record.post.externalId === 'queued-during-outage'), false));
+    record.post.externalId === 'queued-during-outage'), false), 3_000);
 
   postResponseMode = 'negative';
   postRequestCount = requests.filter((request) => /\/bridge\/posts$/.test(request.url)).length;

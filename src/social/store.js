@@ -6,7 +6,9 @@ import {
   normalizeFeedSources,
   normalizeSocialPost,
   normalizeSocialSource,
-  normalizeWatchAccount
+  normalizeTimestamp,
+  normalizeWatchAccount,
+  parseSocialActivityIdentity
 } from './normalize.js';
 
 function json(value) {
@@ -53,6 +55,7 @@ function postFromRow(row) {
     replyToExternalId: row.reply_to_external_id,
     quotedExternalId: row.quoted_external_id,
     repostExternalId: row.repost_external_id,
+    target: parseJson(row.target_json, {}),
     publishedAt: Number(row.published_at),
     receivedAt: Number(row.received_at),
     sourceUpdatedAt: Number(row.source_updated_at),
@@ -147,6 +150,335 @@ function transaction(db, operation) {
   }
 }
 
+function activityTargetFromRows(rows, activity) {
+  const targets = rows.map((row) => parseJson(row.target_json, {}));
+  const stringValue = (name) => {
+    for (const target of targets) {
+      const value = String(target?.[name] || '').trim();
+      if (value) return value;
+    }
+    return '';
+  };
+  const storedHandle = stringValue('handle');
+  const handle = storedHandle.toLowerCase() === activity.targetHandle.toLowerCase()
+    ? storedHandle
+    : activity.targetHandle;
+  return {
+    id: stringValue('id'),
+    handle,
+    name: stringValue('name'),
+    avatarUrl: stringValue('avatarUrl'),
+    followers: Math.max(0, ...targets.map((target) => Number(target?.followers || 0)).filter(Number.isFinite)),
+    url: stringValue('url') || `https://x.com/${encodeURIComponent(handle)}`
+  };
+}
+
+function activityAuthorFromRows(rows, fallbackHandle = '') {
+  const stringValue = (name) => {
+    for (const row of rows) {
+      const value = String(row?.[name] || '').trim();
+      if (value) return value;
+    }
+    return '';
+  };
+  const storedHandle = stringValue('author_handle');
+  const canonicalHandle = String(fallbackHandle || '').trim();
+  const handle = canonicalHandle && storedHandle.toLowerCase() !== canonicalHandle.toLowerCase()
+    ? canonicalHandle
+    : storedHandle || canonicalHandle;
+  const followers = rows
+    .map((row) => Number(row?.author_followers || 0))
+    .find((value) => Number.isFinite(value) && value > 0) || 0;
+  return {
+    id: stringValue('author_id'),
+    handle,
+    name: stringValue('author_name'),
+    avatarUrl: stringValue('author_avatar_url'),
+    followers
+  };
+}
+
+function mergeSocialTarget(current, incoming) {
+  const existing = current && typeof current === 'object' ? current : {};
+  const next = incoming && typeof incoming === 'object' ? incoming : {};
+  const preferText = (name) => String(next[name] || '').trim() || String(existing[name] || '').trim();
+  const nextFollowers = Number(next.followers || 0);
+  const existingFollowers = Number(existing.followers || 0);
+  return {
+    id: preferText('id'),
+    handle: preferText('handle'),
+    name: preferText('name'),
+    avatarUrl: preferText('avatarUrl'),
+    followers: nextFollowers > 0 ? nextFollowers : Math.max(0, existingFollowers),
+    url: preferText('url')
+  };
+}
+
+function mergeSocialAuthor(current, incoming) {
+  const existing = current && typeof current === 'object' ? current : {};
+  const next = incoming && typeof incoming === 'object' ? incoming : {};
+  const preferText = (name) => String(next[name] || '').trim() || String(existing[name] || '').trim();
+  const nextFollowers = Number(next.followers || 0);
+  const existingFollowers = Number(existing.followers || 0);
+  return {
+    id: preferText('id'),
+    handle: preferText('handle'),
+    name: preferText('name'),
+    avatarUrl: preferText('avatarUrl'),
+    followers: nextFollowers > 0 ? nextFollowers : Math.max(0, existingFollowers)
+  };
+}
+
+function activityClusters(rows) {
+  const byOccurrence = new Map();
+  for (const row of rows) {
+    const occurrenceAt = Number(row.source_updated_at) || Number(row.published_at);
+    const cluster = byOccurrence.get(occurrenceAt) || [];
+    cluster.push(row);
+    byOccurrence.set(occurrenceAt, cluster);
+  }
+  return [...byOccurrence.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([occurrenceAt, clusterRows]) => ({ occurrenceAt, rows: clusterRows }));
+}
+
+function migrateSocialActivities(db) {
+  const rows = db.prepare(`
+    SELECT id, source, external_id, kind, author_id, author_handle, author_name,
+           author_avatar_url, author_followers, target_json, feed_sources_json,
+           published_at, received_at, source_updated_at, stored_at, updated_at
+    FROM social_posts
+    WHERE source = 'twitter' AND kind IN ('post', 'follow', 'unfollow')
+  `).all();
+  const groups = new Map();
+  for (const row of rows) {
+    const activity = parseSocialActivityIdentity(row.external_id, row.author_handle);
+    if (!activity) continue;
+    const key = `${row.source}\u0000${activity.canonicalId}`;
+    const group = groups.get(key) || { activity, rows: [] };
+    group.rows.push(row);
+    groups.set(key, group);
+  }
+  if (!groups.size) return;
+
+  const plans = [];
+  for (const { activity, rows: groupRows } of groups.values()) {
+    const clusters = activityClusters(groupRows);
+    for (const [occurrenceIndex, cluster] of clusters.entries()) {
+      const clusterRows = cluster.rows;
+      const newestFirst = [...clusterRows].sort((left, right) =>
+        Number(right.source_updated_at) - Number(left.source_updated_at)
+        || Number(right.updated_at) - Number(left.updated_at)
+        || Number(right.id) - Number(left.id));
+      const winner = newestFirst[0];
+      const externalId = occurrenceIndex === 0
+        ? activity.canonicalId
+        : `${activity.canonicalId}:${cluster.occurrenceAt}`;
+      const author = activityAuthorFromRows(newestFirst, activity.actorHandle);
+      const target = activityTargetFromRows(newestFirst, activity);
+      const feedSources = normalizeFeedSources(
+        newestFirst.map((row) => parseJson(row.feed_sources_json, []))
+      );
+      const receivedAt = Math.min(...clusterRows.map((row) => Number(row.received_at)));
+      const storedAt = Math.min(...clusterRows.map((row) => Number(row.stored_at)));
+      const updatedAt = Math.max(...clusterRows.map((row) => Number(row.updated_at)));
+      plans.push({
+        activity,
+        winner,
+        duplicates: newestFirst.slice(1),
+        externalId,
+        author,
+        target,
+        feedSources,
+        receivedAt,
+        storedAt,
+        updatedAt,
+        temporaryId: groupRows.length > 1 ? `social-activity-migration:${winner.id}` : '',
+        needsUpdate: winner.external_id !== externalId
+          || winner.kind !== activity.kind
+          || winner.author_id !== author.id
+          || winner.author_handle !== author.handle
+          || winner.author_name !== author.name
+          || winner.author_avatar_url !== author.avatarUrl
+          || Number(winner.author_followers) !== author.followers
+          || winner.target_json !== json(target)
+          || winner.feed_sources_json !== json(feedSources)
+          || Number(winner.received_at) !== receivedAt
+          || Number(winner.stored_at) !== storedAt
+          || Number(winner.updated_at) !== updatedAt
+      });
+    }
+  }
+
+  const deleteRow = db.prepare('DELETE FROM social_posts WHERE id = ?');
+  const setTemporaryId = db.prepare('UPDATE social_posts SET external_id = ? WHERE id = ?');
+  const updateWinner = db.prepare(`
+    UPDATE social_posts
+    SET external_id = ?, kind = ?, author_id = ?, author_handle = ?, author_name = ?,
+        author_avatar_url = ?, author_followers = ?, target_json = ?, feed_sources_json = ?,
+        received_at = ?, stored_at = ?, updated_at = ?
+    WHERE id = ?
+  `);
+  transaction(db, () => {
+    for (const plan of plans) {
+      for (const duplicate of plan.duplicates) deleteRow.run(duplicate.id);
+    }
+    for (const plan of plans) {
+      if (plan.temporaryId) setTemporaryId.run(plan.temporaryId, plan.winner.id);
+    }
+    for (const plan of plans) {
+      if (!plan.temporaryId && !plan.needsUpdate) continue;
+      updateWinner.run(
+        plan.externalId,
+        plan.activity.kind,
+        plan.author.id,
+        plan.author.handle,
+        plan.author.name,
+        plan.author.avatarUrl,
+        plan.author.followers,
+        json(plan.target),
+        json(plan.feedSources),
+        plan.receivedAt,
+        plan.storedAt,
+        plan.updatedAt,
+        plan.winner.id
+      );
+    }
+  });
+}
+
+function legacyProfileIdentity(row) {
+  const authorHandle = String(row.author_handle || '').replace(/^@/, '').trim();
+  if (!/^[a-z0-9_]{1,15}$/i.test(authorHandle)) return null;
+  const occurrenceAt = Number(row.source_updated_at) || Number(row.published_at);
+  const canonicalId = `profile:${authorHandle.toLowerCase()}:${occurrenceAt}`;
+  const canonical = /^profile:([a-z0-9_]{1,15}):(\d{10,16})$/i.exec(String(row.external_id || ''));
+  if (canonical) {
+    if (canonical[1].toLowerCase() !== authorHandle.toLowerCase()) return null;
+    return { authorHandle, canonicalId: `profile:${authorHandle.toLowerCase()}:${canonical[2]}` };
+  }
+  if (row.kind !== 'post' || row.content || row.url) return null;
+  const externalId = String(row.external_id || '');
+  const plainPrefix = `profile_${authorHandle}_`;
+  if (externalId.toLowerCase().startsWith(plainPrefix.toLowerCase())) {
+    return { authorHandle, canonicalId };
+  }
+  if (!/^[a-z0-9_-]{12,}$/i.test(externalId)) return null;
+  let decoded = '';
+  try {
+    decoded = Buffer.from(externalId, 'base64url').toString('utf8');
+  } catch {
+    return null;
+  }
+  const decodedLower = decoded.toLowerCase();
+  if (!decodedLower.startsWith(`@${authorHandle.toLowerCase()}_`)
+    || !decodedLower.includes('https://pbs.twimg.com/profile_images/')) return null;
+  return { authorHandle, canonicalId };
+}
+
+function migrateProfileActivities(db) {
+  const groups = new Map();
+  for (const row of db.prepare(`
+    SELECT id, external_id, kind, author_id, author_handle, author_name,
+           author_avatar_url, author_followers, content, url, feed_sources_json,
+           published_at, received_at, source_updated_at, stored_at, updated_at
+    FROM social_posts
+    WHERE source = 'twitter' AND kind IN ('post', 'profile')
+  `).all()) {
+    const identity = legacyProfileIdentity(row);
+    if (!identity) continue;
+    const group = groups.get(identity.canonicalId) || [];
+    group.push({ ...row, identity });
+    groups.set(identity.canonicalId, group);
+  }
+  if (!groups.size) return;
+
+  const deleteRow = db.prepare('DELETE FROM social_posts WHERE id = ?');
+  const setTemporaryId = db.prepare('UPDATE social_posts SET external_id = ? WHERE id = ?');
+  const updateWinner = db.prepare(`
+    UPDATE social_posts
+    SET external_id = ?, kind = 'profile', author_id = ?, author_handle = ?, author_name = ?,
+        author_avatar_url = ?, author_followers = ?, feed_sources_json = ?,
+        received_at = ?, stored_at = ?, updated_at = ?
+    WHERE id = ?
+  `);
+  transaction(db, () => {
+    for (const [canonicalId, groupRows] of groups) {
+      const ordered = [...groupRows].sort((left, right) =>
+        Number(right.updated_at) - Number(left.updated_at)
+        || Number(right.id) - Number(left.id));
+      const winner = ordered[0];
+      const author = activityAuthorFromRows(ordered, winner.identity.authorHandle);
+      const feedSources = normalizeFeedSources(
+        ordered.map((row) => parseJson(row.feed_sources_json, []))
+      );
+      for (const duplicate of ordered.slice(1)) deleteRow.run(duplicate.id);
+      if (ordered.length > 1) setTemporaryId.run(`social-profile-migration:${winner.id}`, winner.id);
+      const receivedAt = Math.min(...ordered.map((row) => Number(row.received_at)));
+      const storedAt = Math.min(...ordered.map((row) => Number(row.stored_at)));
+      const updatedAt = Math.max(...ordered.map((row) => Number(row.updated_at)));
+      const needsUpdate = ordered.length > 1
+        || winner.external_id !== canonicalId
+        || winner.kind !== 'profile'
+        || winner.author_id !== author.id
+        || winner.author_handle !== author.handle
+        || winner.author_name !== author.name
+        || winner.author_avatar_url !== author.avatarUrl
+        || Number(winner.author_followers) !== author.followers
+        || winner.feed_sources_json !== json(feedSources)
+        || Number(winner.received_at) !== receivedAt
+        || Number(winner.stored_at) !== storedAt
+        || Number(winner.updated_at) !== updatedAt;
+      if (needsUpdate) {
+        updateWinner.run(
+          canonicalId,
+          author.id,
+          author.handle,
+          author.name,
+          author.avatarUrl,
+          author.followers,
+          json(feedSources),
+          receivedAt,
+          storedAt,
+          updatedAt,
+          winner.id
+        );
+      }
+    }
+  });
+}
+
+function resolveActivityOccurrence(db, normalized) {
+  const activity = parseSocialActivityIdentity(normalized.externalId, normalized.authorHandle);
+  if (!activity || normalized.source !== 'twitter') return normalized;
+  const candidates = db.prepare(`
+    SELECT external_id, published_at, source_updated_at, id
+    FROM social_posts
+    WHERE source = ? AND (external_id = ? OR external_id GLOB ?)
+  `).all(normalized.source, activity.canonicalId, `${activity.canonicalId}:*`);
+  if (!candidates.length) return normalized;
+
+  const occurrenceTimestampProvided = normalized._provided.has('sourceUpdatedAt')
+    || normalized._provided.has('publishedAt');
+  let existing;
+  if (!occurrenceTimestampProvided) {
+    existing = [...candidates].sort((left, right) =>
+      Number(right.source_updated_at) - Number(left.source_updated_at)
+      || Number(right.published_at) - Number(left.published_at)
+      || Number(right.id) - Number(left.id))[0];
+  } else {
+    existing = candidates
+      .filter((row) => Number(row.source_updated_at) === normalized.sourceUpdatedAt)
+      .sort((left, right) =>
+        Number(right.published_at) - Number(left.published_at)
+        || Number(right.id) - Number(left.id))[0];
+  }
+  return {
+    ...normalized,
+    externalId: existing?.external_id || `${activity.canonicalId}:${normalized.sourceUpdatedAt}`
+  };
+}
+
 function postValues(post, raw, now) {
   return [
     post.source,
@@ -167,6 +499,7 @@ function postValues(post, raw, now) {
     post.replyToExternalId,
     post.quotedExternalId,
     post.repostExternalId,
+    json(post.target),
     post.publishedAt,
     post.receivedAt,
     post.sourceUpdatedAt,
@@ -206,6 +539,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       reply_to_external_id TEXT NOT NULL DEFAULT '',
       quoted_external_id TEXT NOT NULL DEFAULT '',
       repost_external_id TEXT NOT NULL DEFAULT '',
+      target_json TEXT NOT NULL DEFAULT '{}',
       published_at INTEGER NOT NULL,
       received_at INTEGER NOT NULL,
       source_updated_at INTEGER NOT NULL,
@@ -308,21 +642,27 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
   if (!socialPostColumns.has('feed_sources_json')) {
     db.exec("ALTER TABLE social_posts ADD COLUMN feed_sources_json TEXT NOT NULL DEFAULT '[\"all\"]'");
   }
+  if (!socialPostColumns.has('target_json')) {
+    db.exec("ALTER TABLE social_posts ADD COLUMN target_json TEXT NOT NULL DEFAULT '{}'");
+  }
+
+  migrateSocialActivities(db);
+  migrateProfileActivities(db);
 
   const insertPost = db.prepare(`
     INSERT INTO social_posts(
       source, external_id, kind, author_id, author_handle, author_name, author_avatar_url,
       author_followers, content, translated_content, url, media_json, contract_addresses_json,
       chain_tags_json, feed_sources_json, reply_to_external_id, quoted_external_id, repost_external_id,
-      published_at, received_at, source_updated_at, deleted_at, raw_json, stored_at, updated_at
-    ) VALUES (${Array(25).fill('?').join(', ')})
+      target_json, published_at, received_at, source_updated_at, deleted_at, raw_json, stored_at, updated_at
+    ) VALUES (${Array(26).fill('?').join(', ')})
   `);
   const updatePost = db.prepare(`
     UPDATE social_posts SET
       kind = ?, author_id = ?, author_handle = ?, author_name = ?, author_avatar_url = ?,
       author_followers = ?, content = ?, translated_content = ?, url = ?, media_json = ?,
       contract_addresses_json = ?, chain_tags_json = ?, feed_sources_json = ?, reply_to_external_id = ?,
-      quoted_external_id = ?, repost_external_id = ?, published_at = ?, received_at = ?,
+      quoted_external_id = ?, repost_external_id = ?, target_json = ?, published_at = ?, received_at = ?,
       source_updated_at = ?, deleted_at = ?, raw_json = ?, updated_at = ?
     WHERE id = ?
   `);
@@ -337,7 +677,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
   }
 
   function applyPost(input, timestamp) {
-    const normalized = normalizeSocialPost(input, { now: timestamp });
+    const normalized = resolveActivityOccurrence(db, normalizeSocialPost(input, { now: timestamp }));
     const existingRow = db.prepare('SELECT * FROM social_posts WHERE source = ? AND external_id = ?')
       .get(normalized.source, normalized.externalId);
     if (!existingRow) {
@@ -366,14 +706,21 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       };
     }
     const choose = (name, current) => provided.has(name) ? normalized[name] : current;
+    const mergedAuthor = mergeSocialAuthor(existing.author, {
+      id: choose('authorId', existing.author.id),
+      handle: choose('authorHandle', existing.author.handle),
+      name: choose('authorName', existing.author.name),
+      avatarUrl: choose('authorAvatarUrl', existing.author.avatarUrl),
+      followers: choose('authorFollowers', existing.author.followers)
+    });
     const merged = {
       ...normalized,
       kind: choose('kind', existing.kind),
-      authorId: choose('authorId', existing.author.id),
-      authorHandle: choose('authorHandle', existing.author.handle),
-      authorName: choose('authorName', existing.author.name),
-      authorAvatarUrl: choose('authorAvatarUrl', existing.author.avatarUrl),
-      authorFollowers: choose('authorFollowers', existing.author.followers),
+      authorId: mergedAuthor.id,
+      authorHandle: mergedAuthor.handle,
+      authorName: mergedAuthor.name,
+      authorAvatarUrl: mergedAuthor.avatarUrl,
+      authorFollowers: mergedAuthor.followers,
       content: choose('content', existing.content),
       translatedContent: choose('translatedContent', existing.translatedContent),
       url: choose('url', existing.url),
@@ -384,6 +731,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       replyToExternalId: choose('replyToExternalId', existing.replyToExternalId),
       quotedExternalId: choose('quotedExternalId', existing.quotedExternalId),
       repostExternalId: choose('repostExternalId', existing.repostExternalId),
+      target: provided.has('target') ? mergeSocialTarget(existing.target, normalized.target) : existing.target,
       publishedAt: choose('publishedAt', existing.publishedAt),
       receivedAt: Math.min(existing.receivedAt, normalized.receivedAt),
       sourceUpdatedAt: Math.max(existing.sourceUpdatedAt, normalized.sourceUpdatedAt),
@@ -410,6 +758,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       replyToExternalId: merged.replyToExternalId,
       quotedExternalId: merged.quotedExternalId,
       repostExternalId: merged.repostExternalId,
+      target: merged.target,
       publishedAt: merged.publishedAt,
       receivedAt: merged.receivedAt,
       sourceUpdatedAt: merged.sourceUpdatedAt,
@@ -441,6 +790,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       merged.replyToExternalId,
       merged.quotedExternalId,
       merged.repostExternalId,
+      json(merged.target),
       merged.publishedAt,
       merged.receivedAt,
       merged.sourceUpdatedAt,
@@ -574,13 +924,46 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       return transaction(db, () => inputs.map((input) => applyPost(input, timestamp)));
     },
     deletePost(source, externalId, deletedAt = now()) {
-      return transaction(db, () => applyPost({
-        source: normalizeSocialSource(source),
-        externalId,
-        deleted: true,
-        deletedAt,
-        sourceUpdatedAt: deletedAt
-      }, now()));
+      return transaction(db, () => {
+        const timestamp = now();
+        const normalizedSource = normalizeSocialSource(source);
+        const normalizedExternalId = String(externalId || '').trim().slice(0, 240);
+        if (!normalizedExternalId) throw new TypeError('Social post externalId is required');
+        const deletionTimestamp = normalizeTimestamp(deletedAt, timestamp);
+        const existingRow = db.prepare('SELECT * FROM social_posts WHERE source = ? AND external_id = ?')
+          .get(normalizedSource, normalizedExternalId);
+        if (!existingRow) {
+          return applyPost({
+            source: normalizedSource,
+            externalId: normalizedExternalId,
+            deleted: true,
+            deletedAt: deletionTimestamp,
+            sourceUpdatedAt: deletionTimestamp
+          }, timestamp);
+        }
+
+        const existing = postFromRow(existingRow);
+        const nextDeletedAt = Math.max(Number(existing.deletedAt || 0), deletionTimestamp);
+        const nextSourceUpdatedAt = Math.max(existing.sourceUpdatedAt, deletionTimestamp);
+        if (existing.deleted
+          && existing.deletedAt === nextDeletedAt
+          && existing.sourceUpdatedAt === nextSourceUpdatedAt) {
+          return { action: 'unchanged', post: existing, change: null };
+        }
+        db.prepare(`
+          UPDATE social_posts
+          SET deleted_at = ?, source_updated_at = ?, updated_at = ?
+          WHERE id = ?
+        `).run(nextDeletedAt, nextSourceUpdatedAt, timestamp, existing.id);
+        const post = postFromRow(db.prepare('SELECT * FROM social_posts WHERE id = ?').get(existing.id));
+        const newlyDeleted = !existing.deleted;
+        const type = newlyDeleted ? 'post.deleted' : 'post.updated';
+        return {
+          action: newlyDeleted ? 'deleted' : 'updated',
+          post,
+          change: recordChange(type, 'post', post.id, post, timestamp)
+        };
+      });
     },
     listPosts({
       limit = 50,
@@ -619,9 +1002,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       }
       if (!includeDeleted) where.push('deleted_at IS NULL');
       if (query) {
-        where.push('(content LIKE ? OR translated_content LIKE ? OR author_handle LIKE ? OR author_name LIKE ?)');
+        where.push('(content LIKE ? OR translated_content LIKE ? OR author_handle LIKE ? OR author_name LIKE ? OR target_json LIKE ?)');
         const pattern = `%${String(query).slice(0, 200)}%`;
-        params.push(pattern, pattern, pattern, pattern);
+        params.push(pattern, pattern, pattern, pattern, pattern);
       }
       params.push(Math.min(500, Math.max(1, Math.floor(Number(limit) || 50))));
       return db.prepare(`

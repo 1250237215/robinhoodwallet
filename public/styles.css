@@ -3320,6 +3320,21 @@ select:hover {
   --social-accent: #d6a50b;
 }
 
+.social-post[data-kind="follow"] {
+  --social-accent: #16855a;
+  background: #f8fcfa;
+}
+
+.social-post[data-kind="unfollow"] {
+  --social-accent: #b54756;
+  background: #fff9fa;
+}
+
+.social-post[data-kind="profile"] {
+  --social-accent: #8a6a18;
+  background: #fffdf7;
+}
+
 .social-post.is-deleted {
   --social-accent: #b33a45;
   background: #fff8f8;
@@ -3443,7 +3458,9 @@ select:hover {
 }
 
 .social-post-content,
-.social-post-translation {
+.social-post-translation,
+.social-activity-content,
+.social-profile-activity {
   margin: 10px 0 0;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -3453,6 +3470,45 @@ select:hover {
   color: var(--ink);
   font-size: 14px;
   line-height: 1.55;
+}
+
+.social-activity-content,
+.social-profile-activity {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--social-accent) 30%, var(--line));
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--social-accent) 7%, var(--surface));
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.social-activity-content svg,
+.social-profile-activity svg {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+  color: var(--social-accent);
+}
+
+.social-activity-content strong,
+.social-profile-activity strong {
+  font-weight: 700;
+}
+
+.social-activity-content a {
+  color: var(--social-accent);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.social-activity-content a:hover {
+  text-decoration: underline;
 }
 
 .social-post-translation {

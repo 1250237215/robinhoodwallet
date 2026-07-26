@@ -13,6 +13,18 @@ function number(value) {
   return Number.isFinite(result) ? result : 0;
 }
 
+function account(value, { includeUrl = false } = {}) {
+  const item = value && typeof value === 'object' ? value : {};
+  return {
+    id: text(item.id, 240),
+    handle: text(item.handle, 240),
+    name: text(item.name, 500),
+    avatarUrl: text(item.avatarUrl, 2_000),
+    followersCount: number(item.followersCount),
+    ...(includeUrl ? { url: text(item.url, 2_000) } : {})
+  };
+}
+
 // The outbox accepts sanitized posts, then projects them onto the same narrow
 // schema before persistence so credentials, raw responses and future private
 // fields can never be copied into extension storage by accident.
@@ -23,13 +35,8 @@ function persistedPost(value) {
     source: text(post.source, 40),
     externalId: text(post.externalId, 240),
     kind: text(post.kind, 20),
-    author: {
-      id: text(author.id, 240),
-      handle: text(author.handle, 240),
-      name: text(author.name, 500),
-      avatarUrl: text(author.avatarUrl, 2_000),
-      followersCount: number(author.followersCount)
-    },
+    author: account(author),
+    ...(['follow', 'unfollow'].includes(post.kind) ? { target: account(post.target, { includeUrl: true }) } : {}),
     content: text(post.content, 100_000),
     translatedContent: text(post.translatedContent, 100_000),
     url: text(post.url, 2_000),

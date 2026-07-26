@@ -1125,6 +1125,32 @@ test('social monitoring replaces the visible same-token aggregation panel with a
   assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.social-feed \{[\s\S]*height: 68svh/);
 });
 
+test('social relationship activity identifies, deduplicates and renders the exact target action', () => {
+  assert.match(appJs, /const SOCIAL_ACTIVITY_KINDS = new Set\(\['follow', 'unfollow'\]\)/);
+  assert.match(appJs, /function decodeSocialActivityExternalId\(value\)[\s\S]*atob\(/);
+  assert.match(appJs, /const prefix = `\$\{plainKind\}_\$\{authorHandle\}_`/);
+  assert.match(appJs, /const baseId = `\$\{activity\.kind\}:\$\{activity\.actorHandle\.toLowerCase\(\)\}:\$\{activity\.targetHandle\.toLowerCase\(\)\}`/);
+  assert.match(appJs, /return `\$\{source\}:activity:\$\{baseId\}:\$\{occurrence\}`/);
+  assert.match(appJs, /if \(kind === 'follow'\) return '关注'/);
+  assert.match(appJs, /if \(kind === 'unfollow'\) return '取消关注'/);
+  assert.match(appJs, /if \(kind === 'profile'\) return '资料更新'/);
+  assert.match(appJs, /const actionLabel = activity\.kind === 'follow' \? '关注了' : '取消关注了'/);
+  assert.match(appJs, /data-lucide="\$\{icon\}"/);
+  assert.match(appJs, /https:\/\/x\.com\/\$\{encodeURIComponent\(targetHandle\)\}/);
+  assert.match(appJs, />@\$\{escapeHtml\(targetHandle\)\}<\/a>/);
+  assert.match(appJs, /\$\{activityMarkup \|\| profileActivityMarkup \|\| \(post\.content/);
+  assert.match(appJs, /\$\{!nonPostActivity && postUrl \? `<footer/);
+  assert.match(appJs, /data-kind="\$\{escapeHtml\(kind\)\}"/);
+  assert.match(appJs, /function socialProfileActivityMarkup\(post\)[\s\S]*更新了账号资料/);
+  assert.match(appJs, /post\.target\?\.name,[\s\S]*post\.target\?\.handle/);
+  assert.match(appJs, /const incomingIsNewer = compareRecency\(incoming, current\) >= 0/);
+  assert.match(appJs, /if \(id !== null && id <= state\.socialLatestChangeId\) return/);
+  assert.match(stylesCss, /\.social-post\[data-kind="follow"\]/);
+  assert.match(stylesCss, /\.social-post\[data-kind="unfollow"\]/);
+  assert.match(stylesCss, /\.social-post\[data-kind="profile"\]/);
+  assert.match(stylesCss, /\.social-activity-content,[\s\S]*\.social-profile-activity \{/);
+});
+
 test('chain and social elapsed times advance every second without rerendering either feed', () => {
   const formatterSource = appJs.slice(
     appJs.indexOf('function formatMonitorAge'),

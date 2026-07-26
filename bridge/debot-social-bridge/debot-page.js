@@ -23,6 +23,9 @@
   let activeAnalysisJobs = 0;
   const analysisQueue = [];
   const analysisKeys = new Set();
+  let watchlistInFlight = null;
+  let optionalPollInFlight = null;
+  let primaryFollowUpRequested = false;
 
   function emit(type, payload) {
     window.postMessage({ source: PAGE_SOURCE, type, payload }, window.location.origin);
@@ -55,37 +58,182 @@
     }).filter((item) => item.url || item.previewUrl);
   }
 
-  function postKind(payload) {
+  function handleText(value) {
+    return String(value || '').trim().replace(/^@/, '');
+  }
+
+  function normalizedEventType(value) {
+    const type = String(value || '').trim().toLowerCase().replace(/[-_\s]/g, '');
+    if (['tweet', 'post'].includes(type)) return 'post';
+    if (['retweet', 'repost'].includes(type)) return 'repost';
+    if (type === 'quote') return 'quote';
+    if (type === 'reply') return 'reply';
+    if (type === 'follow') return 'follow';
+    if (type === 'unfollow') return 'unfollow';
+    if (['rename', 'reimage', 'redescription'].includes(type)) return 'profile';
+    if (['delete', 'deleted', 'deltweet', 'deletepost'].includes(type)) return 'delete';
+    return '';
+  }
+
+  function decodeBase64Url(value) {
+    const input = String(value || '').trim();
+    if (!input || !/^[A-Za-z0-9_-]+$/.test(input) || input.length % 4 === 1) return '';
+    const encoded = input.replace(/-/g, '+').replace(/_/g, '/');
+    try {
+      if (typeof atob === 'function') return atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, '='));
+    } catch {
+      return '';
+    }
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    let bits = 0;
+    let bitCount = 0;
+    let decoded = '';
+    for (const character of encoded) {
+      const digit = alphabet.indexOf(character);
+      if (digit < 0) return '';
+      bits = (bits << 6) | digit;
+      bitCount += 6;
+      if (bitCount < 8) continue;
+      bitCount -= 8;
+      decoded += String.fromCharCode((bits >> bitCount) & 0xff);
+    }
+    return decoded;
+  }
+
+  function eventIdentity(value, knownAuthor = '') {
+    const raw = String(value || '').trim();
+    const author = handleText(knownAuthor).toLowerCase();
+    for (const candidate of [raw, decodeBase64Url(raw)]) {
+      const colon = /^(follow|unfollow):([a-z0-9_]{1,15}):([a-z0-9_]{1,15})$/i.exec(candidate);
+      if (colon) {
+        if (author && colon[2].toLowerCase() !== author) return { invalid: true };
+        return { kind: colon[1].toLowerCase(), author: colon[2], target: colon[3] };
+      }
+      if (/^(?:follow|unfollow):/i.test(candidate)) return { invalid: true };
+      const prefixKind = /^(follow|unfollow)_/i.exec(candidate)?.[1]?.toLowerCase();
+      if (!prefixKind) continue;
+      if (!author) return { invalid: true };
+      const prefix = `${prefixKind}_${author}_`;
+      if (!candidate.toLowerCase().startsWith(prefix)) return { invalid: true };
+      const target = candidate.slice(prefix.length);
+      if (/^[a-z0-9_]{1,15}$/i.test(target)) return { kind: prefixKind, author, target };
+      return { invalid: true };
+    }
+    return null;
+  }
+
+  function eventType(payload, identity) {
     const tweet = payload?.tweet || {};
+    if (identity?.kind) return identity.kind;
+    const explicitTypes = [
+      payload?.tw_type,
+      payload?.twType,
+      payload?.twitter_type,
+      payload?.event_type,
+      payload?.eventType,
+      payload?.action,
+      payload?.type,
+      payload?.tweet_type,
+      tweet.tweet_type
+    ].map(normalizedEventType).filter(Boolean);
+    const specific = explicitTypes.find((type) => type !== 'post');
+    if (specific) return specific;
+    if (payload?.is_deleted === true) return 'delete';
     if (tweet.is_reply) return 'reply';
     if (tweet.is_quote) return 'quote';
     if (tweet.is_retweet) return 'repost';
     return 'post';
   }
 
+  function targetValue(payload) {
+    const candidates = [
+      payload?.target,
+      payload?.target_user,
+      payload?.targetUser,
+      payload?.follow_user,
+      payload?.followUser,
+      payload?.followed_user,
+      payload?.followedUser,
+      payload?.unfollow_user,
+      payload?.unfollowUser,
+      payload?.to_user,
+      payload?.toUser,
+      payload?.object_user,
+      payload?.objectUser
+    ];
+    return candidates.find((value) => value !== null && value !== undefined && value !== '') || {};
+  }
+
+  function normalizeTarget(payload, identity) {
+    const raw = targetValue(payload);
+    const target = raw && typeof raw === 'object' ? raw : {};
+    const scalarHandle = typeof raw === 'string' ? raw : '';
+    const handle = handleText(
+      target.username
+        || target.screen_name
+        || target.screenName
+        || target.handle
+        || payload.target_username
+        || payload.targetUsername
+        || payload.target_screen_name
+        || payload.follow_username
+        || payload.unfollow_username
+        || payload.to_username
+        || scalarHandle
+        || identity?.target
+    );
+    return {
+      id: String(target.id || target.user_id || target.userId || payload.target_user_id || ''),
+      handle,
+      name: String(target.name || target.display_name || target.displayName || payload.target_name || ''),
+      avatarUrl: String(target.avatar || target.avatar_url || target.profile_image_url_https || ''),
+      followersCount: Number(target.followers_count || target.profile_info?.Stats?.Followers || 0),
+      url: String(target.url || target.profile_url || (handle ? `https://x.com/${handle}` : ''))
+    };
+  }
+
   function normalizePost(payload, feedSource = 'my') {
     if (!payload || typeof payload !== 'object') return null;
     const tweet = payload.tweet || {};
     const user = payload.user || tweet.user || {};
-    const externalId = String(payload.doc_id || tweet.tweet_id || payload.id || '').trim();
-    if (!externalId) return null;
     const handle = String(user.username || payload.screen_name || '').replace(/^@/, '');
+    const rawExternalId = String(payload.doc_id || tweet.tweet_id || payload.id || '').trim();
+    if (!rawExternalId) return null;
+    const identity = eventIdentity(rawExternalId, handle);
+    if (identity?.invalid) return null;
+    const kind = eventType(payload, identity);
+    const target = ['follow', 'unfollow'].includes(kind) ? normalizeTarget(payload, identity) : null;
+    if (identity?.target && target?.handle
+      && identity.target.toLowerCase() !== target.handle.toLowerCase()) return null;
+    const identityAuthor = handleText(handle || identity?.author).toLowerCase();
+    const identityTarget = handleText(target?.handle || identity?.target).toLowerCase();
+    if (['follow', 'unfollow'].includes(kind)
+      && (!/^[a-z0-9_]{1,15}$/i.test(identityAuthor) || !/^[a-z0-9_]{1,15}$/i.test(identityTarget))) {
+      return null;
+    }
+    const publishedAt = timestamp(payload.publish_timestamp || payload.index_time || tweet.date || payload.date);
+    const sourceUpdatedAt = timestamp(payload.save_time || payload.index_time, publishedAt);
+    const externalId = ['follow', 'unfollow'].includes(kind) && identityAuthor && identityTarget
+      ? `${kind}:${identityAuthor}:${identityTarget}`
+      : kind === 'profile' && identityAuthor
+        ? `profile:${identityAuthor}:${sourceUpdatedAt}`
+      : rawExternalId;
     const platform = Number(payload.platform ?? 0);
     const content = String(tweet.text || payload.text || payload.profile?.new_description || '').trim();
     const mentioned = Array.isArray(payload.mentioned_ca) ? payload.mentioned_ca : [];
-    const deleted = tweet.tweet_type === 'delete_post' || payload.is_deleted === true;
-    const publishedAt = timestamp(payload.publish_timestamp || payload.index_time || tweet.date || payload.date);
+    const deleted = kind === 'delete' || payload.is_deleted === true;
     return {
       source: platform === 1 ? 'binance' : 'twitter',
       externalId,
-      kind: postKind(payload),
+      kind,
       author: {
         id: String(user.id || user.user_id || ''),
-        handle,
-        name: String(user.name || handle),
+        handle: handle || identity?.author || '',
+        name: String(user.name || user.display_name || user.displayName || ''),
         avatarUrl: String(user.avatar || user.profile_image_url_https || ''),
         followersCount: Number(user.followers_count || user.profile_info?.Stats?.Followers || 0)
       },
+      ...(target ? { target } : {}),
       content,
       translatedContent: String(translation(tweet) || payload.translated_text || ''),
       url: String(tweet.link || payload.link || (handle && tweet.tweet_id ? `https://x.com/${handle}/status/${tweet.tweet_id}` : '')),
@@ -100,7 +248,7 @@
       repostExternalId: String(tweet.retweeted_post?.tweet_id || ''),
       publishedAt,
       receivedAt: Date.now(),
-      sourceUpdatedAt: timestamp(payload.save_time || payload.index_time, publishedAt),
+      sourceUpdatedAt,
       deleted,
       deletedAt: deleted ? Date.now() : null,
       feedSources: [feedSource]
@@ -108,11 +256,63 @@
   }
 
   function postIdentity(post) {
-    return `${post.source}:${post.externalId}`;
+    const occurrence = ['follow', 'unfollow'].includes(post.kind)
+      ? `:${Number(post.sourceUpdatedAt || post.publishedAt || 0)}`
+      : '';
+    return `${post.source}:${post.externalId}${occurrence}`;
   }
 
   function postFingerprint(post) {
-    return JSON.stringify([post.sourceUpdatedAt, post.deleted, post.content, post.translatedContent, post.feedSources]);
+    const accountMetadata = ['profile', 'follow', 'unfollow'].includes(post.kind) ? {
+      id: post.author?.id || '',
+      handle: post.author?.handle || '',
+      name: post.author?.name || '',
+      avatarUrl: post.author?.avatarUrl || '',
+      followersCount: Number(post.author?.followersCount || 0)
+    } : null;
+    return JSON.stringify([
+      post.sourceUpdatedAt,
+      post.deleted,
+      post.kind,
+      post.content,
+      post.translatedContent,
+      accountMetadata,
+      post.target,
+      post.feedSources
+    ]);
+  }
+
+  function mergeSocialAccount(previous, incoming) {
+    const older = previous && typeof previous === 'object' ? previous : {};
+    const newer = incoming && typeof incoming === 'object' ? incoming : {};
+    const merged = { ...older };
+    for (const [name, value] of Object.entries(newer)) {
+      if (value !== '' && value !== null && value !== undefined
+        && !(name === 'followersCount' && Number(value) === 0)) {
+        merged[name] = value;
+      }
+    }
+    return merged;
+  }
+
+  function mergeObservedPosts(previous, incoming) {
+    if (!previous) return incoming;
+    if (!incoming) return previous;
+    const previousUpdatedAt = Number(previous.sourceUpdatedAt || previous.publishedAt || 0);
+    const incomingUpdatedAt = Number(incoming.sourceUpdatedAt || incoming.publishedAt || 0);
+    const older = incomingUpdatedAt >= previousUpdatedAt ? previous : incoming;
+    const newer = incomingUpdatedAt >= previousUpdatedAt ? incoming : previous;
+    const merged = {
+      ...older,
+      ...newer,
+      author: mergeSocialAccount(older.author, newer.author),
+      feedSources: Array.from(new Set([
+        ...(older.feedSources || []),
+        ...(newer.feedSources || [])
+      ])).sort()
+    };
+    if (older.target || newer.target) merged.target = mergeSocialAccount(older.target, newer.target);
+    return merged;
   }
 
   function clearDeliveryTimers(delivery) {
@@ -170,7 +370,7 @@
         const acknowledgedAt = Number(acknowledged?.sourceUpdatedAt || 0);
         const itemUpdatedAt = Number(item.post.sourceUpdatedAt || item.post.publishedAt || 0);
         if (acknowledged?.fingerprint === item.fingerprint) continue;
-        if (acknowledged && acknowledgedAt >= itemUpdatedAt) continue;
+        if (acknowledged && acknowledgedAt > itemUpdatedAt) continue;
         posts.push(item.post);
       }
       pendingDeliveries.delete(deliveryId);
@@ -198,36 +398,15 @@
       if (!post) continue;
       const key = postIdentity(post);
       const previous = candidates.get(key);
-      const previousUpdatedAt = Number(previous?.sourceUpdatedAt || previous?.publishedAt || 0);
-      const nextUpdatedAt = Number(post.sourceUpdatedAt || post.publishedAt || 0);
-      const newest = !previous || nextUpdatedAt >= previousUpdatedAt ? post : previous;
-      candidates.set(key, {
-        ...newest,
-        feedSources: Array.from(new Set([
-          ...(previous?.feedSources || []),
-          ...(post.feedSources || [])
-        ])).sort()
-      });
+      candidates.set(key, mergeObservedPosts(previous, post));
     }
 
     const fresh = [];
     for (const [key, candidate] of candidates) {
       const acknowledged = seen.get(key);
       const pending = pendingPosts.get(key);
-      const pendingUpdatedAt = Number(pending?.post?.sourceUpdatedAt || pending?.post?.publishedAt || 0);
-      const candidateUpdatedAt = Number(candidate.sourceUpdatedAt || candidate.publishedAt || 0);
-      const acknowledgedUpdatedAt = Number(acknowledged?.post?.sourceUpdatedAt || acknowledged?.post?.publishedAt || 0);
-      let newest = candidate;
-      if (pending?.post && pendingUpdatedAt >= candidateUpdatedAt) newest = pending.post;
-      else if (acknowledged?.post && acknowledgedUpdatedAt > candidateUpdatedAt) newest = acknowledged.post;
-      const post = {
-        ...newest,
-        feedSources: Array.from(new Set([
-          ...(acknowledged?.feedSources || []),
-          ...(pending?.feedSources || []),
-          ...(candidate.feedSources || [])
-        ])).sort()
-      };
+      let post = mergeObservedPosts(acknowledged?.post, pending?.post);
+      post = mergeObservedPosts(post, candidate);
       const fingerprint = postFingerprint(post);
       if (acknowledged?.fingerprint === fingerprint) continue;
       if (pending?.fingerprint === fingerprint && now - pending.at < DELIVERY_TIMEOUT_MS) continue;
@@ -652,62 +831,85 @@
     return feeds.map((item) => normalizePost(item, feedSource)).filter(Boolean);
   }
 
+  function accountConfigKey() {
+    return cachedAccounts.map((account) => account.remoteId).filter(Boolean).sort().join('|');
+  }
+
+  function requestPrimaryFollowUp() {
+    if (pollInFlight) {
+      primaryFollowUpRequested = true;
+      return;
+    }
+    void fallbackPoll();
+  }
+
+  function refreshWatchlistIfNeeded() {
+    if (watchlistInFlight || Date.now() - lastWatchlistAt <= 30_000) return watchlistInFlight;
+    const previousKey = accountConfigKey();
+    const operation = fetchWatchlist().then(() => {
+      if (accountConfigKey() !== previousKey) requestPrimaryFollowUp();
+    }).catch(() => {
+      // The primary monitored-account timeline remains independent of watchlist refresh failures.
+    }).finally(() => {
+      if (watchlistInFlight === operation) watchlistInFlight = null;
+    });
+    watchlistInFlight = operation;
+    return operation;
+  }
+
+  function pollOptionalTimelines() {
+    if (optionalPollInFlight) return optionalPollInFlight;
+    const configIds = cachedAccounts.map((account) => account.remoteId).filter(Boolean);
+    const deliverTimeline = (promise) => promise.then((posts) => {
+      deliverPosts(posts);
+      return posts;
+    });
+    const operation = Promise.allSettled([
+      deliverTimeline(fetchTimeline('featured')),
+      deliverTimeline(fetchTimeline('all', configIds))
+    ]).finally(() => {
+      if (optionalPollInFlight === operation) optionalPollInFlight = null;
+    });
+    optionalPollInFlight = operation;
+    return operation;
+  }
+
   async function runPoll() {
     const configIds = cachedAccounts.map((account) => account.remoteId).filter(Boolean);
-    const configKey = [...configIds].sort().join('|');
-    const refreshWatchlist = Date.now() - lastWatchlistAt > 30_000;
-    let followUp = false;
     try {
-      const deliverTimeline = (promise) => promise.then((posts) => {
-        deliverPosts(posts);
-        return posts;
-      });
-      const results = await Promise.allSettled([
-        refreshWatchlist ? fetchWatchlist() : Promise.resolve(null),
-        deliverTimeline(fetchTimeline('my', configIds)),
-        deliverTimeline(fetchTimeline('featured')),
-        deliverTimeline(fetchTimeline('all', configIds))
-      ]);
-      followUp = refreshWatchlist
-        && cachedAccounts.map((account) => account.remoteId).filter(Boolean).sort().join('|') !== configKey;
-      const errorTypes = results
-        .filter((result) => result.status === 'rejected')
-        .map((result) => coarseErrorType(result.reason));
-      if (errorTypes.length) {
-        const errorType = ['AUTH', 'TIMEOUT', 'NETWORK', 'DEBOT'].find((type) => errorTypes.includes(type)) || 'DEBOT';
-        throw new DeBotRequestError(errorType);
-      }
+      deliverPosts(await fetchTimeline('my', configIds));
       emit('heartbeat', {
         bridgeId: 'debot-browser-extension',
-        version: '1.1.1',
+        version: '1.1.2',
         sessionId: String(Date.now()),
         capabilities: ['posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1']
       });
-      return { ok: true, followUp };
+      return { ok: true };
     } catch (error) {
       const errorType = coarseErrorType(error);
       emit('heartbeat', {
         bridgeId: 'debot-browser-extension',
-        version: '1.1.1',
+        version: '1.1.2',
         capabilities: ['debot-analysis-v1', 'error'],
         error: errorType
       });
-      return { ok: false, errorType, followUp };
+      return { ok: false, errorType };
     }
   }
 
   function fallbackPoll() {
     if (pollInFlight) return pollInFlight;
-    let followUp = false;
-    const operation = runPoll().then((result) => {
-      followUp = result?.followUp === true;
-      return result;
-    }).finally(() => {
+    const operation = runPoll().finally(() => {
       if (pollInFlight !== operation) return;
       pollInFlight = null;
-      if (followUp) void fallbackPoll();
+      if (primaryFollowUpRequested) {
+        primaryFollowUpRequested = false;
+        void fallbackPoll();
+      }
     });
     pollInFlight = operation;
+    void refreshWatchlistIfNeeded();
+    void pollOptionalTimelines();
     return operation;
   }
 

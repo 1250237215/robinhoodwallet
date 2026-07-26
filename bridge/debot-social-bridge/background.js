@@ -16,6 +16,7 @@ const MAX_ANALYSIS_CONCURRENCY = 4;
 const MAX_ANALYSIS_RESULT_BYTES = 256 * 1024;
 const ANALYSIS_RESULT_BATCH_SIZE = 20;
 const ANALYSIS_RESULT_UPLOAD_CONCURRENCY = 4;
+const POST_FLUSH_RETRY_DELAYS_MS = [2_000, 4_000, 8_000];
 const ANALYSIS_ERROR_TYPES = new Set([
   'AUTH',
   'TIMEOUT',
@@ -36,6 +37,8 @@ const analysisResultOutbox = createAnalysisResultOutbox({ storage: chrome.storag
 let settingsWriteQueue = Promise.resolve();
 let postFlushInFlight = null;
 let postFlushRequested = false;
+let postFlushRetryTimer = null;
+let postFlushRetryAttempt = 0;
 let analysisResultFlushInFlight = null;
 let analysisResultFlushRequested = false;
 let bridgeMaintenanceInFlight = null;
@@ -73,6 +76,18 @@ function safeContracts(value) {
   }));
 }
 
+function safeSocialAccount(value, { includeUrl = false } = {}) {
+  const account = value && typeof value === 'object' ? value : {};
+  return {
+    id: text(account.id, 240),
+    handle: text(account.handle, 240),
+    name: text(account.name, 500),
+    avatarUrl: text(account.avatarUrl, 2_000),
+    followersCount: number(account.followersCount),
+    ...(includeUrl ? { url: text(account.url, 2_000) } : {})
+  };
+}
+
 function safePost(value) {
   const post = value && typeof value === 'object' ? value : {};
   const author = post.author && typeof post.author === 'object' ? post.author : {};
@@ -80,13 +95,10 @@ function safePost(value) {
     source: text(post.source, 40),
     externalId: text(post.externalId, 240),
     kind: text(post.kind, 20),
-    author: {
-      id: text(author.id, 240),
-      handle: text(author.handle, 240),
-      name: text(author.name, 500),
-      avatarUrl: text(author.avatarUrl, 2_000),
-      followersCount: number(author.followersCount)
-    },
+    author: safeSocialAccount(author),
+    ...(['follow', 'unfollow'].includes(post.kind)
+      ? { target: safeSocialAccount(post.target, { includeUrl: true }) }
+      : {}),
     content: text(post.content),
     translatedContent: text(post.translatedContent),
     url: text(post.url, 2_000),
@@ -459,29 +471,72 @@ async function socialRequest(path, { method = 'GET', body = null } = {}) {
   return payload;
 }
 
+function clearPostFlushRetry({ resetAttempt = false } = {}) {
+  if (postFlushRetryTimer !== null) clearTimeout(postFlushRetryTimer);
+  postFlushRetryTimer = null;
+  if (resetAttempt) postFlushRetryAttempt = 0;
+}
+
+function schedulePostFlushRetry() {
+  if (postFlushRetryTimer !== null) return;
+  const delay = POST_FLUSH_RETRY_DELAYS_MS[
+    Math.min(postFlushRetryAttempt, POST_FLUSH_RETRY_DELAYS_MS.length - 1)
+  ];
+  postFlushRetryAttempt += 1;
+  postFlushRetryTimer = setTimeout(() => {
+    postFlushRetryTimer = null;
+    void flushPostOutbox();
+  }, delay);
+}
+
+async function uploadPostRecords(records) {
+  try {
+    const acknowledgement = await socialRequest('/bridge/posts', {
+      method: 'POST',
+      body: { posts: records.map((record) => record.post) }
+    });
+    if (acknowledgement?.ok !== true) {
+      throw new Error('Radar social API did not acknowledge the post batch');
+    }
+    await postOutbox.acknowledge(records.map((record) => record.key));
+    return { sent: records.length, discarded: 0 };
+  } catch (error) {
+    if (error?.status !== 400) throw error;
+    if (records.length === 1) {
+      await postOutbox.acknowledge([records[0].key]);
+      return { sent: 0, discarded: 1 };
+    }
+    const midpoint = Math.ceil(records.length / 2);
+    const left = await uploadPostRecords(records.slice(0, midpoint));
+    const right = await uploadPostRecords(records.slice(midpoint));
+    return {
+      sent: left.sent + right.sent,
+      discarded: left.discarded + right.discarded
+    };
+  }
+}
+
 function flushPostOutbox() {
   if (postFlushInFlight) return postFlushInFlight;
   postFlushRequested = false;
   postFlushInFlight = (async () => {
     await storageReady;
     let sent = 0;
+    let discarded = 0;
     for (let batchNumber = 0; batchNumber < 5; batchNumber += 1) {
       const batch = await postOutbox.readBatch(200);
       if (!batch.count) break;
-      const acknowledgement = await socialRequest('/bridge/posts', {
-        method: 'POST',
-        body: { posts: batch.records.map((record) => record.post) }
-      });
-      if (acknowledgement?.ok !== true) {
-        throw new Error('Radar social API did not acknowledge the post batch');
-      }
-      await postOutbox.acknowledge(batch.records.map((record) => record.key));
-      sent += batch.count;
+      const uploaded = await uploadPostRecords(batch.records);
+      sent += uploaded.sent;
+      discarded += uploaded.discarded;
       if (!batch.remaining) break;
     }
-    return { ok: true, sent, ...(await postOutbox.stats()) };
+    const result = { ok: true, sent, discarded, ...(await postOutbox.stats()) };
+    clearPostFlushRetry({ resetAttempt: true });
+    return result;
   })().catch(async (error) => {
     await updateBadge('!', '#b33a45');
+    schedulePostFlushRetry();
     return { ok: false, error: redactSensitiveText(error instanceof Error ? error.message : String(error)) };
   }).finally(() => {
     postFlushInFlight = null;
@@ -491,7 +546,11 @@ function flushPostOutbox() {
 }
 
 function requestPostFlush() {
-  if (postFlushInFlight) postFlushRequested = true;
+  if (postFlushInFlight) {
+    postFlushRequested = true;
+    return postFlushInFlight;
+  }
+  clearPostFlushRetry();
   return flushPostOutbox();
 }
 

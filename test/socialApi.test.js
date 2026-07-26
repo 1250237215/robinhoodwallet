@@ -190,6 +190,65 @@ test('social posts API persists merged feed membership and filters featured and 
   assert.equal((await invalid.json()).code, 'INVALID_SOCIAL_DATA');
 });
 
+test('social posts API returns canonical follow and unfollow activities with their targets', async (t) => {
+  const token = 'relationship-device-token';
+  const { baseUrl } = await withSocialServer(t, { token });
+  const encodedUnfollow = Buffer.from('unfollow:star_okx:bankrbot').toString('base64url');
+  const response = await fetch(`${baseUrl}/api/social/bridge/posts`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({
+      posts: [
+        {
+          source: 'twitter',
+          id: encodedUnfollow,
+          author: { handle: 'star_okx', name: 'Star_OKX', followersCount: 234_880 },
+          target: {
+            id: 'bankr-user',
+            handle: 'bankrbot',
+            name: 'Bankr',
+            followersCount: 12_345,
+            url: 'https://x.com/bankrbot'
+          },
+          feedSource: 'my',
+          publishedAt: '2026-07-17T12:00:00Z'
+        },
+        {
+          source: 'twitter',
+          id: 'follow_star_okx_enzoinsidee',
+          authorHandle: 'star_okx',
+          authorName: 'Star_OKX',
+          targetHandle: 'enzoinsidee',
+          feedSource: 'my',
+          publishedAt: '2026-07-17T12:01:00Z'
+        }
+      ]
+    })
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).summary.created, 2);
+
+  const payload = await (await fetch(`${baseUrl}/api/social/posts?feedSource=my`)).json();
+  const byId = new Map(payload.posts.map((post) => [post.externalId, post]));
+  const unfollow = byId.get('unfollow:star_okx:bankrbot');
+  assert.equal(unfollow.kind, 'unfollow');
+  assert.deepEqual(unfollow.target, {
+    id: 'bankr-user',
+    handle: 'bankrbot',
+    name: 'Bankr',
+    avatarUrl: '',
+    followers: 12_345,
+    url: 'https://x.com/bankrbot'
+  });
+  const follow = byId.get('follow:star_okx:enzoinsidee');
+  assert.equal(follow.kind, 'follow');
+  assert.equal(follow.target.handle, 'enzoinsidee');
+  assert.equal(follow.target.name, '');
+
+  const searched = await (await fetch(`${baseUrl}/api/social/posts?q=bankrbot`)).json();
+  assert.deepEqual(searched.posts.map((post) => post.externalId), ['unfollow:star_okx:bankrbot']);
+});
+
 test('DeBot analysis bridge uses bearer-only claims, inflight dedupe and short result caching', async (t) => {
   const token = 'analysis-device-token';
   const tokenAddress = '0x1111111111111111111111111111111111111111';
