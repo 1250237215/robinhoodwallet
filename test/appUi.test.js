@@ -25,6 +25,22 @@ function executableSocialReplyMarkup() {
   return Function(source)();
 }
 
+function executableVisibleSocialPosts({ posts, query, notesByPostId }) {
+  const source = appSourceBetween('function visibleSocialPosts()', 'function renderSocialBridgeStatus()');
+  return Function(
+    'state',
+    'isEnabledPersonalSocialEvent',
+    'socialActivityIdentity',
+    'socialWatchEntryForPost',
+    `${source}\nreturn visibleSocialPosts();`
+  )(
+    { socialPosts: posts, socialSearchQuery: query },
+    () => true,
+    () => null,
+    (post) => ({ note: notesByPostId[post.id] || '' })
+  );
+}
+
 test('home is the manual Robinhood smart-money workspace', () => {
   assert.match(indexHtml, /<title>Robinhood 聪明钱雷达<\/title>/);
   assert.match(indexHtml, /<h1 id="brand-title">Robinhood 聪明钱雷达<\/h1>/);
@@ -1135,7 +1151,7 @@ test('social monitoring is a personal-watchlist feed without global feed, source
   ]) {
     assert.match(indexHtml, new RegExp(`id="${id}"`));
   }
-  assert.match(socialPanelHtml, /id="social-search"[^>]*placeholder="搜索个人监控账号或内容"[^>]*aria-label="搜索个人社媒监控"/);
+  assert.match(socialPanelHtml, /id="social-search"[^>]*placeholder="搜索账号、备注或内容"[^>]*aria-label="搜索个人社媒监控"/);
   assert.doesNotMatch(socialPanelHtml, /id="social-watchlist-platform"|<span>平台<\/span>|value="binance"/);
   assert.match(appJs, /accounts: lines\.map\(\(handle\) => \(\{ handle, platform: 'twitter' \}\)\)/);
   assert.doesNotMatch(socialPanelHtml, /value="(?:robinhood|base|solana)"/);
@@ -1157,7 +1173,7 @@ test('social monitoring is a personal-watchlist feed without global feed, source
   assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.social-feed \{[\s\S]*height: 68svh/);
 });
 
-test('each watched account exposes ten independent behavior controls and preserves explicit opt-out', () => {
+test('each watched account exposes behavior controls and a searchable custom note', () => {
   const eventTypes = [
     'post',
     'reply',
@@ -1172,6 +1188,7 @@ test('each watched account exposes ten independent behavior controls and preserv
   ];
   assert.match(indexHtml, /id="social-event-editor"[^>]*aria-labelledby="social-event-editor-title"/);
   assert.match(indexHtml, /id="social-event-editor-form"/);
+  assert.match(indexHtml, /id="social-event-note"[^>]*maxlength="500"[^>]*placeholder="输入该账号的备注"/);
   assert.match(indexHtml, /id="social-event-options"/);
   for (const eventType of eventTypes) {
     assert.match(indexHtml, new RegExp(`name="socialEventType" value="${eventType}"`));
@@ -1188,11 +1205,29 @@ test('each watched account exposes ten independent behavior controls and preserv
   assert.match(appJs, /openSocialEventEditor\(editButton\.dataset\.socialWatchlistEdit\)/);
   assert.match(appJs, /setSocialEventEditorSelection\(SOCIAL_EVENT_TYPES\)/);
   assert.match(appJs, /setSocialEventEditorSelection\(\[\]\)/);
-  assert.match(appJs, /runSocialWrite\('PATCH', `\/watchlist\/\$\{id\}`, \{ eventTypes \}\)/);
+  assert.match(appJs, /elements\.socialEventNote\.value = String\(entry\.note \|\| ''\)/);
+  assert.match(appJs, /const note = elements\.socialEventNote\.value\.trim\(\)/);
+  assert.match(appJs, /runSocialWrite\('PATCH', `\/watchlist\/\$\{id\}`, \{ eventTypes, note \}\)/);
+  assert.match(appJs, /watchEntry\?\.note/);
+  assert.match(appJs, /class="social-watchlist-note"[^>]*>\$\{escapeHtml\(note\)\}/);
+  assert.match(appJs, /class="social-post-note"[^>]*[\s\S]*\$\{escapeHtml\(watchNote\)\}/);
   assert.match(appJs, /eventTypes\.length\s+\? `\$\{eventTypes\.length\} 项行为`\s+: '已暂停'/);
+  assert.match(stylesCss, /\.social-watchlist-copy \.social-watchlist-note \{[\s\S]*overflow-wrap: anywhere;[\s\S]*text-overflow: ellipsis/);
+  assert.match(stylesCss, /\.social-post-note span \{[\s\S]*overflow-wrap: anywhere;[\s\S]*-webkit-line-clamp: 2/);
+  assert.match(stylesCss, /\.social-event-note-field textarea \{[\s\S]*width: 100%;[\s\S]*max-height: 180px/);
   assert.match(stylesCss, /\.social-event-options \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.social-event-options \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.social-event-editor-actions \{[\s\S]*flex-direction: column/);
+
+  const matchingPosts = executableVisibleSocialPosts({
+    posts: [{ id: 'priority' }, { id: 'ordinary' }],
+    query: '重点项目方',
+    notesByPostId: {
+      priority: '重点项目方，消息需要立即看',
+      ordinary: '普通观察账号'
+    }
+  });
+  assert.deepEqual(matchingPosts.map((post) => post.id), ['priority']);
 });
 
 test('social feed validates and accurately renders relationship and profile activity from snapshots and SSE', () => {

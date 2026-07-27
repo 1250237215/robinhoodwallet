@@ -808,6 +808,79 @@ test('watchlist intents create authenticated bridge commands and acknowledgement
   assert.equal(store.listWatchlist({ includeRemoved: true }).some((entry) => entry.id === alice.id), true);
 });
 
+test('watchlist notes are local atomic preferences with Unicode limits and idempotent changes', (t) => {
+  const { store, setNow } = fixture(t);
+  const added = store.addWatchAccounts(['alice'])[0];
+  const addCommand = store.claimCommands()[0];
+  store.acknowledgeCommand(addCommand.id, { success: true, remoteId: 'debot-alice' });
+  const before = store.listWatchlist()[0];
+  const countsBefore = store.getCounts();
+  const cursorBefore = store.getLatestChangeId();
+
+  setNow(Date.parse('2026-07-17T12:00:10Z'));
+  const noteOnly = store.updateWatchAccountPreferences(added.entry.id, { note: '  早期发现，重点观察  ' });
+  assert.equal(noteOnly.changed, true);
+  assert.equal(noteOnly.entry.note, '早期发现，重点观察');
+  assert.deepEqual(noteOnly.entry.eventTypes, before.eventTypes);
+  assert.equal(noteOnly.entry.syncStatus, before.syncStatus);
+  assert.equal(noteOnly.entry.lastSyncedAt, before.lastSyncedAt);
+  assert.equal(store.getCounts().pendingCommands, countsBefore.pendingCommands);
+  assert.equal(store.getLatestChangeId(), cursorBefore + 1);
+  assert.equal(noteOnly.change.data.note, '早期发现，重点观察');
+
+  const idempotent = store.updateWatchAccountPreferences(added.entry.id, { note: '早期发现，重点观察' });
+  assert.equal(idempotent.changed, false);
+  assert.equal(idempotent.change, null);
+  assert.equal(store.getLatestChangeId(), cursorBefore + 1);
+
+  const combined = store.updateWatchAccountPreferences(added.entry.id, {
+    note: '核心观察',
+    eventTypes: ['reply', 'post', 'reply']
+  });
+  assert.equal(combined.changed, true);
+  assert.equal(combined.entry.note, '核心观察');
+  assert.deepEqual(combined.entry.eventTypes, ['post', 'reply']);
+  assert.equal(store.getLatestChangeId(), cursorBefore + 2);
+
+  const maximumNote = '🚀'.repeat(500);
+  assert.equal(
+    store.updateWatchAccountPreferences(added.entry.id, { note: maximumNote }).entry.note,
+    maximumNote
+  );
+  assert.throws(
+    () => store.updateWatchAccountPreferences(added.entry.id, { note: '🚀'.repeat(501) }),
+    /must not exceed 500 characters/
+  );
+  assert.throws(() => store.updateWatchAccountPreferences(added.entry.id, {}), /must include/);
+  assert.throws(
+    () => store.updateWatchAccountPreferences(added.entry.id, { note: 'valid', unexpected: true }),
+    /Unsupported watchlist patch field/
+  );
+  assert.throws(() => store.updateWatchAccountPreferences(added.entry.id, { note: null }), /must be a string/);
+
+  const cleared = store.updateWatchAccountPreferences(added.entry.id, { note: '' });
+  assert.equal(cleared.entry.note, '');
+  assert.equal(store.claimCommands().length, 0);
+});
+
+test('watchlist notes survive database reopen without entering DeBot commands', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-social-note-persistence-'));
+  const filename = path.join(directory, 'social.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  let store = createSocialStore(filename);
+  const added = store.addWatchAccounts(['alice'])[0];
+  store.updateWatchAccountPreferences(added.entry.id, { note: '本地长期备注' });
+  const command = store.claimCommands()[0];
+  assert.equal(Object.hasOwn(command.payload, 'note'), false);
+  assert.equal(JSON.stringify(command.payload).includes('本地长期备注'), false);
+  store.close();
+
+  store = createSocialStore(filename);
+  assert.equal(store.listWatchlist()[0].note, '本地长期备注');
+  store.close();
+});
+
 test('personal watchlist filtering applies account event preferences before its result limit', (t) => {
   const { store } = fixture(t);
   const watched = store.addWatchAccounts(['alice'])[0].entry;
@@ -901,17 +974,20 @@ test('complete remote watchlist snapshots reconcile direct DeBot additions and r
     byHandle.get('bob').eventTypes,
     normalizeWatchEventTypes(undefined, { defaultAll: true })
   );
-  store.updateWatchAccountEventTypes(byHandle.get('bob').id, ['follow', 'profile_avatar']);
+  store.updateWatchAccountPreferences(byHandle.get('bob').id, {
+    eventTypes: ['follow', 'profile_avatar'],
+    note: '只保存在 VPS 的备注'
+  });
   const repeated = store.reconcileRemoteWatchlist([{
     handle: 'bob',
     remoteId: 'debot-bob',
     metadata: { monitorLevel: 'important' },
-    eventTypes: ['post']
+    eventTypes: ['post'],
+    note: '远端不得覆盖'
   }]);
-  assert.deepEqual(
-    repeated.entries.find((entry) => entry.handle === 'bob').eventTypes,
-    ['follow', 'profile_avatar']
-  );
+  const repeatedBob = repeated.entries.find((entry) => entry.handle === 'bob');
+  assert.deepEqual(repeatedBob.eventTypes, ['follow', 'profile_avatar']);
+  assert.equal(repeatedBob.note, '只保存在 VPS 的备注');
   assert.equal(local.entry.id > 0, true);
 });
 
@@ -938,6 +1014,7 @@ test('legacy watchlist rows migrate to all event types and profile details survi
 
   const legacy = new DatabaseSync(filename);
   legacy.exec('ALTER TABLE social_watchlist DROP COLUMN event_types_json');
+  legacy.exec('ALTER TABLE social_watchlist DROP COLUMN local_note');
   legacy.close();
 
   store = createSocialStore(filename);
@@ -945,6 +1022,7 @@ test('legacy watchlist rows migrate to all event types and profile details survi
     store.listWatchlist()[0].eventTypes,
     normalizeWatchEventTypes(undefined, { defaultAll: true })
   );
+  assert.equal(store.listWatchlist()[0].note, '');
   const reopenedProfile = store.getPost('twitter', 'profile-persisted');
   assert.deepEqual(reopenedProfile.profileChanges, ['name', 'bio']);
   assert.deepEqual(reopenedProfile.profileDetail, {

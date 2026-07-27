@@ -3244,6 +3244,19 @@ select:hover {
   font-size: 9px;
 }
 
+.social-watchlist-copy .social-watchlist-note {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: #4d675a;
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .social-sync-chip,
 .social-post-kind {
   display: inline-flex;
@@ -3388,6 +3401,38 @@ select:hover {
   margin-top: 4px;
   color: var(--muted);
   font-size: 9px;
+}
+
+.social-post-note {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 5px;
+  align-items: start;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-left: 2px solid #72a183;
+  background: #f0f7f3;
+  color: #315840;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.social-post-note svg {
+  width: 13px;
+  height: 13px;
+  margin-top: 1px;
+}
+
+.social-post-note span {
+  min-width: 0;
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .social-latency-trace {
@@ -3749,6 +3794,41 @@ select:hover {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 16px;
   overflow-wrap: anywhere;
+}
+
+.social-event-note-field {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.social-event-note-field > span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.social-event-note-field textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 76px;
+  max-height: 180px;
+  padding: 9px 10px;
+  resize: vertical;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.social-event-note-field textarea:focus {
+  border-color: #80aa8e;
+  outline: 2px solid rgba(82, 137, 101, 0.14);
+  outline-offset: 0;
 }
 
 .social-event-options {

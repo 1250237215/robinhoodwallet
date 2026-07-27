@@ -416,7 +416,7 @@
             <div class="social-monitor-toolbar">
               <label class="social-search-field">
                 <i data-lucide="search" aria-hidden="true"></i>
-                <input id="social-search" type="search" autocomplete="off" placeholder="搜索个人监控账号或内容" aria-label="搜索个人社媒监控" />
+                <input id="social-search" type="search" autocomplete="off" placeholder="搜索账号、备注或内容" aria-label="搜索个人社媒监控" />
               </label>
             </div>
 
@@ -582,6 +582,10 @@
           </button>
         </div>
         <input id="social-event-editor-id" type="hidden" />
+        <label class="social-event-note-field" for="social-event-note">
+          <span>自定义备注</span>
+          <textarea id="social-event-note" rows="3" maxlength="500" placeholder="输入该账号的备注"></textarea>
+        </label>
         <fieldset class="social-event-options" id="social-event-options">
           <legend>选择需要显示的动态</legend>
           <label><input type="checkbox" name="socialEventType" value="post" /><span><i data-lucide="send" aria-hidden="true"></i>发帖</span></label>

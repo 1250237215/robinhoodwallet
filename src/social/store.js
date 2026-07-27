@@ -194,6 +194,38 @@ function watchEventTypesFromJson(value) {
   }
 }
 
+const SOCIAL_WATCH_NOTE_MAX_CODE_POINTS = 500;
+
+function normalizeWatchNote(value) {
+  if (typeof value !== 'string') throw new TypeError('note must be a string');
+  const normalized = value.trim();
+  if ([...normalized].length > SOCIAL_WATCH_NOTE_MAX_CODE_POINTS) {
+    throw new RangeError(`note must not exceed ${SOCIAL_WATCH_NOTE_MAX_CODE_POINTS} characters`);
+  }
+  return normalized;
+}
+
+function normalizeWatchAccountPatch(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('Watchlist patch must be an object');
+  }
+  const supported = new Set(['eventTypes', 'note']);
+  const keys = Object.keys(value);
+  const unknown = keys.find((key) => !supported.has(key));
+  if (unknown) throw new TypeError(`Unsupported watchlist patch field: ${unknown}`);
+  const eventTypesProvided = Object.hasOwn(value, 'eventTypes');
+  const noteProvided = Object.hasOwn(value, 'note');
+  if (!eventTypesProvided && !noteProvided) {
+    throw new TypeError('Watchlist patch must include eventTypes or note');
+  }
+  return {
+    eventTypesProvided,
+    eventTypes: eventTypesProvided ? normalizeWatchEventTypes(value.eventTypes) : null,
+    noteProvided,
+    note: noteProvided ? normalizeWatchNote(value.note) : null
+  };
+}
+
 function profileFromJson(value) {
   const profile = parseJson(value, {});
   let changes = [];
@@ -275,6 +307,7 @@ function watchlistFromRow(row) {
     remoteId: row.remote_id,
     metadata: parseJson(row.metadata_json, {}),
     eventTypes: watchEventTypesFromJson(row.event_types_json),
+    note: row.local_note,
     desiredState: row.desired_state,
     syncStatus: row.sync_status,
     origin: row.origin,
@@ -907,6 +940,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       remote_id TEXT NOT NULL DEFAULT '',
       metadata_json TEXT NOT NULL DEFAULT '{}',
       event_types_json TEXT NOT NULL DEFAULT '["post","reply","quote","repost","delete","follow","unfollow","profile_name","profile_avatar","profile_bio"]',
+      local_note TEXT NOT NULL DEFAULT '',
       desired_state TEXT NOT NULL DEFAULT 'active',
       sync_status TEXT NOT NULL DEFAULT 'pending',
       origin TEXT NOT NULL DEFAULT 'local',
@@ -1013,6 +1047,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
   );
   if (!socialWatchlistColumns.has('event_types_json')) {
     db.exec(`ALTER TABLE social_watchlist ADD COLUMN event_types_json TEXT NOT NULL DEFAULT '${json(SOCIAL_WATCH_EVENT_TYPES)}'`);
+  }
+  if (!socialWatchlistColumns.has('local_note')) {
+    db.exec("ALTER TABLE social_watchlist ADD COLUMN local_note TEXT NOT NULL DEFAULT ''");
   }
 
   const socialBridgeStateColumns = new Set(
@@ -1372,6 +1409,36 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
     return { entry, command, change, changed };
   }
 
+  function updateWatchAccountPreferences(id, patch) {
+    const numericId = Number(id);
+    if (!Number.isSafeInteger(numericId) || numericId < 1) throw new TypeError('Invalid watchlist id');
+    const normalized = normalizeWatchAccountPatch(patch);
+    const timestamp = now();
+    return transaction(db, () => {
+      const existing = db.prepare('SELECT * FROM social_watchlist WHERE id = ?').get(numericId);
+      if (!existing) return null;
+      const currentEventTypes = watchEventTypesFromJson(existing.event_types_json);
+      const nextEventTypes = normalized.eventTypesProvided ? normalized.eventTypes : currentEventTypes;
+      const nextNote = normalized.noteProvided ? normalized.note : existing.local_note;
+      if (json(currentEventTypes) === json(nextEventTypes) && existing.local_note === nextNote) {
+        return {
+          entry: watchlistFromRow(existing),
+          change: null,
+          changed: false
+        };
+      }
+      db.prepare(`
+        UPDATE social_watchlist SET event_types_json = ?, local_note = ?, updated_at = ? WHERE id = ?
+      `).run(json(nextEventTypes), nextNote, timestamp, numericId);
+      const entry = watchlistFromRow(db.prepare('SELECT * FROM social_watchlist WHERE id = ?').get(numericId));
+      return {
+        entry,
+        change: recordChange('watchlist.updated', 'watchlist', numericId, entry, timestamp),
+        changed: true
+      };
+    });
+  }
+
   return {
     db,
     upsertPosts(inputs) {
@@ -1521,32 +1588,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       const timestamp = now();
       return transaction(db, () => inputs.map((input) => addWatchAccount(input, timestamp)));
     },
+    updateWatchAccountPreferences,
     updateWatchAccountEventTypes(id, eventTypes) {
-      const numericId = Number(id);
-      if (!Number.isSafeInteger(numericId) || numericId < 1) throw new TypeError('Invalid watchlist id');
-      const normalizedEventTypes = normalizeWatchEventTypes(eventTypes);
-      const timestamp = now();
-      return transaction(db, () => {
-        const existing = db.prepare('SELECT * FROM social_watchlist WHERE id = ?').get(numericId);
-        if (!existing) return null;
-        const currentEventTypes = watchEventTypesFromJson(existing.event_types_json);
-        if (json(currentEventTypes) === json(normalizedEventTypes)) {
-          return {
-            entry: watchlistFromRow(existing),
-            change: null,
-            changed: false
-          };
-        }
-        db.prepare(`
-          UPDATE social_watchlist SET event_types_json = ?, updated_at = ? WHERE id = ?
-        `).run(json(normalizedEventTypes), timestamp, numericId);
-        const entry = watchlistFromRow(db.prepare('SELECT * FROM social_watchlist WHERE id = ?').get(numericId));
-        return {
-          entry,
-          change: recordChange('watchlist.updated', 'watchlist', numericId, entry, timestamp),
-          changed: true
-        };
-      });
+      return updateWatchAccountPreferences(id, { eventTypes });
     },
     removeWatchAccount(id) {
       const numericId = Number(id);

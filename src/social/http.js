@@ -478,9 +478,9 @@ export function createSocialApiHandler({
         method(req, ['PATCH', 'DELETE']);
         requireDevice(req, token);
         const result = req.method === 'PATCH'
-          ? service.updateWatchAccountEventTypes(
+          ? service.updateWatchAccountPreferences(
             Number(watchlistMatch[1]),
-            (await readJson(req, 64 * 1024)).eventTypes
+            await readJson(req, 64 * 1024)
           )
           : service.removeWatchAccount(Number(watchlistMatch[1]));
         if (!result) throw new SocialHttpError(404, 'Watchlist account was not found', 'WATCHLIST_NOT_FOUND');

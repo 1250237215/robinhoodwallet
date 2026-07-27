@@ -311,7 +311,7 @@ test('bridge diagnostics are sanitized and available in social snapshot and stat
   assert.deepEqual(status.bridge.diagnostics, heartbeatBody.bridge.diagnostics);
 });
 
-test('watchlist event preferences patch locally, allow empty values and publish only real changes', async (t) => {
+test('watchlist preferences patch notes and events atomically and publish only real changes', async (t) => {
   const token = 'watch-event-device-token';
   const { baseUrl, socialService } = await withSocialServer(t, { token });
   const addedResponse = await fetch(`${baseUrl}/api/social/watchlist`, {
@@ -337,23 +337,31 @@ test('watchlist event preferences patch locally, allow empty values and publish 
   const patchedResponse = await fetch(`${baseUrl}/api/social/watchlist/${entry.id}`, {
     method: 'PATCH',
     headers: auth(token),
-    body: JSON.stringify({ eventTypes: ['profile_bio', 'post', 'post'] })
+    body: JSON.stringify({
+      eventTypes: ['profile_bio', 'post', 'post'],
+      note: '  重点账号  '
+    })
   });
   const patched = await patchedResponse.json();
   assert.equal(patchedResponse.status, 200);
   assert.equal(patched.changed, true);
   assert.deepEqual(patched.entry.eventTypes, ['post', 'profile_bio']);
+  assert.equal(patched.entry.note, '重点账号');
   assert.equal(patched.entry.syncStatus, before.syncStatus);
   assert.equal(patched.entry.lastSyncedAt, before.lastSyncedAt);
   assert.equal(patched.counts.pendingCommands, 0);
   assert.equal(socialService.store.getLatestChangeId(), cursorBefore + 1);
   assert.equal(published.length, 1);
   assert.equal(published[0].type, 'watchlist.updated');
+  assert.equal(published[0].data.note, '重点账号');
+
+  const snapshot = await (await fetch(`${baseUrl}/api/social/snapshot`)).json();
+  assert.equal(snapshot.watchlist.find((item) => item.id === entry.id).note, '重点账号');
 
   const idempotentResponse = await fetch(`${baseUrl}/api/social/watchlist/${entry.id}`, {
     method: 'PATCH',
     headers: auth(token),
-    body: JSON.stringify({ eventTypes: ['post', 'profile_bio'] })
+    body: JSON.stringify({ eventTypes: ['post', 'profile_bio'], note: '重点账号' })
   });
   const idempotent = await idempotentResponse.json();
   assert.equal(idempotent.changed, false);
@@ -364,15 +372,40 @@ test('watchlist event preferences patch locally, allow empty values and publish 
   const emptyResponse = await fetch(`${baseUrl}/api/social/watchlist/${entry.id}`, {
     method: 'PATCH',
     headers: auth(token),
+    body: JSON.stringify({ note: '' })
+  });
+  const empty = await emptyResponse.json();
+  assert.equal(empty.entry.note, '');
+  assert.deepEqual(empty.entry.eventTypes, ['post', 'profile_bio']);
+  assert.equal(empty.entry.syncStatus, before.syncStatus);
+  assert.equal(empty.counts.pendingCommands, 0);
+
+  const legacyEventResponse = await fetch(`${baseUrl}/api/social/watchlist/${entry.id}`, {
+    method: 'PATCH',
+    headers: auth(token),
     body: JSON.stringify({ eventTypes: [] })
   });
-  assert.deepEqual((await emptyResponse.json()).entry.eventTypes, []);
+  assert.deepEqual((await legacyEventResponse.json()).entry.eventTypes, []);
 
   for (const eventTypes of ['post', ['unknown']]) {
     const invalid = await fetch(`${baseUrl}/api/social/watchlist/${entry.id}`, {
       method: 'PATCH',
       headers: auth(token),
       body: JSON.stringify({ eventTypes })
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal((await invalid.json()).code, 'INVALID_SOCIAL_DATA');
+  }
+  for (const body of [
+    {},
+    { note: null },
+    { note: 'valid', unexpected: true },
+    { note: '猫'.repeat(501) }
+  ]) {
+    const invalid = await fetch(`${baseUrl}/api/social/watchlist/${entry.id}`, {
+      method: 'PATCH',
+      headers: auth(token),
+      body: JSON.stringify(body)
     });
     assert.equal(invalid.status, 400);
     assert.equal((await invalid.json()).code, 'INVALID_SOCIAL_DATA');
@@ -1004,6 +1037,12 @@ test('social SSE sends an initial snapshot and live normalized changes', async (
   const token = 'stream-device-token';
   const { baseUrl } = await withSocialServer(t, { token });
   const discoveredAt = Date.parse('2026-07-17T12:00:00.456Z');
+  const added = await (await fetch(`${baseUrl}/api/social/watchlist`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({ account: '@alice' })
+  })).json();
+  const watchlistId = added.entries[0].id;
   const controller = new AbortController();
   const response = await fetch(`${baseUrl}/api/social/stream`, { signal: controller.signal });
   assert.equal(response.status, 200);
@@ -1014,6 +1053,19 @@ test('social SSE sends an initial snapshot and live normalized changes', async (
   const first = await reader.read();
   received += decoder.decode(first.value, { stream: true });
   assert.match(received, /event: snapshot/);
+
+  await fetch(`${baseUrl}/api/social/watchlist/${watchlistId}`, {
+    method: 'PATCH',
+    headers: auth(token),
+    body: JSON.stringify({ note: 'SSE 实时备注' })
+  });
+  while (!received.includes('event: watchlist.updated')) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    received += decoder.decode(chunk.value, { stream: true });
+  }
+  assert.match(received, /event: watchlist\.updated/);
+  assert.match(received, /"note":"SSE 实时备注"/);
 
   await fetch(`${baseUrl}/api/social/bridge/posts`, {
     method: 'POST',

@@ -431,11 +431,14 @@ export function createSocialService({
         counts: activeStore.getCounts()
       };
     },
-    updateWatchAccountEventTypes(id, eventTypes) {
+    updateWatchAccountPreferences(id, patch) {
       const latestBefore = activeStore.getLatestChangeId();
-      const result = activeStore.updateWatchAccountEventTypes(id, eventTypes);
+      const result = activeStore.updateWatchAccountPreferences(id, patch);
       publishAfter(latestBefore);
       return result ? { ok: true, ...result, counts: activeStore.getCounts() } : null;
+    },
+    updateWatchAccountEventTypes(id, eventTypes) {
+      return service.updateWatchAccountPreferences(id, { eventTypes });
     },
     removeWatchAccount(id) {
       const latestBefore = activeStore.getLatestChangeId();
