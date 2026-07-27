@@ -58,16 +58,16 @@
         </dl>
 
         <div class="header-actions">
-          <button class="icon-button" id="refresh-button" type="button" title="刷新数据" aria-label="刷新数据">
+          <button class="icon-button" id="refresh-button" type="button" title="刷新实时监控" aria-label="刷新实时监控">
             <i data-lucide="refresh-cw" aria-hidden="true"></i>
           </button>
-          <button class="icon-button primary" id="scan-button" type="button" title="重扫手工金狗" aria-label="重扫手工金狗">
+          <button class="icon-button primary" id="scan-button" type="button" title="重扫手工金狗" aria-label="重扫手工金狗" hidden>
             <i data-lucide="radar" aria-hidden="true"></i>
           </button>
         </div>
       </header>
 
-      <section class="system-status" id="system-status" data-state="loading" aria-live="polite">
+      <section class="system-status" id="system-status" data-state="loading" aria-live="polite" hidden>
         <span class="status-indicator" aria-hidden="true"></span>
         <div class="status-copy">
           <strong id="status-title">正在读取链上索引</strong>
@@ -76,7 +76,7 @@
         <span class="status-progress" id="status-progress"></span>
       </section>
 
-      <section class="submission-dock" id="submission-dock" aria-label="提交金狗 CA">
+      <section class="submission-dock" id="submission-dock" aria-label="提交金狗 CA" hidden>
         <div class="submission-heading">
           <span class="submission-eyebrow">金狗队列</span>
           <h2>提交 CA</h2>
@@ -105,16 +105,16 @@
 
       <section class="workspace-toolbar" aria-label="研究条件">
         <nav class="view-tabs" id="view-tabs" aria-label="地址分类">
-          <button class="tab-button" type="button" data-tab="monitor" aria-selected="false">
+          <button class="tab-button is-active" type="button" data-tab="monitor" aria-selected="true">
             <i data-lucide="radio" aria-hidden="true"></i>
             实时监控
           </button>
-          <button class="tab-button is-active" type="button" data-tab="candidates" aria-selected="true">最近重扫候选</button>
+          <button class="tab-button" type="button" data-tab="candidates" aria-selected="false">最近重扫候选</button>
           <button class="tab-button" type="button" data-tab="all_round" aria-selected="false">已确认地址库</button>
           <button class="tab-button" type="button" data-tab="winners" aria-selected="false">金狗队列</button>
         </nav>
 
-        <form class="filter-form" id="filter-form">
+        <form class="filter-form" id="filter-form" hidden>
           <label class="filter-field compact-field">
             <span>最少命中</span>
             <input id="min-hits" name="minHits" type="number" min="0" max="100" step="1" value="1" />
@@ -165,7 +165,7 @@
           </button>
         </form>
 
-        <form class="library-filter-form" id="library-filter-form">
+        <form class="library-filter-form" id="library-filter-form" hidden>
           <label class="library-search-field">
             <i data-lucide="search" aria-hidden="true"></i>
             <span class="sr-only">搜索地址库</span>
@@ -204,7 +204,7 @@
         </form>
       </section>
 
-      <section class="monitor-page" id="monitor-page" aria-labelledby="monitor-page-title" hidden>
+      <section class="monitor-page" id="monitor-page" aria-labelledby="monitor-page-title">
         <section class="monitor-control-band">
           <div class="monitor-title-block">
             <span class="monitor-kicker">地址库链上动态</span>
@@ -494,7 +494,7 @@
         </div>
       </section>
 
-      <section class="research-board" id="research-board">
+      <section class="research-board" id="research-board" hidden>
         <section class="results-panel" aria-labelledby="results-title">
           <div class="results-head">
             <div>

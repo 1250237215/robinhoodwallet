@@ -26,7 +26,8 @@ test('wallet library views and the manual gold-dog queue are first-level tabs', 
   for (const [tab, label] of [['realized', '兑现候选'], ['unrealized', '持仓候选'], ['single_hit', '单次候选']]) {
     assert.doesNotMatch(indexHtml, new RegExp(`data-tab="${tab}"[^>]*>${label}<`));
   }
-  assert.match(indexHtml, /data-tab="candidates"[^>]*aria-selected="true"/);
+  assert.match(indexHtml, /class="tab-button is-active"[^>]*data-tab="monitor"[^>]*aria-selected="true"/);
+  assert.match(indexHtml, /data-tab="candidates"[^>]*aria-selected="false"/);
 });
 
 test('wallet analysis exposes an editable per-scan minimum entry floor', () => {
@@ -51,7 +52,7 @@ test('wallet analysis exposes an editable per-scan minimum entry floor', () => {
 });
 
 test('smart strategy is the default while every request keeps the 10x compatibility fallback', () => {
-  assert.match(appJs, /activeTab: 'candidates',\s+strategy: 'smart',\s+multiple: 10/);
+  assert.match(appJs, /activeTab: 'monitor',\s+strategy: 'smart',\s+multiple: 10/);
   assert.match(appJs, /strategy: state\.strategy,\s+multiple: state\.multiple/);
   assert.match(appJs, /strategy: filters\.strategy,\s+multiple: String\(filters\.multiple\)/);
   assert.match(appJs, /const body = JSON\.stringify\(\{ \.\.\.filters, classification:/);
@@ -656,7 +657,7 @@ test('Lucide powers icon controls and scan controls are accessible', () => {
   assert.match(indexHtml, /<script src="vendor\/lucide\.js"><\/script>/);
   assert.match(indexHtml, /data-lucide="refresh-cw"/);
   assert.match(indexHtml, /data-lucide="radar"/);
-  assert.match(indexHtml, /aria-label="刷新数据"/);
+  assert.match(indexHtml, /aria-label="刷新实时监控"/);
   assert.match(indexHtml, /title="重扫手工金狗" aria-label="重扫手工金狗"/);
   assert.match(appJs, /window\.lucide\?\.createIcons/);
 });
@@ -960,9 +961,11 @@ test('removed candidate subdivisions cannot enter selection mode', () => {
   assert.doesNotMatch(indexHtml, /data-tab="(?:realized|unrealized|single_hit)"/);
 });
 
-test('real-time monitoring is a first-level page that replaces the research workspace cleanly', () => {
-  assert.match(indexHtml, /data-tab="monitor"[^>]*aria-selected="false"[\s\S]*?实时监控/);
-  assert.match(indexHtml, /id="monitor-page"[^>]*hidden/);
+test('real-time monitoring is the default first-level page and replaces the research workspace cleanly', () => {
+  assert.match(indexHtml, /data-tab="monitor"[^>]*aria-selected="true"[\s\S]*?实时监控/);
+  assert.doesNotMatch(indexHtml, /id="monitor-page"[^>]*hidden/);
+  assert.match(indexHtml, /id="research-board"[^>]*hidden/);
+  assert.match(appJs, /syncToolbarVisibility\(\);\s+refreshIcons\(\);\s+void startMonitorPage\(\);/);
   for (const id of [
     'monitor-settings-form',
     'monitor-health-status',

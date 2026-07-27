@@ -357,7 +357,7 @@ const elements = {
 const state = {
   chainEpoch: 0,
   chainAbortController: new AbortController(),
-  activeTab: 'candidates',
+  activeTab: 'monitor',
   strategy: 'smart',
   multiple: 10,
   data: null,
@@ -6533,4 +6533,4 @@ state.monitorThreshold = readStoredMonitorThreshold();
 syncChainUi();
 syncToolbarVisibility();
 refreshIcons();
-void loadData();
+void startMonitorPage();
