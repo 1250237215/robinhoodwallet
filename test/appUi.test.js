@@ -1723,7 +1723,7 @@ test('social snapshot and SSE lifecycle stay pinned to the Robinhood host servic
   assert.doesNotMatch(appJs, /state\.socialReconnectTimer = setTimeout\(async \(\) => \{[\s\S]{0,240}loadSocialSnapshot/);
   assert.match(appJs, /state\.socialExtensionReady = message\.configured === true/);
   assert.match(appJs, /state\.socialExtensionWritable = message\.writable === true/);
-  assert.match(appJs, /window\.location\.origin === LEGACY_RADAR_ORIGIN[\s\S]*window\.location\.replace\([\s\S]*CANONICAL_RADAR_ORIGIN/);
+  assert.doesNotMatch(appJs, /LEGACY_RADAR_ORIGIN|CANONICAL_RADAR_ORIGIN|217\.116\.171\.250|sslip\.io/);
   assert.match(appJs, /if \(!SOCIAL_WRITE_CONTEXT_ALLOWED\) throw new Error\('请通过 HTTPS 页面修改社媒监控名单'\)/);
   assert.match(appJs, /if \(state\.socialExtensionReady && state\.socialExtensionWritable\) \{\s+return requestSocialExtension/);
   assert.match(appJs, /window\.localStorage\.removeItem\(SOCIAL_DEVICE_TOKEN_STORAGE_KEY\)/);

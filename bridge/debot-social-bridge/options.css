@@ -35,6 +35,12 @@ output {
   font-size: 12px;
 }
 
+label small {
+  color: #7f8c84;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 input,
 button {
   min-height: 40px;

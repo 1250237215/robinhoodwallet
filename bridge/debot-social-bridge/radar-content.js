@@ -1,5 +1,5 @@
-const RADAR_WRITE_ORIGIN = 'https://radar.217-116-171-250.sslip.io';
-const radarWritesEnabled = window.location.origin === RADAR_WRITE_ORIGIN;
+(() => {
+let radarWritesEnabled = false;
 
 async function announceReady() {
   let configured = false;
@@ -9,6 +9,7 @@ async function announceReady() {
       type: 'status'
     });
     configured = result?.ok === true && result?.payload?.configured === true;
+    radarWritesEnabled = result?.ok === true && result?.payload?.writable === true;
   } catch {
     // The Radar page can still use its browser-local pairing token.
   }
@@ -30,7 +31,7 @@ window.addEventListener('message', (event) => {
       type: 'response',
       requestId: message.requestId,
       ok: false,
-      error: '社媒名单只能通过 HTTPS 页面修改'
+      error: '社媒名单只能通过已配置并授权的 Radar 页面修改'
     }, window.location.origin);
     return;
   }
@@ -61,3 +62,4 @@ window.addEventListener('message', (event) => {
 void announceReady();
 window.addEventListener('DOMContentLoaded', () => void announceReady(), { once: true });
 setTimeout(() => void announceReady(), 1_000);
+})();

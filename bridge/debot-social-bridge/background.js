@@ -1,11 +1,17 @@
 import { createPostOutbox } from './post-outbox.js';
 import { createAnalysisResultOutbox } from './analysis-result-outbox.js';
 import { postUploadRetryDelay } from './post-retry-policy.js';
+import {
+  hostPermissionForServerBase,
+  isRadarPageUrl,
+  normalizeServerBase,
+  radarContentMatchesForServerBase,
+  serverOriginForBase
+} from './server-config.js';
 
-const DEFAULT_SERVER_BASE = 'https://radar.217-116-171-250.sslip.io/robinhood-radar/api/social';
-const SOCIAL_API_PATH = '/robinhood-radar/api/social';
 const DEBOT_URL = 'https://debot.ai/';
 const DEBOT_URL_PATTERN = 'https://debot.ai/*';
+const RADAR_CONTENT_SCRIPT_ID = 'configured-radar-content';
 const RECOVERY_ALARM = 'debot-social-bridge-recovery';
 const RECOVERY_STATE_KEY = 'debotSocialBridgeRecoveryV1';
 const RECOVERY_PERIOD_MINUTES = 0.5;
@@ -34,14 +40,6 @@ const ANALYSIS_ERROR_TYPES = new Set([
   'INVALID_JOB',
   'RESULT_TOO_LARGE'
 ]);
-const ALLOWED_SERVER_ORIGINS = new Set([
-  'https://radar.217-116-171-250.sslip.io'
-]);
-const RADAR_READ_ORIGINS = new Set([
-  ...ALLOWED_SERVER_ORIGINS,
-  'http://217.116.171.250'
-]);
-const RADAR_WRITE_ORIGIN = 'https://radar.217-116-171-250.sslip.io';
 const storageReady = Promise.all([
   chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }),
   chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' })
@@ -58,15 +56,6 @@ let analysisResultFlushRequested = false;
 let bridgeMaintenanceInFlight = null;
 let snapshotRevision = 0;
 let watchlistUploadQueue = Promise.resolve();
-
-function normalizeServerBase(value) {
-  const url = new URL(String(value || DEFAULT_SERVER_BASE));
-  const pathname = url.pathname.replace(/\/$/, '');
-  if (!ALLOWED_SERVER_ORIGINS.has(url.origin) || pathname !== SOCIAL_API_PATH || url.search || url.hash) {
-    throw new Error('Social server must use the configured Robinhood Radar API');
-  }
-  return `${url.origin}${SOCIAL_API_PATH}`;
-}
 
 function text(value, maximum = 100_000) {
   return String(value ?? '').slice(0, maximum);
@@ -504,17 +493,62 @@ function safeAnalysisResultPayload(value) {
 
 async function settings() {
   await storageReady;
-  const saved = await chrome.storage.local.get(['serverBase', 'bridgeToken']);
-  let serverBase;
+  const saved = await chrome.storage.local.get(['serverBase', 'bridgeToken', 'bridgeTokenOrigin']);
+  let serverBase = '';
   try {
-    serverBase = normalizeServerBase(saved.serverBase || DEFAULT_SERVER_BASE);
+    if (saved.serverBase) serverBase = normalizeServerBase(saved.serverBase);
   } catch {
-    serverBase = DEFAULT_SERVER_BASE;
+    // Invalid legacy settings remain inert until the user saves a valid address.
   }
+  const storedToken = String(saved.bridgeToken || '').trim();
+  const currentOrigin = serverBase ? serverOriginForBase(serverBase) : '';
+  const bridgeTokenOrigin = String(saved.bridgeTokenOrigin || '').trim() || (storedToken ? currentOrigin : '');
   return {
     serverBase,
-    bridgeToken: String(saved.bridgeToken || '').trim()
+    bridgeToken: storedToken && bridgeTokenOrigin === currentOrigin ? storedToken : '',
+    bridgeTokenOrigin
   };
+}
+
+async function hasServerHostPermission(serverBase) {
+  if (!serverBase) return false;
+  return chrome.permissions.contains({ origins: [hostPermissionForServerBase(serverBase)] });
+}
+
+async function registeredRadarContentScript() {
+  const registrations = await chrome.scripting.getRegisteredContentScripts({
+    ids: [RADAR_CONTENT_SCRIPT_ID]
+  });
+  return registrations.find((entry) => entry.id === RADAR_CONTENT_SCRIPT_ID) || null;
+}
+
+async function removeRadarContentScript() {
+  const current = await registeredRadarContentScript();
+  if (current) await chrome.scripting.unregisterContentScripts({ ids: [RADAR_CONTENT_SCRIPT_ID] });
+}
+
+async function syncRadarContentScript(value = null) {
+  const config = value || await settings();
+  if (!config.serverBase || !(await hasServerHostPermission(config.serverBase))) {
+    await removeRadarContentScript();
+    return { registered: false };
+  }
+
+  const matches = radarContentMatchesForServerBase(config.serverBase);
+  const current = await registeredRadarContentScript();
+  if (current && JSON.stringify(current.matches || []) === JSON.stringify(matches)) {
+    return { registered: true, matches };
+  }
+  if (current) await chrome.scripting.unregisterContentScripts({ ids: [RADAR_CONTENT_SCRIPT_ID] });
+  await chrome.scripting.registerContentScripts([{
+    id: RADAR_CONTENT_SCRIPT_ID,
+    matches,
+    js: ['radar-content.js'],
+    runAt: 'document_start',
+    allFrames: false,
+    persistAcrossSessions: true
+  }]);
+  return { registered: true, matches };
 }
 
 function serializeSettingsWrite(operation) {
@@ -523,18 +557,38 @@ function serializeSettingsWrite(operation) {
   return result;
 }
 
-function publicSettings(value) {
-  return { ...value, bridgeToken: value.bridgeToken ? 'configured' : '' };
+async function publicSettings(value) {
+  const hostPermissionGranted = await hasServerHostPermission(value.serverBase);
+  return {
+    serverBase: value.serverBase,
+    bridgeToken: value.bridgeToken ? 'configured' : '',
+    hostPermissionGranted
+  };
 }
 
 function saveSettings(next) {
   return serializeSettingsWrite(async () => {
     const current = await settings();
+    const serverBase = normalizeServerBase(next.serverBase || current.serverBase);
+    if (!(await hasServerHostPermission(serverBase))) {
+      throw new Error('Grant access to the configured Radar host before saving');
+    }
+    const serverOrigin = serverOriginForBase(serverBase);
+    const suppliedToken = Object.hasOwn(next, 'bridgeToken')
+      ? String(next.bridgeToken || '').trim()
+      : '';
+    if (!suppliedToken && current.bridgeToken && current.bridgeTokenOrigin !== serverOrigin) {
+      throw new Error('Enter the device token again when changing the Radar origin');
+    }
+    const bridgeToken = suppliedToken || current.bridgeToken;
+    if (!bridgeToken) throw new Error('Device token is required');
     const value = {
-      serverBase: normalizeServerBase(next.serverBase || current.serverBase || DEFAULT_SERVER_BASE),
-      bridgeToken: String(next.bridgeToken ?? current.bridgeToken ?? '').trim()
+      serverBase,
+      bridgeToken,
+      bridgeTokenOrigin: bridgeToken ? serverOrigin : ''
     };
     await chrome.storage.local.set(value);
+    await syncRadarContentScript(value);
     await updateBadge(value.bridgeToken ? 'ON' : '?', value.bridgeToken ? '#16834b' : '#bd8121');
     return publicSettings(value);
   });
@@ -543,19 +597,36 @@ function saveSettings(next) {
 function migrateLocalSettings(next) {
   return serializeSettingsWrite(async () => {
     await storageReady;
-    const saved = await chrome.storage.local.get(['serverBase', 'bridgeToken']);
+    const saved = await chrome.storage.local.get(['serverBase', 'bridgeToken', 'bridgeTokenOrigin']);
     const existingToken = String(saved.bridgeToken || '').trim();
-    let serverBase;
+    let serverBase = '';
     try {
-      serverBase = normalizeServerBase(saved.serverBase || next.serverBase || DEFAULT_SERVER_BASE);
+      serverBase = normalizeServerBase(saved.serverBase || next.serverBase);
     } catch {
-      serverBase = DEFAULT_SERVER_BASE;
+      serverBase = normalizeServerBase(next.serverBase);
     }
-    if (existingToken) return publicSettings({ serverBase, bridgeToken: existingToken });
+    if (!(await hasServerHostPermission(serverBase))) {
+      throw new Error('Grant access to the configured Radar host before migrating settings');
+    }
+    const serverOrigin = serverOriginForBase(serverBase);
+    if (existingToken) {
+      const existingOrigin = String(saved.bridgeTokenOrigin || '').trim() || serverOrigin;
+      const value = {
+        serverBase,
+        bridgeToken: existingOrigin === serverOrigin ? existingToken : '',
+        bridgeTokenOrigin: existingOrigin
+      };
+      if (!saved.bridgeTokenOrigin && value.bridgeToken) {
+        await chrome.storage.local.set({ bridgeTokenOrigin: serverOrigin });
+      }
+      await syncRadarContentScript(value);
+      return publicSettings(value);
+    }
     const bridgeToken = String(next.bridgeToken || '').trim();
     if (!bridgeToken) throw new Error('Bridge token is required');
-    const value = { serverBase, bridgeToken };
+    const value = { serverBase, bridgeToken, bridgeTokenOrigin: serverOrigin };
     await chrome.storage.local.set(value);
+    await syncRadarContentScript(value);
     await updateBadge('ON', '#16834b');
     return publicSettings(value);
   });
@@ -576,14 +647,22 @@ async function socialRequest(path, {
   timeoutMs = SOCIAL_REQUEST_TIMEOUT_MS
 } = {}) {
   const config = await settings();
+  if (!config.serverBase) throw new Error('Radar social API is not configured');
   if (!config.bridgeToken) throw new Error('Bridge token is not configured');
+  if (!(await hasServerHostPermission(config.serverBase))) {
+    throw new Error('Radar host permission is not granted');
+  }
   const normalizedPath = String(path || '').startsWith('/') ? String(path) : `/${path}`;
+  const requestUrl = new URL(`${config.serverBase}${normalizedPath}`);
+  if (requestUrl.origin !== config.bridgeTokenOrigin) {
+    throw new Error('Bridge token is not bound to the requested Radar origin');
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   let responseText;
   try {
-    response = await fetch(`${config.serverBase}${normalizedPath}`, {
+    response = await fetch(requestUrl.href, {
       method,
       signal: controller.signal,
       headers: {
@@ -880,23 +959,13 @@ function isDeBotSenderUrl(value) {
   }
 }
 
-function isRadarSenderUrl(value, { write = false } = {}) {
-  try {
-    const url = new URL(String(value || ''));
-    const allowedOrigin = write
-      ? url.origin === RADAR_WRITE_ORIGIN
-      : RADAR_READ_ORIGINS.has(url.origin);
-    return allowedOrigin && /^\/robinhood-radar(?:\/|$)/.test(url.pathname);
-  } catch {
-    return false;
-  }
-}
-
-function isRadarContentSender(sender, options) {
+async function isRadarContentSender(sender) {
   if (!chrome.runtime.id || sender?.id !== chrome.runtime.id) return false;
   if (!Number.isSafeInteger(Number(sender?.tab?.id))) return false;
-  if (!isRadarSenderUrl(sender?.url, options)) return false;
-  return !sender?.tab?.url || isRadarSenderUrl(sender.tab.url, options);
+  const config = await settings();
+  if (!config.serverBase || !(await hasServerHostPermission(config.serverBase))) return false;
+  if (!isRadarPageUrl(sender?.url, config.serverBase)) return false;
+  return !sender?.tab?.url || isRadarPageUrl(sender.tab.url, config.serverBase);
 }
 
 async function isManagedDeBotSender(sender) {
@@ -1040,7 +1109,8 @@ function runBridgeMaintenance() {
   bridgeMaintenanceInFlight = Promise.allSettled([
     flushPostOutbox(),
     flushAnalysisResultOutbox(),
-    maintainDeBotConnection()
+    maintainDeBotConnection(),
+    syncRadarContentScript()
   ]).finally(() => {
     bridgeMaintenanceInFlight = null;
   });
@@ -1089,15 +1159,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       throw new Error('Unsupported DeBot relay message');
     }
     if (message.source === 'robinhood-radar-content' && message.type === 'status') {
-      if (!isRadarContentSender(sender, { write: false })) {
+      if (!(await isRadarContentSender(sender))) {
         throw new Error('Untrusted Radar status sender');
       }
       const value = await settings();
-      return { configured: Boolean(value.bridgeToken) };
+      return { configured: Boolean(value.bridgeToken), writable: true };
     }
     if (message.source === 'robinhood-radar-content' && message.type === 'api') {
-      if (!isRadarContentSender(sender, { write: true })) {
-        throw new Error('Radar social writes require the trusted HTTPS page');
+      if (!(await isRadarContentSender(sender))) {
+        throw new Error('Radar social writes require the configured page');
       }
       const path = String(message.command?.path || '');
       if (!/^\/watchlist(?:\/batch|\/\d+)?$/.test(path)) throw new Error('Radar requested a disallowed social route');
@@ -1107,7 +1177,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (message.source === 'bridge-options' && message.type === 'get-settings') {
       const value = await settings();
-      return { ...value, bridgeToken: value.bridgeToken ? 'configured' : '' };
+      return publicSettings(value);
     }
     if (message.source === 'bridge-options' && message.type === 'save-settings') {
       return saveSettings(message.payload || {});
@@ -1151,8 +1221,15 @@ chrome.runtime.onStartup.addListener(() => {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm?.name === RECOVERY_ALARM) void runBridgeMaintenance();
 });
+chrome.permissions.onAdded.addListener(() => {
+  void syncRadarContentScript();
+});
+chrome.permissions.onRemoved.addListener(() => {
+  void syncRadarContentScript();
+});
 
 void settings().then(async (value) => {
   await updateBadge(value.bridgeToken ? 'ON' : '?', value.bridgeToken ? '#16834b' : '#bd8121');
+  await syncRadarContentScript(value);
   await runBridgeMaintenance();
 });

@@ -12,7 +12,8 @@
       <form id="settings-form">
         <label>
           <span>社媒服务地址</span>
-          <input id="server-base" type="url" required />
+          <input id="server-base" type="url" placeholder="https://radar.example.com/robinhood-radar/api/social" required />
+          <small>必须是 HTTPS；本地开发仅允许 http://localhost 或 http://127.0.0.1。路径必须以 /api/social 结尾。</small>
         </label>
         <label>
           <span>设备配对密钥</span>

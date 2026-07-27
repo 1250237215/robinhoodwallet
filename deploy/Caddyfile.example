@@ -1,9 +1,11 @@
-{$ROBINHOOD_LEGACY_HTTP_ADDRESS:http://217.116.171.250} {
+# Set these Caddy environment variables for the production host. The defaults
+# are local-only and safe for validating this example on a fresh machine.
+{$RADAR_LEGACY_SITE_ADDRESS:http://localhost:8080} {
 	@legacyRadarPage path /robinhood-radar /robinhood-radar/*
-	redir @legacyRadarPage https://radar.217-116-171-250.sslip.io{uri} 308
+	redir @legacyRadarPage {$RADAR_CANONICAL_ORIGIN:http://localhost}{uri} 308
 }
 
-{$ROBINHOOD_SITE_ADDRESS:http://localhost} {
+{$RADAR_SITE_ADDRESS:http://localhost} {
 	@compressible not path /robinhood-radar/api/social/stream /robinhood-radar/api/robinhood/monitor/stream /robinhood-radar/api/base/monitor/stream /robinhood-radar/api/solana/monitor/stream
 	encode @compressible zstd gzip
 	header Cache-Control "no-store, no-cache, must-revalidate, max-age=0"

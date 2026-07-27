@@ -32,9 +32,9 @@ test('service fast lane ingests configured X posts immediately and closes every 
     source: 'twitter',
     kind: 'post',
     externalId: '2081682293836656926',
-    author: { handle: '1874a3', name: '1874a3' },
+    author: { handle: 'radar_fixture', name: 'radar_fixture' },
     content: 'u u',
-    url: 'https://x.com/1874a3/status/2081682293836656926',
+    url: 'https://x.com/radar_fixture/status/2081682293836656926',
     publishedAt
   };
   const service = createSocialService({
@@ -45,7 +45,7 @@ test('service fast lane ingests configured X posts immediately and closes every 
       bridgeOfflineMs: 90_000,
       cleanupIntervalMs: 60_000,
       commandLeaseMs: 30_000,
-      xFastHandles: ['1874a3'],
+      xFastHandles: ['radar_fixture'],
       xFastPollIntervalMs: 250,
       xFastMaxInFlight: 2,
       xFastRequestTimeoutMs: 3_500,
@@ -54,10 +54,10 @@ test('service fast lane ingests configured X posts immediately and closes every 
     xProfileMonitor: {
       async pollOnce(accounts, { onResult } = {}) {
         polls += 1;
-        assert.deepEqual(accounts, ['1874a3']);
+        assert.deepEqual(accounts, ['radar_fixture']);
         const isConfirmed = confirmed.has(fastPost.externalId);
         const result = {
-          handle: '1874a3',
+          handle: 'radar_fixture',
           status: isConfirmed ? 'duplicate' : 'new',
           checkedAt: Date.now(),
           post: fastPost,
@@ -70,7 +70,7 @@ test('service fast lane ingests configured X posts immediately and closes every 
         };
       },
       confirm(handle, tweetIds) {
-        assert.equal(handle, '1874a3');
+        assert.equal(handle, 'radar_fixture');
         for (const tweetId of tweetIds) confirmed.add(tweetId);
       }
     },
@@ -92,7 +92,7 @@ test('service fast lane ingests configured X posts immediately and closes every 
   await eventually(() => assert.ok(service.store.getPost('twitter', '2081682293836656926')));
   const stored = service.store.getPost('twitter', '2081682293836656926');
   assert.equal(stored.content, 'u u');
-  assert.equal(stored.author.handle, '1874a3');
+  assert.equal(stored.author.handle, 'radar_fixture');
   assert.deepEqual(stored.feedSources, ['my']);
   assert.ok(polls >= 1);
   assert.deepEqual([...confirmed], ['2081682293836656926']);
@@ -112,9 +112,9 @@ test('service retries an X post after persistence fails and confirms it only aft
     source: 'twitter',
     kind: 'post',
     externalId,
-    author: { handle: '1874a3', name: '1874a3' },
+    author: { handle: 'radar_fixture', name: 'radar_fixture' },
     content: 'persist me',
-    url: `https://x.com/1874a3/status/${externalId}`,
+    url: `https://x.com/radar_fixture/status/${externalId}`,
     publishedAt: Date.parse('2026-07-27T10:06:00.000Z')
   };
   const monitor = {
@@ -135,7 +135,7 @@ test('service retries an X post after persistence fails and confirms it only aft
       return { posts: result.posts, results: [result] };
     },
     confirm(handle, tweetIds) {
-      assert.equal(handle, '1874a3');
+      assert.equal(handle, 'radar_fixture');
       assert.deepEqual(tweetIds, [externalId]);
       confirmations += 1;
       confirmed = true;
@@ -149,7 +149,7 @@ test('service retries an X post after persistence fails and confirms it only aft
       bridgeOfflineMs: 90_000,
       cleanupIntervalMs: 60_000,
       commandLeaseMs: 30_000,
-      xFastHandles: ['1874a3'],
+      xFastHandles: ['radar_fixture'],
       xFastPollIntervalMs: 250,
       xFastMaxInFlight: 2,
       xFastRequestTimeoutMs: 3_500,

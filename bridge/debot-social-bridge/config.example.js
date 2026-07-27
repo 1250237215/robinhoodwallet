@@ -1,4 +1,4 @@
 export default {
-  serverBase: 'https://radar.217-116-171-250.sslip.io/robinhood-radar/api/social',
+  serverBase: 'https://radar.example.com/robinhood-radar/api/social',
   bridgeToken: ''
 };

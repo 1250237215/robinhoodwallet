@@ -8,6 +8,15 @@ import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 import { migrateLocalSettings } from '../bridge/debot-social-bridge/options-config.js';
 import {
+  hostPermissionForServerBase,
+  isRadarPageUrl,
+  normalizeServerBase,
+  radarContentMatchForServerBase,
+  radarContentMatchesForServerBase,
+  radarRootPathForServerBase,
+  serverOriginForBase
+} from '../bridge/debot-social-bridge/server-config.js';
+import {
   ANALYSIS_RESULT_OUTBOX_LIMITS,
   createAnalysisResultOutbox
 } from '../bridge/debot-social-bridge/analysis-result-outbox.js';
@@ -265,15 +274,17 @@ function createTimelineBridgeHarness(initialHandler, {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.7.1');
+  assert.equal(manifest.version, '1.8.0');
   assert.equal(manifest.background.type, 'module');
-  assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
+  assert.deepEqual(manifest.permissions, ['storage', 'alarms', 'scripting']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
-  assert.deepEqual(manifest.host_permissions, [
-    'https://debot.ai/*',
-    'http://217.116.171.250/*',
-    'https://radar.217-116-171-250.sslip.io/*'
+  assert.deepEqual(manifest.host_permissions, ['https://debot.ai/*']);
+  assert.deepEqual(manifest.optional_host_permissions, [
+    'https://*/*',
+    'http://localhost/*',
+    'http://127.0.0.1/*'
   ]);
+  assert.equal(manifest.content_scripts.some((entry) => entry.js.includes('radar-content.js')), false);
   const pageScript = manifest.content_scripts.find((entry) => entry.js.includes('debot-page.js'));
   const relayScript = manifest.content_scripts.find((entry) => entry.js.includes('debot-relay.js'));
   assert.equal(pageScript.world, 'MAIN');
@@ -282,6 +293,7 @@ test('extension manifest, configuration and scripts are valid and narrowly scope
   assert.equal(relayScript.run_at, 'document_start');
   const pageSource = bridgeSource('debot-page.js');
   const backgroundSource = bridgeSource('background.js');
+  const optionsSource = bridgeSource('options.js');
   assert.match(pageSource, /const PRIMARY_POLL_INTERVAL_MS = 1_000/);
   assert.match(pageSource, /const PRIMARY_API_TIMEOUT_MS = 1_500/);
   assert.match(pageSource, /const TIMELINE_PAGE_SIZE = 50/);
@@ -295,11 +307,14 @@ test('extension manifest, configuration and scripts are valid and narrowly scope
   assert.doesNotMatch(pageSource, /social\/twitter\/(?:hot|all)\/timeline/);
   assert.match(backgroundSource, /const POST_UPLOAD_REQUEST_TIMEOUT_MS = 2_000/);
   assert.match(backgroundSource, /timeoutMs: POST_UPLOAD_REQUEST_TIMEOUT_MS/);
+  assert.match(backgroundSource, /chrome\.scripting\.registerContentScripts/);
+  assert.match(backgroundSource, /requestUrl\.origin !== config\.bridgeTokenOrigin/);
+  assert.match(optionsSource, /chrome\.permissions\.request\(\{ origins: \[permissionOrigin\] \}\)/);
 
   const exampleUrl = `${pathToFileURL(path.join(bridgeDirectory, 'config.example.js')).href}?test=${Date.now()}`;
   const example = (await import(exampleUrl)).default;
   assert.equal(example.bridgeToken, '');
-  assert.match(example.serverBase, /^https:\/\/radar\./);
+  assert.equal(example.serverBase, 'https://radar.example.com/robinhood-radar/api/social');
   assert.match(fs.readFileSync(path.join(root, '.gitignore'), 'utf8'), /bridge\/debot-social-bridge\/config\.local\.js/);
 
   for (const filename of fs.readdirSync(bridgeDirectory).filter((name) => name.endsWith('.js'))) {
@@ -336,6 +351,59 @@ test('extension service worker has no unsupported async module loading', async (
   });
 });
 
+test('Radar server configuration accepts explicit HTTPS or local development hosts only', () => {
+  assert.equal(
+    normalizeServerBase('https://third-party.example/custom/radar/api/social/'),
+    'https://third-party.example/custom/radar/api/social'
+  );
+  assert.equal(
+    normalizeServerBase('http://localhost:18118/robinhood-radar/api/social'),
+    'http://localhost:18118/robinhood-radar/api/social'
+  );
+  assert.equal(
+    normalizeServerBase('http://127.0.0.1:3000/api/social'),
+    'http://127.0.0.1:3000/api/social'
+  );
+  assert.equal(
+    hostPermissionForServerBase('https://third-party.example:8443/custom/api/social'),
+    'https://third-party.example/*'
+  );
+  assert.equal(
+    radarContentMatchForServerBase('https://third-party.example:8443/custom/radar/api/social'),
+    'https://third-party.example/custom/radar/*'
+  );
+  assert.deepEqual(
+    radarContentMatchesForServerBase('https://third-party.example:8443/custom/radar/api/social'),
+    ['https://third-party.example/custom/radar', 'https://third-party.example/custom/radar/*']
+  );
+  assert.equal(radarRootPathForServerBase('https://third-party.example/api/social'), '/');
+  assert.equal(serverOriginForBase('https://third-party.example:8443/api/social'), 'https://third-party.example:8443');
+  assert.equal(isRadarPageUrl(
+    'https://third-party.example:8443/custom/radar/monitor',
+    'https://third-party.example:8443/custom/radar/api/social'
+  ), true);
+  assert.equal(isRadarPageUrl(
+    'https://third-party.example/custom/radar/monitor',
+    'https://third-party.example:8443/custom/radar/api/social'
+  ), false);
+  assert.equal(isRadarPageUrl(
+    'https://third-party.example:8443/other/',
+    'https://third-party.example:8443/custom/radar/api/social'
+  ), false);
+
+  for (const value of [
+    'http://radar.example/api/social',
+    'http://203.0.113.10/robinhood-radar/api/social',
+    'http://localhost.evil.example/api/social',
+    'ftp://localhost/api/social',
+    'https://user:secret@radar.example/api/social',
+    'https://radar.example/api/social?token=bad',
+    'https://radar.example/api/not-social'
+  ]) {
+    assert.throws(() => normalizeServerBase(value), /Radar social API|HTTPS|credentials|path/);
+  }
+});
+
 test('extension options migrate a local token once without exposing or overwriting it', async () => {
   let loadCalls = 0;
   let sendCalls = 0;
@@ -359,7 +427,7 @@ test('extension options migrate a local token once without exposing or overwriti
   const migrated = await migrateLocalSettings({
     current: { serverBase: '', bridgeToken: '' },
     loadLocalConfig: async () => ({
-      serverBase: 'https://radar.217-116-171-250.sslip.io/robinhood-radar/api/social',
+      serverBase: 'https://legacy-radar.example/robinhood-radar/api/social',
       bridgeToken: `  ${secret}  `
     }),
     sendMessage: async (message) => {
@@ -376,6 +444,25 @@ test('extension options migrate a local token once without exposing or overwriti
   assert.equal(migrated.bridgeToken, 'configured');
   assert.equal(JSON.stringify(migrated).includes(secret), false);
   assert.equal(sendCalls, 1);
+
+  let staged = null;
+  const permissionDeferred = await migrateLocalSettings({
+    current: { serverBase: '', bridgeToken: '', hostPermissionGranted: false },
+    loadLocalConfig: async () => ({
+      serverBase: 'https://legacy-radar.example/robinhood-radar/api/social',
+      bridgeToken: secret
+    }),
+    canMigrate: async () => false,
+    onPermissionRequired(value) {
+      staged = value;
+    },
+    sendMessage: async () => {
+      throw new Error('must not send before the user grants host permission');
+    }
+  });
+  assert.equal(permissionDeferred.serverBase, 'https://legacy-radar.example/robinhood-radar/api/social');
+  assert.equal(permissionDeferred.bridgeToken, '');
+  assert.equal(staged.bridgeToken, secret);
 
   const missing = { serverBase: 'https://radar.example/api/social', bridgeToken: '' };
   assert.equal(await migrateLocalSettings({
@@ -601,7 +688,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   };
   const starAccount = {
     platform: 0,
-    monitor_object: 'star_okx',
+    monitor_object: 'fixture_star',
     config_name: 'Star OKX',
     config_id: 45
   };
@@ -724,7 +811,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.requestId === 'page-personal-probe'
       && message.payload.ok === true)));
   const personalHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.equal(personalHeartbeat.payload.version, '1.7.1');
+  assert.equal(personalHeartbeat.payload.version, '1.8.0');
   assert.deepEqual(Array.from(personalHeartbeat.payload.capabilities), [
     'posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1'
   ]);
@@ -1239,11 +1326,11 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   assert.equal(nonPortalSocket.sent.length, 0);
 
   const followPayload = {
-    doc_id: 'Zm9sbG93OnN0YXJfb2t4OmVuem9pbnNpZGVlOjE3ODQzMDAwMDIwMDA',
+    doc_id: 'Zm9sbG93OmZpeHR1cmVfc3RhcjplbnpvaW5zaWRlZToxNzg0MzAwMDAyMDAw',
     platform: 0,
     event_type: 'tweet_user_follow',
     save_time: 1_784_300_002,
-    user: { id: 'star-id', username: 'star_okx', followers_count: 234_880 },
+    user: { id: 'star-id', username: 'fixture_star', followers_count: 234_880 },
     follow: {
       id: 'enzo-id',
       profile_info: {
@@ -1256,12 +1343,12 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     tweet: { tweet_id: 'stale-tweet-must-not-change-follow-kind', text: 'stale content' }
   };
   sendPersonalActivity(followPayload);
-  const followExternalId = 'follow:star_okx:enzoinsidee:1784300002000';
+  const followExternalId = 'follow:fixture_star:enzoinsidee:1784300002000';
   const followDelivery = deliveryFor(followExternalId);
   assert.ok(followDelivery);
   const follow = followDelivery.payload.posts[0];
   assert.equal(follow.kind, 'follow');
-  assert.equal(follow.author.handle, 'star_okx');
+  assert.equal(follow.author.handle, 'fixture_star');
   assert.equal(follow.target.handle, 'enzoinsidee');
   assert.equal(follow.target.name, 'Enzo');
   assert.equal(follow.target.followersCount, 88);
@@ -1269,15 +1356,15 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   acknowledge(followDelivery);
 
   const unfollowPayload = {
-    doc_id: 'dW5mb2xsb3c6c3Rhcl9va3g6YmFua3Jib3Q6MTc4NDMwMDAwMzAwMA',
+    doc_id: 'dW5mb2xsb3c6Zml4dHVyZV9zdGFyOmJhbmtyYm90OjE3ODQzMDAwMDMwMDA',
     platform: 0,
     event_type: 'tweet_user_unfollow',
     save_time: 1_784_300_003,
-    user: { username: 'star_okx' },
+    user: { username: 'fixture_star' },
     follow: { username: 'bankrbot', name: 'BankrBot' }
   };
   sendPersonalActivity(unfollowPayload);
-  const unfollowDelivery = deliveryFor('unfollow:star_okx:bankrbot:1784300003000');
+  const unfollowDelivery = deliveryFor('unfollow:fixture_star:bankrbot:1784300003000');
   assert.ok(unfollowDelivery);
   assert.equal(unfollowDelivery.payload.posts[0].kind, 'unfollow');
   assert.equal(unfollowDelivery.payload.posts[0].target.handle, 'bankrbot');
@@ -1315,17 +1402,17 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
 
   const firstFollowOccurrenceCount = window.messages.filter((message) =>
     message.type === 'posts'
-      && message.payload.posts.some((post) => post.externalId.startsWith('follow:star_okx:enzoinsidee:'))).length;
+      && message.payload.posts.some((post) => post.externalId.startsWith('follow:fixture_star:enzoinsidee:'))).length;
   sendPersonalActivity({
     ...followPayload,
-    doc_id: 'Zm9sbG93OnN0YXJfb2t4OmVuem9pbnNpZGVlOjE3ODQzMDAwMDUwMDA',
+    doc_id: 'Zm9sbG93OmZpeHR1cmVfc3RhcjplbnpvaW5zaWRlZToxNzg0MzAwMDA1MDAw',
     save_time: 1_784_300_005
   });
   assert.equal(window.messages.filter((message) =>
     message.type === 'posts'
-      && message.payload.posts.some((post) => post.externalId.startsWith('follow:star_okx:enzoinsidee:'))).length,
+      && message.payload.posts.some((post) => post.externalId.startsWith('follow:fixture_star:enzoinsidee:'))).length,
     firstFollowOccurrenceCount + 1);
-  const secondFollowDelivery = deliveryFor('follow:star_okx:enzoinsidee:1784300005000');
+  const secondFollowDelivery = deliveryFor('follow:fixture_star:enzoinsidee:1784300005000');
   assert.equal(secondFollowDelivery.payload.posts[0].sourceUpdatedAt, 1_784_300_005_000);
   acknowledge(secondFollowDelivery);
 
@@ -1657,7 +1744,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const recoveredHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
   assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
   assert.equal(Object.hasOwn(recoveredHeartbeat.payload, 'error'), false);
-  assert.equal(recoveredHeartbeat.payload.version, '1.7.1');
+  assert.equal(recoveredHeartbeat.payload.version, '1.8.0');
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.accountCount >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.rawRows >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.normalizedRows >= 0, true);
@@ -3019,7 +3106,7 @@ test('relay claims at most four analysis jobs, validates claim tokens and refill
 });
 
 test('Radar content bridge announces readiness only when the extension has a configured token', async () => {
-  const window = new FakeWindow('https://radar.217-116-171-250.sslip.io');
+  const window = new FakeWindow('https://third-party-radar.example');
   const runtimeMessages = [];
   let configured = false;
   const chrome = {
@@ -3027,7 +3114,7 @@ test('Radar content bridge announces readiness only when the extension has a con
       async sendMessage(message) {
         runtimeMessages.push(message);
         if (message.type === 'status') {
-          return { ok: true, payload: { configured } };
+          return { ok: true, payload: { configured, writable: true } };
         }
         return { ok: true, payload: { accepted: true } };
       }
@@ -3061,14 +3148,14 @@ test('Radar content bridge announces readiness only when the extension has a con
   assert.ok(runtimeMessages.some((message) => message.type === 'api'));
 });
 
-test('Radar content bridge keeps the public HTTP page read-only', async () => {
-  const window = new FakeWindow('http://217.116.171.250');
+test('Radar content bridge permits a configured localhost development page', async () => {
+  const window = new FakeWindow('http://localhost:18118');
   const runtimeMessages = [];
   const chrome = {
     runtime: {
       async sendMessage(message) {
         runtimeMessages.push(message);
-        return { ok: true, payload: { configured: true } };
+        return { ok: true, payload: { configured: true, writable: true } };
       }
     }
   };
@@ -3079,24 +3166,23 @@ test('Radar content bridge keeps the public HTTP page read-only', async () => {
   }, { filename: 'radar-content.js' });
 
   await eventually(() => assert.ok(window.messages.some((message) => message.type === 'ready')));
-  assert.equal(window.messages.find((message) => message.type === 'ready').writable, false);
+  assert.equal(window.messages.find((message) => message.type === 'ready').writable, true);
   window.dispatchMessage({
     source: 'robinhood-radar',
     type: 'social-command',
-    requestId: 'insecure-request',
+    requestId: 'local-request',
     command: { method: 'DELETE', path: '/watchlist/27' }
   });
   await eventually(() => assert.ok(window.messages.some((message) =>
-    message.type === 'response' && message.requestId === 'insecure-request')));
-  const response = window.messages.find((message) => message.requestId === 'insecure-request');
-  assert.equal(response.ok, false);
-  assert.match(response.error, /HTTPS/);
-  assert.equal(runtimeMessages.some((message) => message.type === 'api'), false);
+    message.type === 'response' && message.requestId === 'local-request')));
+  const response = window.messages.find((message) => message.requestId === 'local-request');
+  assert.equal(response.ok, true);
+  assert.equal(runtimeMessages.some((message) => message.type === 'api'), true);
 });
 
 test('background uses the bridge secret only as authorization and submits allowlisted social data', async (t) => {
   const saved = {
-    serverBase: 'https://radar.217-116-171-250.sslip.io/robinhood-radar/api/social',
+    serverBase: 'https://third-party-radar.example/robinhood-radar/api/social',
     bridgeToken: 'unit-bridge-secret'
   };
   const requests = [];
@@ -3106,6 +3192,10 @@ test('background uses the bridge secret only as authorization and submits allowl
   let startupListener = null;
   const sessionSaved = {};
   const accessLevels = {};
+  const grantedOrigins = new Set(['https://third-party-radar.example/*']);
+  const registeredContentScripts = new Map();
+  let permissionsAddedListener = null;
+  let permissionsRemovedListener = null;
   const alarms = [];
   const tabCalls = { query: 0, sendMessage: 0, reload: 0, create: 0, update: 0 };
   const fakeTabs = [{ id: 17, url: 'https://debot.ai/', pinned: true, discarded: false, status: 'complete' }];
@@ -3155,6 +3245,33 @@ test('background uses the bridge secret only as authorization and submits allowl
         async set(value) {
           Object.assign(sessionSaved, value);
         }
+      }
+    },
+    permissions: {
+      async contains({ origins = [] }) {
+        return origins.every((origin) => grantedOrigins.has(origin));
+      },
+      onAdded: {
+        addListener(value) {
+          permissionsAddedListener = value;
+        }
+      },
+      onRemoved: {
+        addListener(value) {
+          permissionsRemovedListener = value;
+        }
+      }
+    },
+    scripting: {
+      async getRegisteredContentScripts({ ids = [] } = {}) {
+        const entries = [...registeredContentScripts.values()];
+        return ids.length ? entries.filter((entry) => ids.includes(entry.id)) : entries;
+      },
+      async registerContentScripts(entries) {
+        for (const entry of entries) registeredContentScripts.set(entry.id, structuredClone(entry));
+      },
+      async unregisterContentScripts({ ids = [] }) {
+        for (const id of ids) registeredContentScripts.delete(id);
       }
     },
     alarms: {
@@ -3285,6 +3402,15 @@ test('background uses the bridge secret only as authorization and submits allowl
   assert.equal(typeof alarmListener, 'function');
   assert.equal(typeof installedListener, 'function');
   assert.equal(typeof startupListener, 'function');
+  assert.equal(typeof permissionsAddedListener, 'function');
+  assert.equal(typeof permissionsRemovedListener, 'function');
+  await eventually(() => assert.deepEqual(
+    registeredContentScripts.get('configured-radar-content')?.matches,
+    [
+      'https://third-party-radar.example/robinhood-radar',
+      'https://third-party-radar.example/robinhood-radar/*'
+    ]
+  ));
   assert.ok(alarms.some((alarm) => alarm.name === 'debot-social-bridge-recovery'
     && alarm.options.periodInMinutes === 0.5));
   const alarmCount = alarms.length;
@@ -3297,13 +3423,13 @@ test('background uses the bridge secret only as authorization and submits allowl
     url: 'https://debot.ai/',
     tab: { id: 17, url: 'https://debot.ai/' }
   };
-  const radarHttpsUrl = 'https://radar.217-116-171-250.sslip.io/robinhood-radar/';
+  const radarHttpsUrl = 'https://third-party-radar.example/robinhood-radar/';
   const radarHttpsSender = {
     id: 'extension-test-id',
     url: radarHttpsUrl,
     tab: { id: 27, url: radarHttpsUrl }
   };
-  const radarHttpUrl = 'http://217.116.171.250/robinhood-radar/';
+  const radarHttpUrl = 'http://127.0.0.1:18118/robinhood-radar/';
   const radarHttpSender = {
     id: 'extension-test-id',
     url: radarHttpUrl,
@@ -3327,11 +3453,18 @@ test('background uses the bridge secret only as authorization and submits allowl
 
   const contentStatus = await send(
     { source: 'robinhood-radar-content', type: 'status' },
-    radarHttpSender
+    radarHttpsSender
   );
   assert.equal(contentStatus.ok, true);
-  assert.deepEqual(contentStatus.payload, { configured: true });
+  assert.deepEqual(contentStatus.payload, { configured: true, writable: true });
   assert.equal(JSON.stringify(contentStatus).includes(saved.bridgeToken), false);
+
+  const unconfiguredOriginStatus = await send(
+    { source: 'robinhood-radar-content', type: 'status' },
+    radarHttpSender
+  );
+  assert.equal(unconfiguredOriginStatus.ok, false);
+  assert.match(unconfiguredOriginStatus.error, /Untrusted Radar status sender/);
 
   const behaviorPreference = await send({
     source: 'robinhood-radar-content',
@@ -3360,25 +3493,73 @@ test('background uses the bridge secret only as authorization and submits allowl
     }
   }, radarHttpSender);
   assert.equal(insecureBehaviorPreference.ok, false);
-  assert.match(insecureBehaviorPreference.error, /HTTPS/);
+  assert.match(insecureBehaviorPreference.error, /configured page/);
   assert.equal(requests.length, requestCountBeforeInsecureWrite);
 
   const invalidServer = await send({
     source: 'bridge-options',
     type: 'save-settings',
-    payload: { serverBase: 'https://debot.ai/api/social' }
+    payload: { serverBase: 'https://third-party-radar.example/not-social' }
   });
   assert.equal(invalidServer.ok, false);
-  assert.match(invalidServer.error, /Robinhood Radar API/);
+  assert.match(invalidServer.error, /path must end with/);
 
   const insecureServer = await send({
     source: 'bridge-options',
     type: 'save-settings',
-    payload: { serverBase: 'http://217.116.171.250/robinhood-radar/api/social/' }
+    payload: { serverBase: 'http://203.0.113.10/robinhood-radar/api/social/' }
   });
   assert.equal(insecureServer.ok, false);
-  assert.match(insecureServer.error, /Robinhood Radar API/);
-  assert.equal(saved.serverBase, 'https://radar.217-116-171-250.sslip.io/robinhood-radar/api/social');
+  assert.match(insecureServer.error, /HTTPS/);
+
+  const ungrantedServer = await send({
+    source: 'bridge-options',
+    type: 'save-settings',
+    payload: {
+      serverBase: 'https://ungranted-radar.example/robinhood-radar/api/social',
+      bridgeToken: 'must-not-save'
+    }
+  });
+  assert.equal(ungrantedServer.ok, false);
+  assert.match(ungrantedServer.error, /Grant access/);
+  assert.equal(saved.serverBase, 'https://third-party-radar.example/robinhood-radar/api/social');
+  assert.equal(saved.bridgeToken, 'unit-bridge-secret');
+
+  grantedOrigins.add('https://second-radar.example/*');
+  const crossOriginWithoutToken = await send({
+    source: 'bridge-options',
+    type: 'save-settings',
+    payload: { serverBase: 'https://second-radar.example/robinhood-radar/api/social' }
+  });
+  assert.equal(crossOriginWithoutToken.ok, false);
+  assert.match(crossOriginWithoutToken.error, /token again/);
+  assert.equal(saved.serverBase, 'https://third-party-radar.example/robinhood-radar/api/social');
+
+  const requestsBeforeBindingCheck = requests.length;
+  saved.bridgeTokenOrigin = 'https://third-party-radar.example';
+  saved.serverBase = 'https://second-radar.example/robinhood-radar/api/social';
+  const mismatchedBinding = await send({
+    source: 'debot-social-relay',
+    type: 'heartbeat',
+    payload: { bridgeId: 'must-not-cross-origins' }
+  });
+  assert.equal(mismatchedBinding.ok, false);
+  assert.match(mismatchedBinding.error, /token is not configured/);
+  assert.equal(requests.length, requestsBeforeBindingCheck);
+  saved.serverBase = 'https://third-party-radar.example/robinhood-radar/api/social';
+
+  grantedOrigins.delete('https://third-party-radar.example/*');
+  permissionsRemovedListener({ origins: ['https://third-party-radar.example/*'] });
+  await eventually(() => assert.equal(registeredContentScripts.has('configured-radar-content'), false));
+  grantedOrigins.add('https://third-party-radar.example/*');
+  permissionsAddedListener({ origins: ['https://third-party-radar.example/*'] });
+  await eventually(() => assert.deepEqual(
+    registeredContentScripts.get('configured-radar-content')?.matches,
+    [
+      'https://third-party-radar.example/robinhood-radar',
+      'https://third-party-radar.example/robinhood-radar/*'
+    ]
+  ));
 
   fakeTabs[0].discarded = true;
   fakeTabs.push({ id: 19, url: 'https://debot.ai/', pinned: false, discarded: false, status: 'complete' });
@@ -3939,7 +4120,7 @@ test('background uses the bridge secret only as authorization and submits allowl
     source: 'bridge-options',
     type: 'migrate-local-settings',
     payload: {
-      serverBase: 'https://radar.217-116-171-250.sslip.io/robinhood-radar/api/social',
+      serverBase: 'https://third-party-radar.example/robinhood-radar/api/social',
       bridgeToken: 'stale-local-token'
     }
   });
@@ -3949,12 +4130,13 @@ test('background uses the bridge secret only as authorization and submits allowl
   assert.equal(saved.serverBase, activeServer);
 
   saved.bridgeToken = '';
-  saved.serverBase = 'http://217.116.171.250/robinhood-radar/api/social';
+  saved.serverBase = 'http://203.0.113.10/robinhood-radar/api/social';
+  saved.bridgeTokenOrigin = '';
   const migration = send({
     source: 'bridge-options',
     type: 'migrate-local-settings',
     payload: {
-      serverBase: 'https://radar.217-116-171-250.sslip.io/robinhood-radar/api/social',
+      serverBase: 'https://third-party-radar.example/robinhood-radar/api/social',
       bridgeToken: 'stale-local-token'
     }
   });
@@ -3967,6 +4149,41 @@ test('background uses the bridge secret only as authorization and submits allowl
   assert.equal(migrationResult.ok, true);
   assert.equal(saveResult.ok, true);
   assert.equal(saved.bridgeToken, 'new-manual-token');
-  assert.equal(saved.serverBase, 'https://radar.217-116-171-250.sslip.io/robinhood-radar/api/social');
+  assert.equal(saved.serverBase, 'https://third-party-radar.example/robinhood-radar/api/social');
+  assert.equal(saved.bridgeTokenOrigin, 'https://third-party-radar.example');
   assert.equal(JSON.stringify([migrationResult, saveResult]).includes('new-manual-token'), false);
+
+  const switched = await send({
+    source: 'bridge-options',
+    type: 'save-settings',
+    payload: {
+      serverBase: 'https://second-radar.example/custom/api/social',
+      bridgeToken: 'second-origin-token'
+    }
+  });
+  assert.equal(switched.ok, true);
+  assert.equal(saved.bridgeTokenOrigin, 'https://second-radar.example');
+  assert.deepEqual(registeredContentScripts.get('configured-radar-content')?.matches, [
+    'https://second-radar.example/custom',
+    'https://second-radar.example/custom/*'
+  ]);
+  const switchedHeartbeat = await send({
+    source: 'debot-social-relay',
+    type: 'heartbeat',
+    payload: { bridgeId: 'second-origin' }
+  }, {
+    tab: { id: fakeTabs[0].id }
+  });
+  assert.equal(switchedHeartbeat.ok, true);
+  await eventually(() => assert.ok(requests.some((request) => (
+    request.url === 'https://second-radar.example/custom/api/social/bridge/heartbeat'
+  ))));
+  const switchedRequest = requests.findLast((request) => (
+    request.url === 'https://second-radar.example/custom/api/social/bridge/heartbeat'
+  ));
+  assert.equal(switchedRequest.options.headers.authorization, 'Bearer second-origin-token');
+  assert.equal(requests.some((request) => (
+    request.url.startsWith('https://third-party-radar.example/')
+      && request.options.headers?.authorization === 'Bearer second-origin-token'
+  )), false);
 });

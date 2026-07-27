@@ -629,7 +629,7 @@ test('social posts API persists merged feed membership and filters featured and 
 test('social posts API persists validated relationship and profile activity', async (t) => {
   const token = 'relationship-device-token';
   const { baseUrl } = await withSocialServer(t, { token });
-  const encodedUnfollow = Buffer.from('unfollow:star_okx:bankrbot').toString('base64url');
+  const encodedUnfollow = Buffer.from('unfollow:fixture_star:bankrbot').toString('base64url');
   const discoveredAt = Date.parse('2026-07-17T12:00:00.123Z');
   const response = await fetch(`${baseUrl}/api/social/bridge/posts`, {
     method: 'POST',
@@ -639,7 +639,7 @@ test('social posts API persists validated relationship and profile activity', as
         {
           source: 'twitter',
           id: encodedUnfollow,
-          author: { handle: 'star_okx', name: 'Star_OKX', followersCount: 234_880 },
+          author: { handle: 'fixture_star', name: 'Fixture_Star', followersCount: 234_880 },
           target: {
             id: 'bankr-user',
             handle: 'bankrbot',
@@ -652,21 +652,21 @@ test('social posts API persists validated relationship and profile activity', as
         },
         {
           source: 'twitter',
-          id: 'follow_star_okx_enzoinsidee',
-          authorHandle: 'star_okx',
-          authorName: 'Star_OKX',
+          id: 'follow_fixture_star_enzoinsidee',
+          authorHandle: 'fixture_star',
+          authorName: 'Fixture_Star',
           targetHandle: 'enzoinsidee',
           feedSource: 'my',
           publishedAt: '2026-07-17T12:01:00Z'
         },
         {
           source: 'twitter',
-          id: 'profile:star_okx:1785048000000',
+          id: 'profile:fixture_star:1785048000000',
           kind: 'profile',
-          authorHandle: 'star_okx',
+          authorHandle: 'fixture_star',
           profileChanges: ['avatar', 'name'],
           profileDetail: {
-            name: { before: 'Star', after: 'Star_OKX' },
+            name: { before: 'Star', after: 'Fixture_Star' },
             avatar: {
               before: 'https://pbs.twimg.com/profile_images/old.jpg',
               after: 'https://pbs.twimg.com/profile_images/new.jpg'
@@ -679,7 +679,7 @@ test('social posts API persists validated relationship and profile activity', as
           source: 'twitter',
           id: '1900000000000000000',
           kind: 'post',
-          authorHandle: 'star_okx',
+          authorHandle: 'fixture_star',
           text: 'A real tweet',
           feedSource: 'my',
           debotDiscoveredAt: discoveredAt,
@@ -711,7 +711,7 @@ test('social posts API persists validated relationship and profile activity', as
   assert.equal(tweet.storedAt, tweet.vpsIngestedAt);
   const profile = payload.posts.find((post) => post.kind === 'profile');
   assert.deepEqual(profile.profileChanges, ['name', 'avatar']);
-  assert.deepEqual(profile.profileDetail.name, { before: 'Star', after: 'Star_OKX' });
+  assert.deepEqual(profile.profileDetail.name, { before: 'Star', after: 'Fixture_Star' });
   assert.deepEqual(profile.profileDetail.avatar, {
     before: 'https://pbs.twimg.com/profile_images/old.jpg',
     after: 'https://pbs.twimg.com/profile_images/new.jpg'
@@ -726,9 +726,9 @@ test('social posts API persists validated relationship and profile activity', as
     body: JSON.stringify({
       posts: [{
         source: 'twitter',
-        id: 'profile:star_okx:1785049000000',
+        id: 'profile:fixture_star:1785049000000',
         kind: 'profile',
-        authorHandle: 'star_okx'
+        authorHandle: 'fixture_star'
       }]
     })
   });

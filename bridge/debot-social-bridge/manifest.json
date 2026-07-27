@@ -1,13 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "Robinhood Radar DeBot Bridge",
-  "version": "1.7.1",
-  "description": "Synchronizes the signed-in DeBot social monitor with Robinhood Radar.",
-  "permissions": ["storage", "alarms"],
+  "name": "Radar DeBot Social Bridge",
+  "version": "1.8.0",
+  "description": "Synchronizes a signed-in DeBot social monitor with a user-configured Radar server.",
+  "permissions": ["storage", "alarms", "scripting"],
   "host_permissions": [
-    "https://debot.ai/*",
-    "http://217.116.171.250/*",
-    "https://radar.217-116-171-250.sslip.io/*"
+    "https://debot.ai/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
   "background": {
     "service_worker": "background.js",
@@ -15,7 +18,7 @@
   },
   "options_page": "options.html",
   "action": {
-    "default_title": "Robinhood Radar DeBot Bridge"
+    "default_title": "Radar DeBot Social Bridge"
   },
   "content_scripts": [
     {
@@ -27,14 +30,6 @@
     {
       "matches": ["https://debot.ai/*"],
       "js": ["debot-relay.js"],
-      "run_at": "document_start"
-    },
-    {
-      "matches": [
-        "http://217.116.171.250/robinhood-radar/*",
-        "https://radar.217-116-171-250.sslip.io/robinhood-radar/*"
-      ],
-      "js": ["radar-content.js"],
       "run_at": "document_start"
     }
   ]

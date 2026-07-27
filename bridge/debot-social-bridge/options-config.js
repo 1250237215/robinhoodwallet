@@ -1,4 +1,10 @@
-export async function migrateLocalSettings({ current, loadLocalConfig, sendMessage }) {
+export async function migrateLocalSettings({
+  current,
+  loadLocalConfig,
+  sendMessage,
+  canMigrate = async () => true,
+  onPermissionRequired = () => {}
+}) {
   if (current?.bridgeToken) return current;
 
   let localConfig;
@@ -12,6 +18,10 @@ export async function migrateLocalSettings({ current, loadLocalConfig, sendMessa
   if (!bridgeToken) return current;
 
   const serverBase = String(localConfig?.serverBase || '').trim();
+  if (!(await canMigrate(serverBase))) {
+    onPermissionRequired({ serverBase, bridgeToken });
+    return { ...current, ...(serverBase ? { serverBase } : {}) };
+  }
   const result = await sendMessage({
     source: 'bridge-options',
     type: 'migrate-local-settings',

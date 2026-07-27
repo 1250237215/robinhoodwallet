@@ -1,4 +1,4 @@
-# Multi-chain Wallet Radar
+# 1874catch - Multi-chain Wallet Radar
 
 This project is a smart-money research and real-time wallet monitor for
 Robinhood Chain, Base, and Solana. A segmented control switches the active chain,
@@ -7,9 +7,51 @@ scan jobs, monitor events, alert threshold, deduplication state, and Bark target
 No wallet, token, event, setting, or notification destination is copied between
 chains.
 
+## 中文快速开始
+
+1874catch 是一个可自行部署的多链聪明钱研究与实时钱包监控系统，支持：
+
+- Robinhood Chain、Base、Solana 三链独立数据库和独立监控配置
+- 钱包买入、卖出、转账、直接创建代币及平台发币事件
+- 每个钱包分别设置监控事件、网页声音和 Bark 推送
+- Robinhood Holder 分析、人工金狗、钱包命中次数与买币频率排序
+- 实时市值、币龄，以及 Robinhood 专属的流动性、持仓和合约风险补全
+- 通过本地 Chrome 扩展同步已登录 DeBot 的个人社媒监控名单
+
+本地体验 Robinhood 功能需要 Node.js 22.13.0 或更高版本：
+
+```bash
+git clone https://github.com/1250237215/robinhoodwallet.git
+cd robinhoodwallet
+npm ci
+npm test
+npm start
+```
+
+默认地址是 `http://127.0.0.1:18118/`。`npm start`适合本地开发，完整的
+Robinhood、Base、Solana、Caddy、systemd 和 DeBot Bridge 生产部署请阅读
+[中文部署手册](docs/deployment.zh-CN.md)。
+
+### 文档入口
+
+- [完整 VPS 部署、升级与回滚](docs/deployment.zh-CN.md)
+- [DeBot 社媒桥接安装与配对](bridge/debot-social-bridge/README.md)
+- [公开数据库快照与恢复注意事项](database/README.md)
+- [安全策略与密钥边界](SECURITY.md)
+- [参与开发](CONTRIBUTING.md)
+- [MIT 许可证](LICENSE)
+
+仓库只保存可复现的源代码、模板和经过明确脱敏的公开数据库快照。完整
+Bark 地址、服务器密码、API Key、浏览器登录信息、生产环境文件和实时
+SQLite 数据库不会提交到 Git。`dist/`也不会提交，生产 bundle 由部署者
+在自己的可信构建机上生成。
+
+> This is research tooling, not an execution engine or financial advice. Always
+> verify detected activity and token risk independently.
+
 ## Requirements
 
-- Node.js 22 or newer
+- Node.js 22.13.0 or newer
 - npm
 - Robinhood and Base JSON-RPC endpoints (public RPCs are used by default)
 - A Solana JSON-RPC endpoint for manual Holder scans
@@ -27,6 +69,9 @@ Run the development server:
 ```bash
 npm start
 ```
+
+The older combined DeBot signal development entry point remains available as
+`npm run start:legacy`; it is not used by the production systemd services.
 
 Build all three standalone services:
 
@@ -137,30 +182,43 @@ marked partial.
 
 ## Deployment
 
+- `npm run release:prepare` builds a reproducible `dist/release` staging
+  directory with all three bundles, static assets, systemd units, environment
+  templates, `REVISION`, and `SHA256SUMS`. A dirty worktree is rejected by
+  default.
+- `deploy/bootstrap-host.sh` idempotently creates the unprivileged service
+  account, production directories, and missing environment files on a fresh
+  host. It never overwrites populated configuration.
 - `deploy/robinhood-radar.service`, `deploy/base-radar.service`, and
-  `deploy/solana-radar.service` are the isolated systemd units.
+  `deploy/solana-radar.service` are the isolated systemd units. Start from the
+  four committed `deploy/*.env.example` templates and keep populated files in
+  `/etc/robinhood-radar/` with mode `0600`.
 - `deploy/install-remote.sh` installs a prepared release with backup and rollback
-  checks for all three binaries, their databases, the independent social database,
-  and all service units.
+  checks for all three binaries, their databases, the independent social
+  database, and all service units. It verifies the complete checksum manifest
+  before stopping a service.
 - `deploy/dqdai-prediction-backup-retention.sh` is installed separately with its
   service and hourly timer. It deletes only `all_predictions-*.json` snapshots in
   the three DQD AI backup directories after 48 hours; current prediction data and
   website files are outside its match scope.
 - `deploy/Caddyfile.example` contains the prefix-based reverse proxy used by the
-  existing radar URL. Set `ROBINHOOD_SITE_ADDRESS` to the public HTTPS site
-  address. The legacy HTTP IP page is redirected to the canonical HTTPS page so
-  social watchlist writes never cross plaintext HTTP. It does not add a browser
-  login; the exact Solana webhook route remains protected by the independent
-  `SOLANA_HELIUS_AUTH_HEADER` secret.
+  radar URL. Set `RADAR_SITE_ADDRESS` and `RADAR_CANONICAL_ORIGIN` in the Caddy
+  service environment. An optional legacy site can redirect to the canonical
+  HTTPS page so social watchlist writes never cross plaintext HTTP. It does not
+  add a browser login; the exact Solana webhook route remains protected by the
+  independent `SOLANA_HELIUS_AUTH_HEADER` secret.
 - If a complete `Caddyfile` is included in the deployment staging directory,
   `deploy/install-remote.sh` backs up, validates, installs, reloads, publicly
   verifies, and rolls it back with the rest of the release. External `.LEGAL.txt`
   bundle files are installed when generated but are not required when esbuild
   emits none.
 - Production installation rejects a Solana monitor whose Helius subscription is
-  not ready. A deployment that intentionally provides only Solana Holder scans
-  must set `ALLOW_SOLANA_DEGRADED=1`; the installer then prints the exact degraded
-  reasons instead of presenting the monitor as real-time.
+  not ready. The installer allows 120 seconds for a legitimate first Helius
+  webhook synchronization by default; operators can override this deployment-only
+  window with `SOLANA_MONITOR_READY_TIMEOUT_SECONDS`. A deployment that
+  intentionally provides only Solana Holder scans must set
+  `ALLOW_SOLANA_DEGRADED=1`; the installer then prints the exact degraded reasons
+  instead of presenting the monitor as real-time.
 
 Runtime databases, environment files, cookies, browser artifacts, logs, and
 build output are intentionally ignored and must not be committed.

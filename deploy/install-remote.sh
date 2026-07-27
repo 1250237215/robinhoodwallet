@@ -4,12 +4,16 @@ set -Eeuo pipefail
 
 readonly app_dir="/opt/robinhood-radar"
 readonly data_dir="/var/lib/robinhood-radar"
-readonly staging_dir="/root/robinhood-radar-deploy"
+readonly staging_dir="${STAGING_DIR:-/root/robinhood-radar-deploy}"
 readonly backup_root="/var/backups/robinhood-radar"
 readonly stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 readonly release_backup="$backup_root/release-$stamp"
 readonly caddy_config="/etc/caddy/Caddyfile"
 readonly allow_solana_degraded="${ALLOW_SOLANA_DEGRADED:-0}"
+readonly health_connect_timeout_seconds="${DEPLOY_HEALTH_CONNECT_TIMEOUT_SECONDS:-2}"
+readonly health_request_timeout_seconds="${DEPLOY_HEALTH_REQUEST_TIMEOUT_SECONDS:-5}"
+readonly monitor_ready_timeout_seconds="${DEPLOY_MONITOR_READY_TIMEOUT_SECONDS:-30}"
+readonly solana_monitor_ready_timeout_seconds="${SOLANA_MONITOR_READY_TIMEOUT_SECONDS:-120}"
 readonly services=("robinhood-radar" "base-radar" "solana-radar")
 readonly chains=("robinhood" "base" "solana")
 
@@ -21,6 +25,19 @@ caddy_candidate=""
   echo "ALLOW_SOLANA_DEGRADED must be 0 or 1." >&2
   exit 1
 }
+
+for timeout_setting in \
+  "DEPLOY_HEALTH_CONNECT_TIMEOUT_SECONDS:$health_connect_timeout_seconds" \
+  "DEPLOY_HEALTH_REQUEST_TIMEOUT_SECONDS:$health_request_timeout_seconds" \
+  "DEPLOY_MONITOR_READY_TIMEOUT_SECONDS:$monitor_ready_timeout_seconds" \
+  "SOLANA_MONITOR_READY_TIMEOUT_SECONDS:$solana_monitor_ready_timeout_seconds"; do
+  timeout_name="${timeout_setting%%:*}"
+  timeout_value="${timeout_setting#*:}"
+  [[ "$timeout_value" =~ ^[1-9][0-9]*$ ]] || {
+    echo "$timeout_name must be a positive integer number of seconds." >&2
+    exit 1
+  }
+done
 
 database_path() {
   echo "$data_dir/$1.sqlite"
@@ -148,6 +165,67 @@ restore_optional_file() {
   fi
 }
 
+manifest_contains_file() {
+  local manifest="$1"
+  local expected="$2"
+  local line
+  local filename
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[0-9a-fA-F]{64}[[:space:]][[:space:]]([A-Za-z0-9][A-Za-z0-9._-]*)$ ]] || continue
+    filename="${BASH_REMATCH[1]}"
+    [[ "$filename" == "$expected" ]] && return 0
+  done < "$manifest"
+  return 1
+}
+
+verify_release_manifest() {
+  local directory="$1"
+  local manifest="$directory/SHA256SUMS"
+  local line
+  local filename
+  local required
+
+  [[ -f "$manifest" ]] || {
+    echo "Missing release checksum manifest: $manifest" >&2
+    return 1
+  }
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[0-9a-fA-F]{64}[[:space:]][[:space:]]([A-Za-z0-9][A-Za-z0-9._-]*)$ ]] || {
+      echo "Invalid SHA256SUMS entry." >&2
+      return 1
+    }
+    filename="${BASH_REMATCH[1]}"
+    [[ -f "$directory/$filename" ]] || {
+      echo "Checksum manifest references a missing file: $filename" >&2
+      return 1
+    }
+  done < "$manifest"
+
+  for required in \
+    REVISION \
+    robinhood-server.mjs \
+    base-server.mjs \
+    solana-server.mjs \
+    robinhood-radar.service \
+    base-radar.service \
+    solana-radar.service \
+    public.tar.gz; do
+    manifest_contains_file "$manifest" "$required" || {
+      echo "Checksum manifest does not cover required file: $required" >&2
+      return 1
+    }
+  done
+
+  if [[ -f "$directory/Caddyfile" ]] && ! manifest_contains_file "$manifest" Caddyfile; then
+    echo "Checksum manifest does not cover optional Caddyfile." >&2
+    return 1
+  fi
+
+  (cd "$directory" && sha256sum --check --strict SHA256SUMS)
+}
+
 rollback() {
   local exit_code=$?
   trap - EXIT
@@ -217,6 +295,8 @@ declare -A unit_existed=()
 
 trap rollback EXIT
 
+verify_release_manifest "$staging_dir"
+
 for file in \
   "$staging_dir/robinhood-server.mjs" \
   "$staging_dir/base-server.mjs" \
@@ -224,7 +304,9 @@ for file in \
   "$staging_dir/robinhood-radar.service" \
   "$staging_dir/base-radar.service" \
   "$staging_dir/solana-radar.service" \
-  "$staging_dir/public.tar.gz"; do
+  "$staging_dir/public.tar.gz" \
+  "$staging_dir/REVISION" \
+  "$staging_dir/SHA256SUMS"; do
   [[ -f "$file" ]] || { echo "Missing deployment file: $file" >&2; exit 1; }
 done
 
@@ -271,9 +353,7 @@ backup_database_file "$social_database" "$social_database_backup"
 cp -a "$app_dir/public" "$release_backup/public"
 rollback_needed=1
 
-if [[ -f "$staging_dir/REVISION" ]]; then
-  install -m 0644 "$staging_dir/REVISION" "$app_dir/REVISION"
-fi
+install -m 0644 "$staging_dir/REVISION" "$app_dir/REVISION"
 
 for chain in "${chains[@]}"; do
   install -m 0644 "$staging_dir/$chain-server.mjs" "$(bundle_path "$chain")"
@@ -306,6 +386,8 @@ for chain in "${chains[@]}"; do
   health_file="$(mktemp)"
   for attempt in $(seq 1 30); do
     if curl --fail --silent --show-error \
+      --connect-timeout "$health_connect_timeout_seconds" \
+      --max-time "$health_request_timeout_seconds" \
       "http://127.0.0.1:${ports[$chain]}/api/$chain/dashboard?tab=all" \
       > "$health_file"; then
       break
@@ -338,25 +420,58 @@ for chain in "${chains[@]}"; do
   rm -f "$health_file"
 
   monitor_file="$(mktemp)"
-  curl --fail --silent --show-error \
-    "http://127.0.0.1:${ports[$chain]}/api/$chain/monitor" \
-    > "$monitor_file"
-  node --input-type=module -e '
-    import fs from "node:fs";
-    const expectedChain = process.argv[2];
-    const allowSolanaDegraded = process.argv[3] === "1";
-    const monitor = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-    if (monitor.chain !== expectedChain) throw new Error(`wrong monitor chain: ${monitor.chain}`);
-    if (!monitor.settings || !Number.isInteger(Number(monitor.settings.threshold))) {
-      throw new Error("monitor threshold is unavailable");
-    }
-    if (!monitor.health || typeof monitor.status !== "string") {
-      throw new Error("monitor health is unavailable");
-    }
-    if (expectedChain === "solana" && monitor.health.realtimeReady !== true && !allowSolanaDegraded) {
-      throw new Error(`Solana real-time provider is not ready: ${(monitor.health.reasons || []).join(",")}`);
-    }
-  ' "$monitor_file" "$chain" "$allow_solana_degraded"
+  monitor_error_file="$(mktemp)"
+  chain_monitor_ready_timeout_seconds="$monitor_ready_timeout_seconds"
+  if [[ "$chain" == "solana" ]]; then
+    chain_monitor_ready_timeout_seconds="$solana_monitor_ready_timeout_seconds"
+  fi
+  monitor_ready_deadline=$((SECONDS + chain_monitor_ready_timeout_seconds))
+  monitor_ready=0
+  while (( SECONDS < monitor_ready_deadline )); do
+    monitor_request_timeout_seconds="$health_request_timeout_seconds"
+    monitor_connect_timeout_seconds="$health_connect_timeout_seconds"
+    monitor_remaining_seconds=$((monitor_ready_deadline - SECONDS))
+    (( monitor_remaining_seconds > 0 )) || break
+    if (( monitor_request_timeout_seconds > monitor_remaining_seconds )); then
+      monitor_request_timeout_seconds="$monitor_remaining_seconds"
+    fi
+    if (( monitor_connect_timeout_seconds > monitor_request_timeout_seconds )); then
+      monitor_connect_timeout_seconds="$monitor_request_timeout_seconds"
+    fi
+
+    if curl --fail --silent --show-error \
+      --connect-timeout "$monitor_connect_timeout_seconds" \
+      --max-time "$monitor_request_timeout_seconds" \
+      "http://127.0.0.1:${ports[$chain]}/api/$chain/monitor" \
+      > "$monitor_file" 2> "$monitor_error_file" \
+      && node --input-type=module -e '
+        import fs from "node:fs";
+        const expectedChain = process.argv[2];
+        const allowSolanaDegraded = process.argv[3] === "1";
+        const monitor = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+        if (monitor.chain !== expectedChain) throw new Error(`wrong monitor chain: ${monitor.chain}`);
+        if (!monitor.settings || !Number.isInteger(Number(monitor.settings.threshold))) {
+          throw new Error("monitor threshold is unavailable");
+        }
+        if (!monitor.health || typeof monitor.status !== "string") {
+          throw new Error("monitor health is unavailable");
+        }
+        if (expectedChain === "solana" && monitor.health.realtimeReady !== true && !allowSolanaDegraded) {
+          throw new Error(`Solana real-time provider is not ready: ${(monitor.health.reasons || []).join(",")}`);
+        }
+      ' "$monitor_file" "$chain" "$allow_solana_degraded" 2> "$monitor_error_file"; then
+      monitor_ready=1
+      break
+    fi
+    (( SECONDS < monitor_ready_deadline )) || break
+    sleep 1
+  done
+  if [[ "$monitor_ready" != "1" ]]; then
+    echo "$chain monitor health check did not become ready within ${chain_monitor_ready_timeout_seconds}s." >&2
+    cat "$monitor_error_file" >&2
+    exit 1
+  fi
+  rm -f "$monitor_error_file"
   if [[ "$chain" == "solana" && "$allow_solana_degraded" == "1" ]]; then
     node --input-type=module -e '
       import fs from "node:fs";
@@ -369,6 +484,8 @@ for chain in "${chains[@]}"; do
   rm -f "$monitor_file"
 
   removed_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --connect-timeout "$health_connect_timeout_seconds" \
+    --max-time "$health_request_timeout_seconds" \
     --request POST "http://127.0.0.1:${ports[$chain]}/api/$chain/jobs/history")"
   [[ "$removed_status" == "404" ]] || {
     echo "$chain removed history endpoint returned HTTP $removed_status instead of 404." >&2
@@ -381,6 +498,8 @@ done
 
 social_file="$(mktemp)"
 curl --fail --silent --show-error \
+  --connect-timeout "$health_connect_timeout_seconds" \
+  --max-time "$health_request_timeout_seconds" \
   "http://127.0.0.1:18118/api/social?postLimit=1" \
   > "$social_file"
 node --input-type=module -e '
@@ -407,7 +526,14 @@ if [[ -f "$staging_dir/Caddyfile" ]]; then
 fi
 
 if [[ -n "${RADAR_PUBLIC_BASE_URL:-}" ]]; then
-  public_curl_options=(--fail --silent --show-error --location)
+  public_curl_options=(
+    --fail
+    --silent
+    --show-error
+    --location
+    --connect-timeout "$health_connect_timeout_seconds"
+    --max-time "$health_request_timeout_seconds"
+  )
   if [[ -n "${RADAR_PUBLIC_USERNAME:-}" || -n "${RADAR_PUBLIC_PASSWORD:-}" ]]; then
     [[ -n "${RADAR_PUBLIC_USERNAME:-}" && -n "${RADAR_PUBLIC_PASSWORD:-}" ]] || {
       echo "Both RADAR_PUBLIC_USERNAME and RADAR_PUBLIC_PASSWORD are required." >&2

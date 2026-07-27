@@ -1,16 +1,30 @@
 {
   "name": "debot-signal-monitor",
   "version": "0.1.0",
+  "description": "Self-hosted multi-chain wallet and DeBot social activity radar.",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1250237215/robinhoodwallet.git"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "type": "module",
   "scripts": {
     "build:robinhood": "esbuild src/robinhood/main.js --bundle --platform=node --format=esm --minify --legal-comments=external --outfile=dist/robinhood-server.mjs",
     "build:base": "esbuild src/base/server.js --bundle --platform=node --format=esm --minify --legal-comments=external --outfile=dist/base-server.mjs",
     "build:solana": "esbuild src/solana/server.js --bundle --platform=node --format=esm --minify --legal-comments=external --outfile=dist/solana-server.mjs",
     "build:all": "npm run build:robinhood && npm run build:base && npm run build:solana",
+    "release:prepare": "node scripts/prepare-release.mjs",
     "classify:wallets": "node scripts/classify-robinhood-wallets.mjs",
     "verify:monitor:rpc": "node scripts/verify-robinhood-monitor-latency.mjs",
-    "start": "node src/server.js",
+    "start": "node src/robinhood/main.js",
+    "start:legacy": "node src/server.js",
+    "start:robinhood": "node src/robinhood/main.js",
+    "start:base": "node src/base/server.js",
+    "start:solana": "node src/solana/server.js",
     "test": "node --test"
   },
   "dependencies": {

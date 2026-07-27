@@ -44,7 +44,7 @@ test('social config uses an independent database and bounded bridge settings', (
     SOCIAL_DEBOT_TOKEN_CACHE_TTL_MS: '65000',
     SOCIAL_DEBOT_WALLET_CACHE_TTL_MS: '32000',
     SOCIAL_DEBOT_PENDING_CAP: '300',
-    SOCIAL_X_FAST_HANDLES: '@1874a3, Crypto_Cat888 invalid-handle!',
+    SOCIAL_X_FAST_HANDLES: '@radar_fixture, Fixture_Cat invalid-handle!',
     SOCIAL_X_FAST_POLL_INTERVAL_MS: '100',
     SOCIAL_X_FAST_MAX_IN_FLIGHT: '99',
     SOCIAL_X_FAST_REQUEST_TIMEOUT_MS: '4200',
@@ -60,7 +60,7 @@ test('social config uses an independent database and bounded bridge settings', (
   assert.equal(config.debotTokenCacheTtlMs, 65_000);
   assert.equal(config.debotWalletCacheTtlMs, 32_000);
   assert.equal(config.debotPendingCap, 300);
-  assert.deepEqual(config.xFastHandles, ['1874a3', 'crypto_cat888']);
+  assert.deepEqual(config.xFastHandles, ['radar_fixture', 'fixture_cat']);
   assert.equal(config.xFastPollIntervalMs, 250);
   assert.equal(config.xFastMaxInFlight, 3);
   assert.equal(config.xFastRequestTimeoutMs, 4_200);
@@ -104,32 +104,32 @@ test('post kinds normalize known aliases and reject explicitly unknown values', 
 });
 
 test('follow and unfollow activity IDs normalize without splitting underscored handles', () => {
-  const encodedUnfollow = Buffer.from('unfollow:star_okx:bankrbot').toString('base64url');
-  assert.deepEqual(parseSocialActivityIdentity(encodedUnfollow, '@Star_OKX'), {
+  const encodedUnfollow = Buffer.from('unfollow:fixture_star:bankrbot').toString('base64url');
+  assert.deepEqual(parseSocialActivityIdentity(encodedUnfollow, '@Fixture_Star'), {
     kind: 'unfollow',
-    actorHandle: 'star_okx',
+    actorHandle: 'fixture_star',
     targetHandle: 'bankrbot',
-    canonicalId: 'unfollow:star_okx:bankrbot',
+    canonicalId: 'unfollow:fixture_star:bankrbot',
     occurrenceAt: null,
-    occurrenceId: 'unfollow:star_okx:bankrbot'
+    occurrenceId: 'unfollow:fixture_star:bankrbot'
   });
 
   const unfollow = normalizeSocialPost({
     source: 'twitter',
     id: encodedUnfollow,
-    authorHandle: 'Star_OKX'
+    authorHandle: 'Fixture_Star'
   });
-  assert.equal(unfollow.externalId, 'unfollow:star_okx:bankrbot');
+  assert.equal(unfollow.externalId, 'unfollow:fixture_star:bankrbot');
   assert.equal(unfollow.kind, 'unfollow');
   assert.equal(unfollow.target.handle, 'bankrbot');
   assert.equal(unfollow.target.name, '');
 
   const plainFollow = normalizeSocialPost({
     source: 'twitter',
-    id: 'follow_crypto_cat888_robinhood_cn',
-    authorHandle: 'crypto_cat888'
+    id: 'follow_fixture_cat_robinhood_cn',
+    authorHandle: 'fixture_cat'
   });
-  assert.equal(plainFollow.externalId, 'follow:crypto_cat888:robinhood_cn');
+  assert.equal(plainFollow.externalId, 'follow:fixture_cat:robinhood_cn');
   assert.equal(plainFollow.kind, 'follow');
   assert.equal(plainFollow.target.handle, 'robinhood_cn');
 
@@ -421,7 +421,7 @@ test('reply targets and parent post context persist and merge without clearing r
     source: 'twitter',
     id: replyId,
     kind: 'reply',
-    authorHandle: 'Crypto_Cat888',
+    authorHandle: 'Fixture_Cat',
     text: 'You use cat as pfp',
     replyToExternalId: 'iruletrenches',
     publishedAt: 1_785_151_049_000
@@ -484,7 +484,7 @@ test('reply context never mixes different parent tweets and stale enrichment sti
     source: 'twitter',
     id: replyId,
     kind: 'reply',
-    authorHandle: 'Crypto_Cat888',
+    authorHandle: 'Fixture_Cat',
     text: 'newest reply text',
     sourceUpdatedAt: 1_785_151_052_000,
     replyToExternalId: firstParentId,
@@ -533,7 +533,7 @@ test('quote context persists, merges partial observations and replaces conflicti
     source: 'twitter',
     id: quoteId,
     kind: 'quote',
-    authorHandle: '1874a3',
+    authorHandle: 'radar_fixture',
     text: '他天天',
     quoteContext: {
       externalId: firstQuotedId,
@@ -706,35 +706,35 @@ test('feed membership survives database reopen and legacy schema migration', (t)
 
 test('ingestion stores validated relationship and profile activity with exact profile details', (t) => {
   const { store } = fixture(t);
-  const encoded = Buffer.from('unfollow:star_okx:bankrbot').toString('base64url');
+  const encoded = Buffer.from('unfollow:fixture_star:bankrbot').toString('base64url');
   const results = store.upsertPosts([
     {
       source: 'twitter',
       id: encoded,
-      authorHandle: 'star_okx',
+      authorHandle: 'fixture_star',
       targetHandle: 'bankrbot'
     },
     {
       source: 'twitter',
       id: 'rename-event',
       kind: 'reName',
-      authorHandle: 'star_okx',
+      authorHandle: 'fixture_star',
       oldName: 'Star',
-      newName: 'Star_OKX'
+      newName: 'Fixture_Star'
     },
     {
       source: 'twitter',
       id: 'avatar-event',
       type: 'reImage',
-      authorHandle: 'star_okx',
+      authorHandle: 'fixture_star',
       oldAvatarUrl: 'https://pbs.twimg.com/profile_images/old.jpg',
       newAvatarUrl: 'https://pbs.twimg.com/profile_images/new.jpg'
     },
     {
       source: 'twitter',
-      id: 'profile:star_okx:1785048000000',
+      id: 'profile:fixture_star:1785048000000',
       kind: 'profile',
-      authorHandle: 'star_okx',
+      authorHandle: 'fixture_star',
       profileChanges: ['bio'],
       profileDetail: { bio: { before: 'old bio', after: 'new bio' } }
     },
@@ -742,7 +742,7 @@ test('ingestion stores validated relationship and profile activity with exact pr
       source: 'twitter',
       id: 'tweet-allowed',
       kind: 'post',
-      authorHandle: 'star_okx',
+      authorHandle: 'fixture_star',
       text: 'A real tweet'
     }
   ]);
@@ -751,7 +751,7 @@ test('ingestion stores validated relationship and profile activity with exact pr
   assert.equal(results[0].post.kind, 'unfollow');
   assert.equal(results[0].post.target.handle, 'bankrbot');
   assert.deepEqual(results[1].post.profileChanges, ['name']);
-  assert.deepEqual(results[1].post.profileDetail.name, { before: 'Star', after: 'Star_OKX' });
+  assert.deepEqual(results[1].post.profileDetail.name, { before: 'Star', after: 'Fixture_Star' });
   assert.deepEqual(results[2].post.profileChanges, ['avatar']);
   assert.deepEqual(results[2].post.profileDetail.avatar, {
     before: 'https://pbs.twimg.com/profile_images/old.jpg',
@@ -763,7 +763,7 @@ test('ingestion stores validated relationship and profile activity with exact pr
     source: 'twitter',
     id: 'profile-without-change',
     kind: 'profile',
-    authorHandle: 'star_okx'
+    authorHandle: 'fixture_star'
   }]), /at least one verified profile change/);
   assert.equal(store.listPosts().length, 5);
   assert.deepEqual(store.listChanges().map((change) => change.type), Array(5).fill('post.created'));
@@ -772,12 +772,12 @@ test('ingestion stores validated relationship and profile activity with exact pr
 test('partial duplicates preserve every verified change from one profile occurrence', (t) => {
   const { store } = fixture(t);
   const occurrenceAt = Date.parse('2026-07-25T12:00:00Z');
-  const externalId = `profile:star_okx:${occurrenceAt}`;
+  const externalId = `profile:fixture_star:${occurrenceAt}`;
   store.upsertPosts([{
     source: 'twitter',
     id: externalId,
     kind: 'profile',
-    authorHandle: 'star_okx',
+    authorHandle: 'fixture_star',
     profileChanges: ['name'],
     profileDetail: { name: { before: 'Star', after: 'Star OKX' } },
     sourceUpdatedAt: occurrenceAt
@@ -786,7 +786,7 @@ test('partial duplicates preserve every verified change from one profile occurre
     source: 'twitter',
     id: externalId,
     kind: 'profile',
-    authorHandle: 'star_okx',
+    authorHandle: 'fixture_star',
     profileChanges: ['avatar', 'bio'],
     profileDetail: {
       avatar: { before: 'https://example.test/old.png', after: 'https://example.test/new.png' },
@@ -800,7 +800,7 @@ test('partial duplicates preserve every verified change from one profile occurre
     source: 'twitter',
     id: externalId,
     kind: 'profile',
-    authorHandle: 'star_okx',
+    authorHandle: 'fixture_star',
     profileChanges: ['name'],
     profileDetail: { name: { before: 'Star', after: 'Star OKX' } },
     sourceUpdatedAt: occurrenceAt
@@ -827,12 +827,12 @@ test('legacy relationship and profile activity migration is safe, durable and no
   `);
   const cryptoAt = Date.parse('2026-07-22T03:54:13.548Z');
   const encodedCrypto = Buffer.from(
-    '@Crypto_Cat888_https://pbs.twimg.com/profile_images/old_https://pbs.twimg.com/profile_images/new_LazyCat'
+    '@Fixture_Cat_https://pbs.twimg.com/profile_images/old_https://pbs.twimg.com/profile_images/new_LazyCat'
   ).toString('base64url');
   const firstProfile = insert.run(
-    'profile_crypto_cat888_LazyCat_profile_payload',
+    'profile_fixture_cat_LazyCat_profile_payload',
     'actor-profile-1',
-    'crypto_cat888',
+    'fixture_cat',
     'Crypto Cat',
     'https://cdn.example.test/crypto-profile.png',
     54_321,
@@ -843,16 +843,16 @@ test('legacy relationship and profile activity migration is safe, durable and no
     cryptoAt,
     cryptoAt
   );
-  const profileAlias = insert.run(encodedCrypto, '', 'Crypto_Cat888', '', '', 0, '["all","my"]', cryptoAt, cryptoAt, cryptoAt, cryptoAt, cryptoAt + 1);
+  const profileAlias = insert.run(encodedCrypto, '', 'Fixture_Cat', '', '', 0, '["all","my"]', cryptoAt, cryptoAt, cryptoAt, cryptoAt, cryptoAt + 1);
   const relationshipAt = Date.parse('2026-07-23T17:24:14.249Z');
-  const relationship = insert.run('follow_star_okx_bankrbot', '', 'star_okx', '', '', 0, '["my"]', relationshipAt, relationshipAt, relationshipAt, relationshipAt, relationshipAt);
-  const avatarChange = insert.run('opaque-avatar-change', '', 'star_okx', '', '', 0, '["my"]', relationshipAt + 1, relationshipAt + 1, relationshipAt + 1, relationshipAt + 1, relationshipAt + 1);
+  const relationship = insert.run('follow_fixture_star_bankrbot', '', 'fixture_star', '', '', 0, '["my"]', relationshipAt, relationshipAt, relationshipAt, relationshipAt, relationshipAt);
+  const avatarChange = insert.run('opaque-avatar-change', '', 'fixture_star', '', '', 0, '["my"]', relationshipAt + 1, relationshipAt + 1, relationshipAt + 1, relationshipAt + 1, relationshipAt + 1);
   legacy.prepare('UPDATE social_posts SET raw_json = ? WHERE id = ?').run(
     JSON.stringify({ tw_type: 'reAvatar' }),
     avatarChange.lastInsertRowid
   );
   const postAt = Date.parse('2026-07-24T02:08:10.211Z');
-  const realPost = insert.run('1900000000000000000', '', 'star_okx', 'Star', '', 100, '["my"]', postAt, postAt, postAt, postAt, postAt);
+  const realPost = insert.run('1900000000000000000', '', 'fixture_star', 'Star', '', 100, '["my"]', postAt, postAt, postAt, postAt, postAt);
   const insertChange = legacy.prepare(`
     INSERT INTO social_changes(event_type, entity_type, entity_id, payload_json, created_at)
     VALUES ('post.created', 'post', ?, '{}', ?)
@@ -866,9 +866,9 @@ test('legacy relationship and profile activity migration is safe, durable and no
   legacy.prepare('UPDATE social_changes SET payload_json = ? WHERE entity_id = ?').run(
     JSON.stringify({
       source: 'twitter',
-      externalId: 'follow:star_okx:bankrbot',
+      externalId: 'follow:fixture_star:bankrbot',
       kind: 'post',
-      author: { handle: 'star_okx' }
+      author: { handle: 'fixture_star' }
     }),
     '999001'
   );
@@ -878,7 +878,7 @@ test('legacy relationship and profile activity migration is safe, durable and no
       source: 'twitter',
       externalId: '1900000000000000001',
       kind: 'post',
-      author: { handle: 'star_okx' },
+      author: { handle: 'fixture_star' },
       content: 'A retained orphaned tweet change'
     }),
     '999002'
@@ -890,7 +890,7 @@ test('legacy relationship and profile activity migration is safe, durable and no
   assert.equal(posts.length, 4);
   assert.equal(posts.some((post) => post.externalId === '1900000000000000000' && post.kind === 'post'), true);
   const migratedFollow = posts.find((post) => post.kind === 'follow');
-  assert.equal(migratedFollow.externalId, 'follow:star_okx:bankrbot');
+  assert.equal(migratedFollow.externalId, 'follow:fixture_star:bankrbot');
   assert.equal(migratedFollow.target.handle, 'bankrbot');
   const profiles = posts.filter((post) => post.kind === 'profile');
   assert.equal(profiles.length, 2);

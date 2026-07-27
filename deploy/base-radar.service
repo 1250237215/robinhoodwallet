@@ -47,7 +47,8 @@ Environment=BASE_MONITOR_DEEP_GAP_POLL_INTERVAL_MS=5000
 Environment=BASE_MONITOR_TOKEN_METADATA_BUDGET_MS=1500
 Environment=BASE_MARKET_DEBOT_BUDGET_MS=750
 Environment=BASE_MARKET_REQUEST_TIMEOUT_MS=5000
-ExecStart=/usr/local/bin/node /opt/robinhood-radar/base-server.mjs
+EnvironmentFile=-/etc/robinhood-radar/base.env
+ExecStart=/usr/bin/env node /opt/robinhood-radar/base-server.mjs
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30

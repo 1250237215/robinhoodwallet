@@ -25,7 +25,7 @@ function conversationHtml() {
     </article>
     <article data-tweet-id="${REPLY_ID}">
       <meta content="2026-07-27T11:17:29.000Z" itemProp="datePublished" />
-      <meta content="https://x.com/Crypto_Cat888/status/${REPLY_ID}" itemProp="url" />
+      <meta content="https://x.com/Fixture_Cat/status/${REPLY_ID}" itemProp="url" />
       <meta content="You use cat as pfp" itemProp="articleBody" />
       <meta content="https://x.com/iruletrenches/status/${PARENT_ID}" itemProp="isPartOf" />
     </article>
@@ -37,9 +37,9 @@ function replyPost() {
     source: 'twitter',
     externalId: REPLY_ID,
     kind: 'reply',
-    author: { handle: 'Crypto_Cat888' },
+    author: { handle: 'Fixture_Cat' },
     content: 'You use cat as pfp',
-    url: `https://x.com/Crypto_Cat888/status/${REPLY_ID}`,
+    url: `https://x.com/Fixture_Cat/status/${REPLY_ID}`,
     replyToExternalId: 'iruletrenches',
     publishedAt: Date.parse('2026-07-27T11:17:29.000Z'),
     sourceUpdatedAt: Date.parse('2026-07-27T11:17:29.000Z')
@@ -51,9 +51,9 @@ function quotePost(overrides = {}) {
     source: 'twitter',
     externalId: QUOTE_ID,
     kind: 'quote',
-    author: { handle: '1874a3' },
+    author: { handle: 'radar_fixture' },
     content: '他天天',
-    url: `https://x.com/1874a3/status/${QUOTE_ID}`,
+    url: `https://x.com/radar_fixture/status/${QUOTE_ID}`,
     publishedAt: Date.parse('2026-07-27T14:33:08.000Z'),
     sourceUpdatedAt: Date.parse('2026-07-27T14:33:08.000Z'),
     ...overrides

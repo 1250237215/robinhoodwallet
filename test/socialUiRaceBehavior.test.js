@@ -191,12 +191,12 @@ function createSocialBehaviorHarness({
   return { api, eventSources, redirects, reset, timers };
 }
 
-test('the public HTTP page redirects to HTTPS and clears a legacy social token during initialization', () => {
+test('an insecure public page clears a legacy social token without assuming an operator hostname', () => {
   const insecureRemovals = [];
   const insecureHarness = createSocialBehaviorHarness({
-    origin: 'http://217.116.171.250',
+    origin: 'http://radar.example.test',
     protocol: 'http:',
-    hostname: '217.116.171.250',
+    hostname: 'radar.example.test',
     search: '?chain=solana',
     hash: '#monitor',
     localStorage: {
@@ -206,15 +206,13 @@ test('the public HTTP page redirects to HTTPS and clears a legacy social token d
     }
   });
   assert.deepEqual(insecureRemovals, ['robinhood-social-device-token']);
-  assert.deepEqual(insecureHarness.redirects, [
-    'https://radar.217-116-171-250.sslip.io/robinhood-radar/?chain=solana#monitor'
-  ]);
+  assert.deepEqual(insecureHarness.redirects, []);
 
   const secureRemovals = [];
   const secureHarness = createSocialBehaviorHarness({
-    origin: 'https://radar.217-116-171-250.sslip.io',
+    origin: 'https://radar.example.test',
     protocol: 'https:',
-    hostname: 'radar.217-116-171-250.sslip.io',
+    hostname: 'radar.example.test',
     localStorage: {
       getItem() { return 'secure-secret'; },
       removeItem(key) { secureRemovals.push(key); },
@@ -225,7 +223,7 @@ test('the public HTTP page redirects to HTTPS and clears a legacy social token d
   assert.deepEqual(secureHarness.redirects, []);
 });
 
-function watchEntry({ id = 7, handle = '1874a3', eventTypes = ['post'] } = {}) {
+function watchEntry({ id = 7, handle = 'radar_fixture', eventTypes = ['post'] } = {}) {
   return {
     id,
     platform: 'twitter',
@@ -240,7 +238,7 @@ function watchEntry({ id = 7, handle = '1874a3', eventTypes = ['post'] } = {}) {
 function socialPost({
   id = 101,
   externalId = 'tweet-101',
-  handle = '1874a3',
+  handle = 'radar_fixture',
   publishedAt = 1_753_567_890_000,
   content = 'new post'
 } = {}) {
@@ -302,7 +300,7 @@ test('post.created before watchlist.updated survives a failed snapshot retry and
 
 test('an older HTTP snapshot cannot roll back a newer SSE watchlist, cursor, or post', () => {
   const { api } = createSocialBehaviorHarness();
-  const liveEntry = watchEntry({ id: 9, handle: '1874a3' });
+  const liveEntry = watchEntry({ id: 9, handle: 'radar_fixture' });
   const livePost = socialPost({ id: 201, externalId: 'tweet-live' });
 
   api.applySocialChange({ id: 10, entityType: 'watchlist', data: liveEntry });
@@ -317,7 +315,7 @@ test('an older HTTP snapshot cannot roll back a newer SSE watchlist, cursor, or 
 
   assert.equal(applied, false);
   assert.equal(api.state.socialLatestChangeId, 11);
-  assert.deepEqual(watchHandles(api), ['1874a3']);
+  assert.deepEqual(watchHandles(api), ['radar_fixture']);
   assert.deepEqual(postIds(api), ['tweet-live']);
 });
 
@@ -443,7 +441,7 @@ test('reset applies its watchlist and posts before flushing deferred live posts'
 
   assert.equal(applied, true);
   assert.equal(api.state.socialLatestChangeId, 20);
-  assert.deepEqual(watchHandles(api), ['1874a3']);
+  assert.deepEqual(watchHandles(api), ['radar_fixture']);
   assert.deepEqual(postIds(api), ['tweet-deferred', 'tweet-snapshot']);
   assert.equal(api.state.socialPosts.length, 2);
   assert.equal(api.state.socialDeferredPosts.size, 0);
