@@ -1,7 +1,7 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const BRIDGE_VERSION = '1.5.0';
+  const BRIDGE_VERSION = '1.6.0';
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
   // The WebSocket is the primary lane. This short, coalesced REST poll only
@@ -304,6 +304,7 @@
 
   function translation(tweet) {
     const values = tweet?.text_translate || tweet?.translations || {};
+    if (typeof values === 'string') return values;
     return values['zh-CN'] || values['zh-CHS'] || values.zh || values.ch || '';
   }
 
@@ -531,6 +532,140 @@
     };
   }
 
+  function statusIdFromUrl(value) {
+    return String(value || '').match(/\/status\/(\d{5,25})(?:[/?#]|$)/i)?.[1] || '';
+  }
+
+  function numericTweetId(value) {
+    const candidate = String(value ?? '').trim();
+    return /^\d{5,25}$/.test(candidate) ? candidate : '';
+  }
+
+  function replyHandleFromValue(value) {
+    const candidate = Array.isArray(value) ? value[0] : value;
+    const raw = candidate && typeof candidate === 'object'
+      ? candidate.username
+        || candidate.screen_name
+        || candidate.screenName
+        || candidate.handle
+      : candidate;
+    const handle = handleText(raw);
+    return /^[a-z0-9_]{1,15}$/i.test(handle) ? handle : '';
+  }
+
+  function explicitReplyParentId(tweet) {
+    const reply = Array.isArray(tweet?.reply_to) ? tweet.reply_to[0] : tweet?.reply_to;
+    const candidates = [
+      tweet?.reply_to_tweet_id,
+      tweet?.replyToTweetId,
+      tweet?.reply_tweet_id,
+      tweet?.reply_to_status_id,
+      tweet?.reply_to_status_id_str,
+      tweet?.in_reply_to_status_id,
+      tweet?.in_reply_to_status_id_str,
+      tweet?.parent_tweet_id,
+      tweet?.parent_post_id,
+      reply?.tweet_id,
+      reply?.post_id,
+      reply?.status_id
+    ];
+    for (const value of candidates) {
+      const id = numericTweetId(value);
+      if (id) return id;
+    }
+    return '';
+  }
+
+  function replyContextCandidate(parent) {
+    if (!parent || typeof parent !== 'object' || Array.isArray(parent)) return null;
+    const parentUser = parent.user && typeof parent.user === 'object'
+      ? parent.user
+      : parent.author && typeof parent.author === 'object'
+        ? parent.author
+        : {};
+    const parentProfile = parentUser.profile_info && typeof parentUser.profile_info === 'object'
+      ? parentUser.profile_info
+      : {};
+    const handle = replyHandleFromValue(
+      parentUser.username
+        || parentUser.screen_name
+        || parentUser.screenName
+        || parentUser.handle
+        || parentProfile.Username
+        || parentProfile.username
+    );
+    const url = limitedText(parent.link || parent.url || '', 2_000);
+    const externalId = numericTweetId(parent.tweet_id || parent.post_id || parent.status_id)
+      || statusIdFromUrl(url)
+      || numericTweetId(parent.id);
+    const content = limitedText(parent.text || parent.content || '', 100_000).trim();
+    const translatedContent = limitedText(translation(parent) || parent.translated_text || '', 100_000);
+    const publishedAt = firstTimestamp([
+      parent.date,
+      parent.tweet_time,
+      parent.created_at,
+      parent.createdAt,
+      parent.publish_timestamp,
+      parent.publishTimestamp
+    ]) || 0;
+    if (!externalId && !content && !translatedContent && !url) return null;
+    return {
+      externalId,
+      author: {
+        id: limitedText(parentUser.id || parentUser.user_id || parentUser.profile_id || '', 240),
+        handle,
+        name: limitedText(
+          parentUser.name || parentUser.display_name || parentUser.displayName || parentProfile.Name || '',
+          500
+        ),
+        avatarUrl: limitedText(
+          parentUser.avatar || parentUser.profile_image_url_https || parentProfile.Avatar || '',
+          2_000
+        )
+      },
+      content,
+      translatedContent,
+      url: url || (handle && externalId ? `https://x.com/${handle}/status/${externalId}` : ''),
+      publishedAt
+    };
+  }
+
+  function normalizeReplyContext(tweet) {
+    const currentTweetId = numericTweetId(tweet?.tweet_id || tweet?.id);
+    const replyHandle = replyHandleFromValue(tweet?.reply_to);
+    const referencedId = explicitReplyParentId(tweet);
+    const normalizeCandidates = (values) => values
+      .map(replyContextCandidate)
+      .filter((candidate) => candidate && (!currentTweetId || candidate.externalId !== currentTweetId));
+    const compatible = (candidate) => {
+      const candidateHandle = replyHandleFromValue(candidate?.author?.handle);
+      if (replyHandle && candidateHandle && replyHandle.toLowerCase() !== candidateHandle.toLowerCase()) return false;
+      if (referencedId && candidate.externalId && referencedId !== candidate.externalId) return false;
+      return true;
+    };
+    const explicitCandidates = normalizeCandidates([
+      tweet?.reply_to_post,
+      tweet?.reply_to_tweet,
+      tweet?.parent_post,
+      tweet?.parent_tweet,
+      tweet?.ori_tweet,
+      tweet?.original_post,
+      tweet?.original_tweet
+    ]);
+    const explicitParent = explicitCandidates.find(compatible);
+    if (explicitParent) return explicitParent;
+
+    const quotedCandidates = normalizeCandidates([tweet?.quoted_post, tweet?.quoted_tweet]);
+    return quotedCandidates.find((candidate) => {
+      if (!compatible(candidate)) return false;
+      const candidateHandle = replyHandleFromValue(candidate?.author?.handle);
+      const handleVerified = Boolean(replyHandle && candidateHandle
+        && replyHandle.toLowerCase() === candidateHandle.toLowerCase());
+      const idVerified = Boolean(referencedId && candidate.externalId === referencedId);
+      return handleVerified || idVerified;
+    }) || null;
+  }
+
   function normalizePost(payload, feedSource = 'my') {
     if (!payload || typeof payload !== 'object') return null;
     const tweet = payload.tweet || {};
@@ -584,7 +719,26 @@
     }
     if (kind === 'delete' && (!/^\d{5,25}$/.test(tweetId) || stableEventAt === null)) return null;
     if (['follow', 'unfollow', 'profile'].includes(kind) && stableEventAt === null) return null;
-    const target = ['follow', 'unfollow'].includes(kind) ? normalizeTarget(payload, identity) : null;
+    const replyContext = kind === 'reply' ? normalizeReplyContext(tweet) : null;
+    const replyTargetHandle = kind === 'reply'
+      ? replyHandleFromValue(tweet.reply_to) || replyHandleFromValue(replyContext?.author?.handle)
+      : '';
+    const replyContextHandle = replyHandleFromValue(replyContext?.author?.handle);
+    const replyContextMatchesTarget = Boolean(replyTargetHandle && replyContextHandle
+      && replyTargetHandle.toLowerCase() === replyContextHandle.toLowerCase());
+    const replyTargetAuthor = replyContextMatchesTarget ? replyContext.author : {};
+    const target = ['follow', 'unfollow'].includes(kind)
+      ? normalizeTarget(payload, identity)
+      : kind === 'reply' && /^[a-z0-9_]{1,15}$/i.test(replyTargetHandle)
+        ? {
+            id: limitedText(replyTargetAuthor.id || '', 240),
+            handle: limitedText(replyTargetHandle, 240),
+            name: limitedText(replyTargetAuthor.name || '', 500),
+            avatarUrl: limitedText(replyTargetAuthor.avatarUrl || '', 2_000),
+            followersCount: 0,
+            url: `https://x.com/${replyTargetHandle}`
+          }
+        : null;
     if (identity?.target && target?.handle
       && identity.target.toLowerCase() !== target.handle.toLowerCase()) return null;
     const identityAuthor = handleText(handle || identity?.author).toLowerCase();
@@ -626,6 +780,7 @@
         followersCount: Number(user.followers_count || user.profile_info?.Stats?.Followers || 0)
       },
       ...(target ? { target } : {}),
+      ...(replyContext ? { replyContext } : {}),
       ...(kind === 'profile' ? { profileChanges: profile.changes, profileDetail: profile.detail } : {}),
       content,
       translatedContent: isAccountActivity ? '' : limitedText(translation(tweet) || payload.translated_text || '', 100_000),
@@ -636,7 +791,9 @@
         chain: limitedText(item.chain || '', 20).toLowerCase()
       })),
       chainTags: mentioned.map((item) => limitedText(item.chain || '', 20).toLowerCase()).filter(Boolean),
-      replyToExternalId: isAccountActivity ? '' : limitedText(tweet.reply_to?.[0] || '', 240),
+      replyToExternalId: kind === 'reply'
+        ? numericTweetId(replyContext?.externalId) || explicitReplyParentId(tweet)
+        : '',
       quotedExternalId: isAccountActivity ? '' : limitedText(tweet.quoted_post?.tweet_id || '', 240),
       repostExternalId: isAccountActivity ? '' : limitedText(tweet.retweeted_post?.tweet_id || '', 240),
       publishedAt,
@@ -680,6 +837,41 @@
     return merged;
   }
 
+  function replyParentId(post) {
+    return numericTweetId(post?.replyContext?.externalId) || numericTweetId(post?.replyToExternalId);
+  }
+
+  function replyContextsConflict(previousPost, incomingPost) {
+    const previousId = replyParentId(previousPost);
+    const incomingId = replyParentId(incomingPost);
+    if (previousId && incomingId) return previousId !== incomingId;
+    const previousHandle = replyHandleFromValue(previousPost?.replyContext?.author?.handle);
+    const incomingHandle = replyHandleFromValue(incomingPost?.replyContext?.author?.handle);
+    return Boolean(previousHandle && incomingHandle
+      && previousHandle.toLowerCase() !== incomingHandle.toLowerCase());
+  }
+
+  function mergeReplyContext(previous, incoming) {
+    const older = previous && typeof previous === 'object' && !Array.isArray(previous) ? previous : null;
+    const newer = incoming && typeof incoming === 'object' && !Array.isArray(incoming) ? incoming : null;
+    if (!older) return newer;
+    if (!newer) return older;
+    const olderId = numericTweetId(older.externalId);
+    const newerId = numericTweetId(newer.externalId);
+    if (olderId && newerId && olderId !== newerId) return newer;
+    const preferText = (next, current) => String(next || '').trim() || String(current || '').trim();
+    return {
+      externalId: newerId || olderId,
+      author: mergeSocialAccount(older.author, newer.author),
+      content: preferText(newer.content, older.content),
+      translatedContent: preferText(newer.translatedContent, older.translatedContent),
+      url: preferText(newer.url, older.url),
+      publishedAt: Number(newer.publishedAt || 0) > 0
+        ? Number(newer.publishedAt)
+        : Math.max(0, Number(older.publishedAt || 0))
+    };
+  }
+
   function mergeObservedPosts(previous, incoming) {
     if (!previous) return incoming;
     if (!incoming) return previous;
@@ -700,7 +892,27 @@
         ...(newer.feedSources || [])
       ])).sort()
     };
-    if (older.target || newer.target) merged.target = mergeSocialAccount(older.target, newer.target);
+    const replyConflict = replyContextsConflict(older, newer);
+    if (replyConflict) {
+      if (newer.replyContext) merged.replyContext = newer.replyContext;
+      else delete merged.replyContext;
+      merged.replyToExternalId = replyParentId(newer);
+    } else if (older.replyContext || newer.replyContext) {
+      merged.replyContext = mergeReplyContext(older.replyContext, newer.replyContext);
+      merged.replyToExternalId = numericTweetId(merged.replyContext?.externalId)
+        || replyParentId(newer)
+        || replyParentId(older);
+    } else if (older.kind === 'reply' || newer.kind === 'reply') {
+      merged.replyToExternalId = replyParentId(newer) || replyParentId(older);
+    }
+    if (older.target || newer.target) {
+      const olderTargetHandle = replyHandleFromValue(older.target?.handle);
+      const newerTargetHandle = replyHandleFromValue(newer.target?.handle);
+      merged.target = olderTargetHandle && newerTargetHandle
+        && olderTargetHandle.toLowerCase() !== newerTargetHandle.toLowerCase()
+        ? newer.target
+        : mergeSocialAccount(older.target, newer.target);
+    }
     if (older.profileChanges || newer.profileChanges) {
       merged.profileChanges = Array.from(new Set([
         ...(older.profileChanges || []),

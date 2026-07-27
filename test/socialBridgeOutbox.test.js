@@ -162,6 +162,20 @@ test('outbox persists complete relationship and profile activity through a stric
         unknown: { before: 'private-profile-before', after: 'private-profile-after' }
       }
     }),
+    post('reply-1', {
+      kind: 'reply',
+      target: { handle: 'parent_user', name: 'Parent User', cookie: 'private-reply-target' },
+      replyToExternalId: 'parent-1',
+      replyContext: {
+        externalId: 'parent-1',
+        author: { handle: 'parent_user', name: 'Parent User', cookie: 'private-parent-cookie' },
+        content: 'Parent text',
+        translatedContent: '父帖翻译',
+        url: 'https://x.com/parent_user/status/parent-1',
+        publishedAt: 90,
+        raw: 'private-reply-raw'
+      }
+    }),
     post('ordinary-tweet', {
       target: { handle: 'must-not-be-persisted' }
     })
@@ -169,11 +183,12 @@ test('outbox persists complete relationship and profile activity through a stric
 
   const records = (await outbox.readBatch()).records.map((record) => record.post);
   assert.equal(result.rejected, 0);
-  assert.equal(result.added, 4);
+  assert.equal(result.added, 5);
   assert.deepEqual(records.map((record) => record.externalId), [
     'follow:alice:bob',
     'unfollow:alice:carol',
     'profile:alice:100',
+    'reply-1',
     'ordinary-tweet'
   ]);
   assert.deepEqual(Object.keys(records[0].target).sort(), [
@@ -185,11 +200,18 @@ test('outbox persists complete relationship and profile activity through a stric
     avatar: { before: 'https://old.example/a.png', after: 'https://new.example/a.png' },
     bio: { before: 'old bio', after: 'new bio' }
   });
-  assert.equal(Object.hasOwn(records[3], 'target'), false);
+  assert.equal(records[3].target.handle, 'parent_user');
+  assert.equal(records[3].replyContext.content, 'Parent text');
+  assert.equal(records[3].replyContext.translatedContent, '父帖翻译');
+  assert.equal(Object.hasOwn(records[3].replyContext, 'raw'), false);
+  assert.equal(Object.hasOwn(records[4], 'target'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-target-cookie'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-target-authorization'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-profile-cookie'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-profile-before'), false);
+  assert.equal(JSON.stringify(storage.value).includes('private-reply-target'), false);
+  assert.equal(JSON.stringify(storage.value).includes('private-parent-cookie'), false);
+  assert.equal(JSON.stringify(storage.value).includes('private-reply-raw'), false);
   assert.equal(storage.value.debotSocialPostOutboxV1.schemaVersion, 2);
 });
 

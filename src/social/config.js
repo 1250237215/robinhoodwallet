@@ -6,6 +6,15 @@ function boundedInteger(value, fallback, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, Math.floor(number)));
 }
 
+function xHandles(value) {
+  const unique = new Set();
+  for (const raw of String(value || '').split(/[\s,]+/)) {
+    const handle = raw.trim().replace(/^@/, '').toLowerCase();
+    if (/^[a-z0-9_]{1,15}$/.test(handle)) unique.add(handle);
+  }
+  return [...unique].slice(0, 5);
+}
+
 export function createSocialConfig(env = process.env, { fallbackDirectory = null } = {}) {
   const dataFile = env.SOCIAL_DATA_FILE || path.join(
     fallbackDirectory || new URL('../../data', import.meta.url).pathname,
@@ -33,6 +42,13 @@ export function createSocialConfig(env = process.env, { fallbackDirectory = null
       60 * 60 * 1_000,
       60_000,
       24 * 60 * 60 * 1_000
+    ),
+    xFastHandles: xHandles(env.SOCIAL_X_FAST_HANDLES),
+    xFastPollIntervalMs: boundedInteger(env.SOCIAL_X_FAST_POLL_INTERVAL_MS, 500, 250, 10_000),
+    xFastMaxInFlight: boundedInteger(env.SOCIAL_X_FAST_MAX_IN_FLIGHT, 3, 1, 3),
+    xFastRequestTimeoutMs: boundedInteger(env.SOCIAL_X_FAST_REQUEST_TIMEOUT_MS, 3_500, 1_000, 15_000),
+    xReplyEnrichmentEnabled: !['0', 'false', 'off', 'no'].includes(
+      String(env.SOCIAL_X_REPLY_ENRICHMENT || 'true').trim().toLowerCase()
     )
   };
 }

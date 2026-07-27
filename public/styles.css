@@ -3470,6 +3470,97 @@ select:hover {
   line-height: 1.55;
 }
 
+.social-reply-context {
+  position: relative;
+  margin-top: 10px;
+  padding: 9px 34px 9px 11px;
+  border-left: 3px solid var(--social-accent);
+  background: #f7f9f8;
+  color: var(--ink);
+}
+
+.social-reply-target {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.social-reply-target svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: var(--social-accent);
+}
+
+.social-reply-target a,
+.social-reply-target strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--social-accent);
+  font-weight: 700;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.social-reply-target a:hover {
+  text-decoration: underline;
+}
+
+.social-reply-original,
+.social-reply-translation {
+  margin-top: 8px;
+}
+
+.social-reply-original b,
+.social-reply-translation b {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.social-reply-original p,
+.social-reply-translation p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.social-reply-original p {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.social-reply-translation p {
+  color: #52605a;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.social-reply-source {
+  position: absolute;
+  top: 8px;
+  right: 9px;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  color: var(--muted);
+}
+
+.social-reply-source:hover {
+  color: var(--social-accent);
+}
+
+.social-reply-source svg {
+  width: 13px;
+  height: 13px;
+}
+
 .social-activity-content,
 .social-profile-activity {
   min-height: 42px;

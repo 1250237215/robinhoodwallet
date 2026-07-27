@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 
 import { createSocialStore } from './store.js';
+import { createXProfileMonitor } from './xProfileMonitor.js';
+import { createXReplyEnricher, replyContextNeedsEnrichment } from './xReplyEnricher.js';
 
 const DEBOT_ANALYSIS_CAPABILITY = 'debot-analysis-v1';
 const DEBOT_TOKEN_DETAIL = 'debot.token_detail.v1';
@@ -149,12 +151,32 @@ function connectionState(config, bridge, now) {
   };
 }
 
-export function createSocialService({ config, store = null, now = () => Date.now() }) {
+export function createSocialService({
+  config,
+  store = null,
+  now = () => Date.now(),
+  fetchImpl = globalThis.fetch,
+  xProfileMonitor = null,
+  xReplyEnricher = null
+}) {
   if (!config) throw new TypeError('Social config is required');
   const activeStore = store || createSocialStore(config.dataFile, { now });
   const subscribers = new Set();
   const debotWaiters = new Map();
   let cleanupTimer = null;
+  let xFastTimer = null;
+  let xFastInFlight = 0;
+  const xFastAbortController = new AbortController();
+  const xFastStats = {
+    polls: 0,
+    requests: 0,
+    errors: 0,
+    posts: 0,
+    lastStartedAt: null,
+    lastCompletedAt: null,
+    lastPostAt: null,
+    lastErrorCode: ''
+  };
   let closed = false;
   const debotConfig = {
     jobLeaseMs: Number(config.debotJobLeaseMs) || 120_000,
@@ -258,7 +280,98 @@ export function createSocialService({ config, store = null, now = () => Date.now
     return changes;
   }
 
-  const service = {
+  const xFastHandles = Array.isArray(config.xFastHandles) ? config.xFastHandles : [];
+  const activeXProfileMonitor = xProfileMonitor || (xFastHandles.length
+    ? createXProfileMonitor({
+        accounts: xFastHandles,
+        fetchImpl,
+        concurrency: Math.min(2, xFastHandles.length),
+        timeoutMs: Number(config.xFastRequestTimeoutMs) || 3_500
+      })
+    : null);
+  let service = null;
+  const activeXReplyEnricher = xReplyEnricher || (config.xReplyEnrichmentEnabled === true
+    ? createXReplyEnricher({
+        fetchImpl,
+        onEnriched: (post) => service?.ingestPosts([post], { skipReplyEnrichment: true })
+      })
+    : null);
+  const allowedXFastHandles = new Set(xFastHandles.map((handle) => String(handle).toLowerCase()));
+
+  function confirmFastXPosts(handle, tweetIds) {
+    if (!tweetIds.length) return;
+    if (typeof activeXProfileMonitor?.confirm === 'function') {
+      activeXProfileMonitor.confirm(handle, tweetIds);
+      return;
+    }
+    if (typeof activeXProfileMonitor?.remember === 'function') {
+      for (const tweetId of tweetIds) activeXProfileMonitor.remember(handle, tweetId);
+    }
+  }
+
+  function handleFastXResult(result) {
+    const status = String(result?.status || '');
+    if (result?.requestMade !== false && status !== 'backoff' && status !== 'inflight') {
+      xFastStats.requests += 1;
+    }
+    if (status === 'error' || status === 'empty') {
+      xFastStats.errors += 1;
+      xFastStats.lastErrorCode = status === 'empty'
+        ? 'EMPTY_PROFILE'
+        : String(result?.error?.code || 'X_PROFILE_ERROR').slice(0, 80);
+    }
+    if (closed || status !== 'new') return;
+    const handle = String(result.handle || '').toLowerCase();
+    if (!allowedXFastHandles.has(handle)) return;
+    const discoveredAt = Number.isFinite(Number(result.checkedAt)) ? Number(result.checkedAt) : now();
+    const posts = (Array.isArray(result.posts) ? result.posts : result.post ? [result.post] : [])
+      .filter((post) => String(post.author?.handle || '').toLowerCase() === handle)
+      .map((post) => ({ ...post, feedSources: ['my'], discoveredAt, receivedAt: discoveredAt }));
+    if (!posts.length) return;
+    try {
+      const ingestion = service.ingestPosts(posts);
+      const persistedIds = [...new Set((ingestion.posts || [])
+        .map((post) => String(post.externalId || ''))
+        .filter((externalId) => /^\d{5,25}$/.test(externalId)))];
+      confirmFastXPosts(handle, persistedIds);
+      if (persistedIds.length) {
+        xFastStats.posts += persistedIds.length;
+        xFastStats.lastPostAt = now();
+      }
+      if (persistedIds.length < posts.length) {
+        xFastStats.errors += posts.length - persistedIds.length;
+        xFastStats.lastErrorCode = 'FAST_X_NOT_PERSISTED';
+      }
+    } catch (error) {
+      xFastStats.errors += 1;
+      xFastStats.lastErrorCode = String(error?.code || error?.name || 'FAST_X_PERSIST_FAILED').slice(0, 80);
+      throw error;
+    }
+  }
+
+  function pollFastXProfiles() {
+    if (closed || !activeXProfileMonitor || !xFastHandles.length) return;
+    const maximum = Math.max(1, Math.min(3, Number(config.xFastMaxInFlight) || 3));
+    if (xFastInFlight >= maximum) return;
+    xFastInFlight += 1;
+    xFastStats.polls += 1;
+    xFastStats.lastStartedAt = now();
+    void activeXProfileMonitor.pollOnce(xFastHandles, {
+      signal: xFastAbortController.signal,
+      onResult: handleFastXResult
+    })
+      .catch((error) => {
+        if (closed) return;
+        xFastStats.errors += 1;
+        xFastStats.lastErrorCode = String(error?.code || error?.name || 'X_PROFILE_ERROR').slice(0, 80);
+      })
+      .finally(() => {
+        xFastInFlight = Math.max(0, xFastInFlight - 1);
+        xFastStats.lastCompletedAt = now();
+      });
+  }
+
+  service = {
     config: {
       dataFile: config.dataFile,
       retentionDays: config.retentionDays,
@@ -266,7 +379,9 @@ export function createSocialService({ config, store = null, now = () => Date.now
       commandLeaseMs: config.commandLeaseMs,
       debotJobLeaseMs: debotConfig.jobLeaseMs,
       debotRequestTimeoutMs: debotConfig.requestTimeoutMs,
-      debotPendingCap: debotConfig.pendingCap
+      debotPendingCap: debotConfig.pendingCap,
+      xFastHandles: [...xFastHandles],
+      xFastPollIntervalMs: Number(config.xFastPollIntervalMs) || 500
     },
     store: activeStore,
     get paired() {
@@ -281,6 +396,7 @@ export function createSocialService({ config, store = null, now = () => Date.now
         status: 'ready',
         bridge: service.getConnection(),
         counts: activeStore.getCounts(),
+        fastX: service.getFastXStatus(),
         posts: activeStore.listPosts({ limit: postLimit, watchlistOnly: true }),
         watchlist: activeStore.listWatchlist(),
         latestChangeId: activeStore.getLatestChangeId(),
@@ -293,6 +409,16 @@ export function createSocialService({ config, store = null, now = () => Date.now
     },
     listWatchlist(filters) {
       return activeStore.listWatchlist(filters);
+    },
+    getFastXStatus() {
+      return {
+        enabled: Boolean(activeXProfileMonitor && xFastHandles.length),
+        handles: [...xFastHandles],
+        pollIntervalMs: Number(config.xFastPollIntervalMs) || 500,
+        maxInFlight: Math.max(1, Math.min(3, Number(config.xFastMaxInFlight) || 3)),
+        inFlight: xFastInFlight,
+        ...xFastStats
+      };
     },
     addWatchAccounts(accounts) {
       const latestBefore = activeStore.getLatestChangeId();
@@ -317,10 +443,15 @@ export function createSocialService({ config, store = null, now = () => Date.now
       publishAfter(latestBefore);
       return result ? { ok: true, ...result, counts: activeStore.getCounts() } : null;
     },
-    ingestPosts(posts) {
+    ingestPosts(posts, { skipReplyEnrichment = false } = {}) {
       const latestBefore = activeStore.getLatestChangeId();
       const results = activeStore.upsertPosts(posts);
       const changes = publishAfter(latestBefore);
+      if (!skipReplyEnrichment) {
+        activeXReplyEnricher?.enqueue(
+          results.map((result) => result.post).filter(replyContextNeedsEnrichment)
+        );
+      }
       const summary = { created: 0, updated: 0, deleted: 0, restored: 0, unchanged: 0, filtered: 0 };
       for (const result of results) summary[result.action] += 1;
       return {
@@ -525,12 +656,29 @@ export function createSocialService({ config, store = null, now = () => Date.now
       service.cleanup();
       cleanupTimer = setInterval(() => service.cleanup(), config.cleanupIntervalMs);
       cleanupTimer.unref?.();
+      activeXReplyEnricher?.enqueue(
+        activeStore.listPosts({ limit: 100, watchlistOnly: true })
+          .filter(replyContextNeedsEnrichment)
+          .slice(0, 20)
+      );
+      if (activeXProfileMonitor && xFastHandles.length) {
+        pollFastXProfiles();
+        xFastTimer = setInterval(
+          pollFastXProfiles,
+          Math.max(250, Number(config.xFastPollIntervalMs) || 500)
+        );
+        xFastTimer.unref?.();
+      }
     },
     close() {
       if (closed) return;
       closed = true;
       if (cleanupTimer) clearInterval(cleanupTimer);
       cleanupTimer = null;
+      if (xFastTimer) clearInterval(xFastTimer);
+      xFastTimer = null;
+      xFastAbortController.abort(abortError());
+      activeXReplyEnricher?.close?.();
       for (const waiters of debotWaiters.values()) {
         for (const waiter of [...waiters]) {
           waiter.reject(new DeBotBridgeError(

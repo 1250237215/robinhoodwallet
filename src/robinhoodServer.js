@@ -731,7 +731,7 @@ export async function startRobinhoodStandaloneServer(
   const config = createRobinhoodConfig(env);
   const store = createRobinhoodStore(config.dataFile);
   const socialConfig = createSocialConfig(env, { fallbackDirectory: path.dirname(config.dataFile) });
-  const socialService = createSocialService({ config: socialConfig });
+  const socialService = createSocialService({ config: socialConfig, fetchImpl });
   const debotBridgeTimeoutMs = Math.min(
     110_000,
     Math.max(5_000, Number(env.ROBINHOOD_DEBOT_BRIDGE_TIMEOUT_MS) || 90_000)

@@ -124,15 +124,29 @@ function safeProfileDetail(value, changes) {
   return normalized;
 }
 
+function safeReplyContext(value) {
+  const context = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const normalized = {
+    externalId: text(context.externalId, 240),
+    author: safeSocialAccount(context.author),
+    content: text(context.content),
+    translatedContent: text(context.translatedContent),
+    url: text(context.url, 2_000),
+    publishedAt: number(context.publishedAt)
+  };
+  return normalized.externalId || normalized.author.handle || normalized.content ? normalized : null;
+}
+
 function safePost(value) {
   const post = value && typeof value === 'object' ? value : {};
   const kind = text(post.kind, 20).toLowerCase();
   if (!SOCIAL_EVENT_KINDS.has(kind)) return null;
   const author = post.author && typeof post.author === 'object' ? post.author : {};
   const safeAuthor = safeSocialAccount(author);
-  const target = ['follow', 'unfollow'].includes(kind)
+  const target = ['follow', 'unfollow', 'reply'].includes(kind)
     ? safeSocialAccount(post.target, { includeUrl: true })
     : null;
+  const replyContext = kind === 'reply' ? safeReplyContext(post.replyContext) : null;
   const profileChanges = kind === 'profile' ? safeProfileChanges(post.profileChanges) : [];
   if (['follow', 'unfollow'].includes(kind)
     && (!SOCIAL_HANDLE_PATTERN.test(safeAuthor.handle) || !SOCIAL_HANDLE_PATTERN.test(target.handle))) return null;
@@ -143,6 +157,7 @@ function safePost(value) {
     kind,
     author: safeAuthor,
     ...(target ? { target } : {}),
+    ...(replyContext ? { replyContext } : {}),
     ...(kind === 'profile' ? {
       profileChanges,
       profileDetail: safeProfileDetail(post.profileDetail, profileChanges)

@@ -43,7 +43,12 @@ test('social config uses an independent database and bounded bridge settings', (
     SOCIAL_DEBOT_REQUEST_TIMEOUT_MS: '35000',
     SOCIAL_DEBOT_TOKEN_CACHE_TTL_MS: '65000',
     SOCIAL_DEBOT_WALLET_CACHE_TTL_MS: '32000',
-    SOCIAL_DEBOT_PENDING_CAP: '300'
+    SOCIAL_DEBOT_PENDING_CAP: '300',
+    SOCIAL_X_FAST_HANDLES: '@1874a3, Crypto_Cat888 invalid-handle!',
+    SOCIAL_X_FAST_POLL_INTERVAL_MS: '100',
+    SOCIAL_X_FAST_MAX_IN_FLIGHT: '99',
+    SOCIAL_X_FAST_REQUEST_TIMEOUT_MS: '4200',
+    SOCIAL_X_REPLY_ENRICHMENT: 'off'
   });
   assert.equal(config.dataFile, '/tmp/independent-social.sqlite');
   assert.equal(config.bridgeToken, 'device-secret');
@@ -55,6 +60,11 @@ test('social config uses an independent database and bounded bridge settings', (
   assert.equal(config.debotTokenCacheTtlMs, 65_000);
   assert.equal(config.debotWalletCacheTtlMs, 32_000);
   assert.equal(config.debotPendingCap, 300);
+  assert.deepEqual(config.xFastHandles, ['1874a3', 'crypto_cat888']);
+  assert.equal(config.xFastPollIntervalMs, 250);
+  assert.equal(config.xFastMaxInFlight, 3);
+  assert.equal(config.xFastRequestTimeoutMs, 4_200);
+  assert.equal(config.xReplyEnrichmentEnabled, false);
 });
 
 test('social feed sources normalize aliases, flags, ordering and missing values', () => {
@@ -334,6 +344,106 @@ test('older bridge retries cannot restore a newer deletion tombstone', (t) => {
   assert.equal(restored.post.deleted, false);
 });
 
+test('reply targets and parent post context persist and merge without clearing richer data', (t) => {
+  const { store, setNow } = fixture(t);
+  const replyId = '2081700497174733126';
+  const parentId = '2081696375595524505';
+  const created = store.upsertPosts([{
+    source: 'twitter',
+    id: replyId,
+    kind: 'reply',
+    authorHandle: 'Crypto_Cat888',
+    text: 'You use cat as pfp',
+    replyToExternalId: 'iruletrenches',
+    publishedAt: 1_785_151_049_000
+  }])[0];
+  assert.equal(created.post.target.handle, 'iruletrenches');
+  assert.deepEqual(created.post.replyContext, {});
+
+  setNow(1_785_151_051_000);
+  const enriched = store.upsertPosts([{
+    source: 'twitter',
+    id: replyId,
+    kind: 'reply',
+    target: { handle: 'iruletrenches', name: 'Miyamoto' },
+    replyToExternalId: parentId,
+    replyContext: {
+      externalId: parentId,
+      author: { handle: 'iruletrenches', name: 'Miyamoto' },
+      content: "It's a dogs world",
+      translatedContent: '这是狗狗的世界',
+      url: `https://x.com/iruletrenches/status/${parentId}`,
+      publishedAt: 1_785_150_066_000
+    },
+    sourceUpdatedAt: 1_785_151_049_000
+  }])[0];
+  assert.equal(enriched.action, 'updated');
+  assert.equal(enriched.post.replyToExternalId, parentId);
+  assert.equal(enriched.post.target.name, 'Miyamoto');
+  assert.equal(enriched.post.replyContext.content, "It's a dogs world");
+  assert.equal(enriched.post.replyContext.translatedContent, '这是狗狗的世界');
+
+  const partial = store.upsertPosts([{
+    source: 'twitter',
+    id: replyId,
+    kind: 'reply',
+    replyContext: { externalId: parentId, author: { handle: 'iruletrenches' } },
+    sourceUpdatedAt: 1_785_151_049_000
+  }])[0];
+  assert.equal(partial.action, 'unchanged');
+  assert.equal(partial.post.replyContext.content, "It's a dogs world");
+  assert.equal(partial.post.replyContext.translatedContent, '这是狗狗的世界');
+});
+
+test('reply context never mixes different parent tweets and stale enrichment still updates its sidecar', (t) => {
+  const { store, setNow } = fixture(t);
+  const replyId = '2081700497174733126';
+  const firstParentId = '2081696375595524505';
+  const correctedParentId = '2081697000000000000';
+  store.upsertPosts([{
+    source: 'twitter',
+    id: replyId,
+    kind: 'reply',
+    authorHandle: 'Crypto_Cat888',
+    text: 'newest reply text',
+    sourceUpdatedAt: 1_785_151_052_000,
+    replyToExternalId: firstParentId,
+    replyContext: {
+      externalId: firstParentId,
+      author: { handle: 'wrong_parent' },
+      content: 'old parent content',
+      translatedContent: '旧父帖',
+      url: `https://x.com/wrong_parent/status/${firstParentId}`
+    }
+  }]);
+
+  setNow(1_785_151_053_000);
+  const corrected = store.upsertPosts([{
+    source: 'twitter',
+    id: replyId,
+    kind: 'reply',
+    target: { handle: 'real_parent', name: 'Real Parent' },
+    replyToExternalId: correctedParentId,
+    replyContext: {
+      externalId: correctedParentId,
+      author: { handle: 'real_parent' },
+      content: 'correct parent content',
+      url: `https://x.com/real_parent/status/${correctedParentId}`
+    },
+    sourceUpdatedAt: 1_785_151_050_000
+  }])[0];
+
+  assert.equal(corrected.action, 'updated');
+  assert.equal(corrected.post.content, 'newest reply text');
+  assert.equal(corrected.post.sourceUpdatedAt, 1_785_151_052_000);
+  assert.equal(corrected.post.replyToExternalId, correctedParentId);
+  assert.equal(corrected.post.replyContext.externalId, correctedParentId);
+  assert.equal(corrected.post.replyContext.content, 'correct parent content');
+  assert.equal(corrected.post.replyContext.translatedContent, '');
+  assert.equal(corrected.post.replyContext.url, `https://x.com/real_parent/status/${correctedParentId}`);
+  assert.equal(corrected.post.target.handle, 'real_parent');
+});
+
 test('explicit contract metadata wins over duplicate addresses detected in post text', (t) => {
   const { store } = fixture(t);
   const address = '0x1111111111111111111111111111111111111111';
@@ -421,6 +531,7 @@ test('feed membership survives database reopen and legacy schema migration', (t)
 
   const legacy = new DatabaseSync(filename);
   legacy.exec('ALTER TABLE social_posts DROP COLUMN feed_sources_json');
+  legacy.exec('ALTER TABLE social_posts DROP COLUMN reply_context_json');
   legacy.exec('ALTER TABLE social_posts DROP COLUMN discovered_at');
   legacy.exec('ALTER TABLE social_posts DROP COLUMN ingested_at');
   legacy.close();
@@ -433,6 +544,9 @@ test('feed membership survives database reopen and legacy schema migration', (t)
   const column = store.db.prepare('PRAGMA table_info(social_posts)').all()
     .find((item) => item.name === 'feed_sources_json');
   assert.equal(Boolean(column), true);
+  const replyContextColumn = store.db.prepare('PRAGMA table_info(social_posts)').all()
+    .find((item) => item.name === 'reply_context_json');
+  assert.equal(Boolean(replyContextColumn), true);
   const timestampColumns = store.db.prepare('PRAGMA table_info(social_posts)').all()
     .filter((item) => ['discovered_at', 'ingested_at'].includes(item.name));
   assert.equal(timestampColumns.length, 2);

@@ -6,6 +6,25 @@ const indexHtml = fs.readFileSync(new URL('../public/index.html', import.meta.ur
 const appJs = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 const stylesCss = fs.readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
 
+function appSourceBetween(start, end) {
+  const startIndex = appJs.indexOf(start);
+  const endIndex = appJs.indexOf(end, startIndex);
+  assert.notEqual(startIndex, -1, `missing app source marker: ${start}`);
+  assert.notEqual(endIndex, -1, `missing app source marker: ${end}`);
+  return appJs.slice(startIndex, endIndex);
+}
+
+function executableSocialReplyMarkup() {
+  const source = `
+    ${appSourceBetween('function escapeHtml(value)', 'function finiteNumber(')}
+    const SOCIAL_HANDLE_PATTERN = /^[a-z0-9_]{1,15}$/i;
+    ${appSourceBetween('function normalizeSocialHandle(value)', 'function decodeSocialActivityExternalId(')}
+    ${appSourceBetween('function socialXStatusIdentity(value)', 'function visibleSocialPosts(')}
+    return socialReplyMarkup;
+  `;
+  return Function(source)();
+}
+
 test('home is the manual Robinhood smart-money workspace', () => {
   assert.match(indexHtml, /<title>Robinhood 聪明钱雷达<\/title>/);
   assert.match(indexHtml, /<h1 id="brand-title">Robinhood 聪明钱雷达<\/h1>/);
@@ -1227,11 +1246,94 @@ test('social cards show DeBot discovery, VPS ingestion and browser receipt laten
   assert.match(appJs, /webReceiptMode: 'snapshot'/);
   assert.match(appJs, /webReceiptMode: mode/);
   assert.match(appJs, /<div class="social-latency-trace" aria-label="消息传输时间">/);
-  assert.match(appJs, /const firstTraceLabel = isInitialReceipt \? 'DeBot 发现' : '网页首次接收'/);
+  assert.match(appJs, /const firstTraceLabel = isInitialReceipt \? '首次发现' : '网页首次接收'/);
+  assert.match(appJs, /function socialReplyMarkup\(post\)/);
+  assert.match(appJs, /被回复原文/);
+  assert.match(appJs, /原文翻译/);
+  assert.match(stylesCss, /\.social-reply-context \{/);
   assert.match(appJs, /const vpsLabel = isInitialReceipt \? 'VPS 入库' : '本次 VPS 变更'/);
   assert.match(appJs, /\? '网页首次接收'/);
   assert.match(stylesCss, /\.social-latency-trace \{[\s\S]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
   assert.match(stylesCss, /\.social-latency-trace em \{[\s\S]*font-variant-numeric|\.social-latency-trace \{[\s\S]*font-variant-numeric: tabular-nums/);
+});
+
+test('reply cards keep the displayed parent, profile link and post link on one identity', () => {
+  const renderReply = executableSocialReplyMarkup();
+  const matching = renderReply({
+    kind: 'reply',
+    target: {
+      handle: 'parent_user',
+      name: 'Parent User',
+      url: 'https://x.com/parent_user'
+    },
+    replyContext: {
+      externalId: '12345',
+      author: { handle: 'parent_user', name: 'Parent User' },
+      url: 'https://x.com/parent_user/status/12345',
+      content: 'Parent post'
+    }
+  });
+  assert.match(matching, /href="https:\/\/x\.com\/parent_user"/);
+  assert.match(matching, /href="https:\/\/x\.com\/parent_user\/status\/12345"/);
+  assert.match(matching, />Parent User<\/a>/);
+  assert.match(matching, />@parent_user<\/span>/);
+
+  const conflicting = renderReply({
+    kind: 'reply',
+    target: {
+      handle: 'wrong_parent',
+      name: 'Wrong Parent',
+      url: 'https://x.com/wrong_parent'
+    },
+    replyContext: {
+      externalId: '12346',
+      author: { handle: 'correct_parent', name: 'Correct Parent' },
+      url: 'https://x.com/correct_parent/status/12346',
+      content: 'Correct parent post'
+    }
+  });
+  assert.match(conflicting, /href="https:\/\/x\.com\/correct_parent"/);
+  assert.match(conflicting, /href="https:\/\/x\.com\/correct_parent\/status\/12346"/);
+  assert.match(conflicting, />Correct Parent<\/a>/);
+  assert.doesNotMatch(conflicting, /wrong_parent|Wrong Parent/i);
+
+  const mismatchedContextUrl = renderReply({
+    kind: 'reply',
+    target: { handle: 'wrong_parent', url: 'https://x.com/wrong_parent' },
+    replyContext: {
+      externalId: '12347',
+      author: { handle: 'correct_parent' },
+      url: 'https://x.com/other_parent/status/99999'
+    }
+  });
+  assert.match(mismatchedContextUrl, /href="https:\/\/x\.com\/correct_parent\/status\/12347"/);
+  assert.doesNotMatch(mismatchedContextUrl, /wrong_parent|other_parent|99999/i);
+});
+
+test('reply card executable markup escapes parent-controlled names and text', () => {
+  const renderReply = executableSocialReplyMarkup();
+  const markup = renderReply({
+    kind: 'reply',
+    target: {
+      handle: 'wrong_parent',
+      name: '<img src=x onerror="target()">',
+      url: 'javascript:target()'
+    },
+    replyContext: {
+      externalId: '54321',
+      author: {
+        handle: 'safe_parent',
+        name: 'Parent <script>"quoted" & \'single\'</script>'
+      },
+      url: 'https://x.com/safe_parent/status/54321',
+      content: '<script>alert("original")</script> & text',
+      translatedContent: '<img src=x onerror="translation()">'
+    }
+  });
+  assert.match(markup, /Parent &lt;script&gt;&quot;quoted&quot; &amp; &#39;single&#39;&lt;\/script&gt;/);
+  assert.match(markup, /&lt;script&gt;alert\(&quot;original&quot;\)&lt;\/script&gt; &amp; text/);
+  assert.match(markup, /&lt;img src=x onerror=&quot;translation\(\)&quot;&gt;/);
+  assert.doesNotMatch(markup, /<script|<img|wrong_parent|target\(\)/i);
 });
 
 test('chain and social elapsed times advance every second without rerendering either feed', () => {

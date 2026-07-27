@@ -292,6 +292,51 @@ function normalizeSocialTarget(input, inferredTargetHandle = '') {
   };
 }
 
+function normalizeReplyContext(input) {
+  const specified = hasOwn(input, ['replyContext', 'reply_context']);
+  if (!specified) return { specified, value: {} };
+  const context = firstValue(input, ['replyContext', 'reply_context']);
+  if (!context || typeof context !== 'object' || Array.isArray(context)) {
+    throw new TypeError('replyContext must be an object');
+  }
+  const authorInput = context.author && typeof context.author === 'object' && !Array.isArray(context.author)
+    ? context.author
+    : {};
+  const externalId = text(firstValue(context, ['externalId', 'postId', 'tweetId', 'id']), 240);
+  const normalizedExternalId = /^\d{5,25}$/.test(externalId) ? externalId : '';
+  const rawUrl = normalizeUrl(firstValue(context, ['url', 'postUrl', 'permalink']));
+  const urlIdentity = /^https:\/\/(?:www\.)?(?:x|twitter)\.com\/[a-z0-9_]{1,15}\/(?:status|statuses)\/(\d{5,25})(?:[/?#]|$)/i.exec(rawUrl);
+  const urlStatusId = urlIdentity?.[1] || '';
+  const url = urlIdentity && (!normalizedExternalId || urlStatusId === normalizedExternalId) ? rawUrl : '';
+  const rawAuthorHandle = text(
+    firstValue(context, ['authorHandle', 'username', 'handle'], authorInput.handle || authorInput.username),
+    240
+  ).replace(/^@/, '');
+  return {
+    specified,
+    value: {
+      externalId: normalizedExternalId,
+      author: {
+        id: text(firstValue(context, ['authorId'], authorInput.id || authorInput.userId), 240),
+        handle: /^[a-z0-9_]{1,15}$/i.test(rawAuthorHandle) ? rawAuthorHandle : '',
+        name: text(firstValue(context, ['authorName'], authorInput.name || authorInput.displayName), 500),
+        avatarUrl: normalizeUrl(firstValue(
+          context,
+          ['authorAvatarUrl'],
+          authorInput.avatarUrl || authorInput.avatar || authorInput.profileImageUrl
+        ))
+      },
+      content: text(firstValue(context, ['content', 'text', 'body']), 100_000),
+      translatedContent: text(
+        firstValue(context, ['translatedContent', 'translatedText', 'translation']),
+        100_000
+      ),
+      url,
+      publishedAt: normalizeTimestamp(firstValue(context, ['publishedAt', 'createdAt', 'timestamp']), 0) || 0
+    }
+  };
+}
+
 function normalizeMedia(media) {
   if (!Array.isArray(media)) return [];
   return media.slice(0, 12).map((item) => {
@@ -444,10 +489,16 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
       throw new TypeError('Social profile activity identity conflicts with its author');
     }
   }
+  const rawReplyToExternalId = text(firstValue(input, ['replyToExternalId', 'replyToId']), 240);
+  const inferredReplyTarget = kind === 'reply' && /^[a-z0-9_]{1,15}$/i.test(rawReplyToExternalId)
+    ? rawReplyToExternalId
+    : '';
+  const replyToExternalId = /^\d{5,25}$/.test(rawReplyToExternalId) ? rawReplyToExternalId : '';
   const target = normalizeSocialTarget(
     input,
-    SOCIAL_ACTIVITY_KINDS.has(kind) ? activityIdentity?.targetHandle : ''
+    SOCIAL_ACTIVITY_KINDS.has(kind) ? activityIdentity?.targetHandle : inferredReplyTarget
   );
+  const replyContext = normalizeReplyContext(input);
   if (activityIdentity && target.handle
     && target.handle.toLowerCase() !== activityIdentity.targetHandle.toLowerCase()) {
     throw new TypeError('Social activity target conflicts with its externalId');
@@ -505,6 +556,7 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
       'is_all'
     ],
     replyToExternalId: ['replyToExternalId', 'replyToId'],
+    replyContext: ['replyContext', 'reply_context'],
     quotedExternalId: ['quotedExternalId', 'quotedId'],
     repostExternalId: ['repostExternalId', 'repostedId'],
     profileChanges: ['profileChanges', 'profile_changes'],
@@ -550,6 +602,7 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
     provided.add('target');
     if (!suppliedAuthorHandle) provided.add('authorHandle');
   }
+  if (inferredReplyTarget) provided.add('target');
   if (deletionSpecified) provided.add('deletedAt');
   return {
     source,
@@ -575,7 +628,8 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
     contractAddresses: contracts,
     chainTags: normalizeChainTags(firstValue(input, ['chainTags', 'chains'], []), contracts),
     feedSources: postFeedSources(input),
-    replyToExternalId: text(firstValue(input, ['replyToExternalId', 'replyToId']), 240),
+    replyToExternalId,
+    replyContext: replyContext.value,
     quotedExternalId: text(firstValue(input, ['quotedExternalId', 'quotedId']), 240),
     repostExternalId: text(firstValue(input, ['repostExternalId', 'repostedId']), 240),
     target,

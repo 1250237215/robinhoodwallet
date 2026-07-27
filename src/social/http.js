@@ -398,6 +398,7 @@ export function createSocialApiHandler({
         sendJson(res, 200, {
           ok: true,
           bridge: service.getConnection(),
+          fastX: service.getFastXStatus?.() || { enabled: false },
           counts: service.store.getCounts(),
           latestChangeId: service.store.getLatestChangeId(),
           streamEpoch,

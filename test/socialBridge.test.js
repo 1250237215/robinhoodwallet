@@ -265,7 +265,7 @@ function createTimelineBridgeHarness(initialHandler, {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.5.0');
+  assert.equal(manifest.version, '1.6.0');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -724,7 +724,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.requestId === 'page-personal-probe'
       && message.payload.ok === true)));
   const personalHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.equal(personalHeartbeat.payload.version, '1.5.0');
+  assert.equal(personalHeartbeat.payload.version, '1.6.0');
   assert.deepEqual(Array.from(personalHeartbeat.payload.capabilities), [
     'posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1'
   ]);
@@ -869,6 +869,185 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const translatedDelivery = deliveryFor(translatedSocketId);
   assert.ok(translatedDelivery);
   acknowledge(translatedDelivery);
+
+  const replySocketId = '1900000000000000106';
+  const replyParentId = '1900000000000000006';
+  sendPersonalActivity({
+    ...incoming,
+    doc_id: replySocketId,
+    tweet: {
+      ...incoming.tweet,
+      tweet_id: replySocketId,
+      is_reply: true,
+      reply_to: ['parent_user'],
+      quoted_post: {
+        tweet_id: replyParentId,
+        text: 'Parent post in English',
+        text_translate: '父帖中文翻译',
+        link: `https://x.com/parent_user/status/${replyParentId}`,
+        date: 1_784_299_900,
+        user: {
+          id: 'parent-1',
+          username: 'parent_user',
+          name: 'Parent User',
+          avatar: 'https://pbs.twimg.com/profile_images/parent.jpg'
+        }
+      }
+    }
+  });
+  const replyDelivery = deliveryFor(replySocketId);
+  assert.ok(replyDelivery);
+  const replyPost = replyDelivery.payload.posts[0];
+  assert.equal(replyPost.kind, 'reply');
+  assert.equal(replyPost.target.handle, 'parent_user');
+  assert.equal(replyPost.replyToExternalId, replyParentId);
+  assert.deepEqual(JSON.parse(JSON.stringify(replyPost.replyContext)), {
+    externalId: replyParentId,
+    author: {
+      id: 'parent-1',
+      handle: 'parent_user',
+      name: 'Parent User',
+      avatarUrl: 'https://pbs.twimg.com/profile_images/parent.jpg'
+    },
+    content: 'Parent post in English',
+    translatedContent: '父帖中文翻译',
+    url: `https://x.com/parent_user/status/${replyParentId}`,
+    publishedAt: 1_784_299_900_000
+  });
+  acknowledge(replyDelivery);
+
+  const explicitParentSocketId = '1900000000000000107';
+  const explicitParentId = '1900000000000000007';
+  sendPersonalActivity({
+    ...incoming,
+    doc_id: explicitParentSocketId,
+    tweet: {
+      ...incoming.tweet,
+      tweet_id: explicitParentSocketId,
+      is_reply: true,
+      reply_to: ['parent_user'],
+      reply_to_post: {},
+      parent_post: { user: { username: 'parent_user' } },
+      ori_tweet: {
+        tweet_id: explicitParentId,
+        text: 'Explicit original parent',
+        user: { username: 'parent_user', name: 'Explicit Parent' }
+      },
+      quoted_post: {
+        tweet_id: '1900000000000000907',
+        text: 'Unrelated quoted post',
+        user: { username: 'other_user', name: 'Other User' }
+      }
+    }
+  });
+  const explicitParentDelivery = deliveryFor(explicitParentSocketId);
+  assert.ok(explicitParentDelivery);
+  const explicitParentPost = explicitParentDelivery.payload.posts[0];
+  assert.equal(explicitParentPost.replyToExternalId, explicitParentId);
+  assert.equal(explicitParentPost.replyContext.externalId, explicitParentId);
+  assert.equal(explicitParentPost.replyContext.content, 'Explicit original parent');
+  assert.equal(explicitParentPost.replyContext.author.handle, 'parent_user');
+  acknowledge(explicitParentDelivery);
+
+  const unrelatedQuoteSocketId = '1900000000000000108';
+  sendPersonalActivity({
+    ...incoming,
+    doc_id: unrelatedQuoteSocketId,
+    tweet: {
+      ...incoming.tweet,
+      tweet_id: unrelatedQuoteSocketId,
+      is_reply: true,
+      reply_to: ['12345'],
+      quoted_post: {
+        tweet_id: '1900000000000000908',
+        text: 'This quote is not the reply parent',
+        user: { username: 'other_user' }
+      }
+    }
+  });
+  const unrelatedQuoteDelivery = deliveryFor(unrelatedQuoteSocketId);
+  assert.ok(unrelatedQuoteDelivery);
+  const unrelatedQuotePost = unrelatedQuoteDelivery.payload.posts[0];
+  assert.equal(unrelatedQuotePost.target.handle, '12345');
+  assert.equal(unrelatedQuotePost.replyToExternalId, '');
+  assert.equal(Object.hasOwn(unrelatedQuotePost, 'replyContext'), false);
+  acknowledge(unrelatedQuoteDelivery);
+
+  const mergedReplySocketId = '1900000000000000109';
+  const mergedParentId = '1900000000000000009';
+  sendPersonalActivity({
+    ...incoming,
+    doc_id: mergedReplySocketId,
+    tweet: {
+      ...incoming.tweet,
+      tweet_id: mergedReplySocketId,
+      is_reply: true,
+      reply_to: ['merge_parent'],
+      ori_tweet: {
+        tweet_id: mergedParentId,
+        text: 'Parent text retained across observations',
+        user: { username: 'merge_parent', name: 'Merge Parent' }
+      }
+    }
+  });
+  sendPersonalActivity({
+    ...incoming,
+    doc_id: mergedReplySocketId,
+    tweet: {
+      ...incoming.tweet,
+      tweet_id: mergedReplySocketId,
+      is_reply: true,
+      reply_to: ['merge_parent'],
+      ori_tweet: {
+        tweet_id: mergedParentId,
+        text_translate: '合并后的父帖翻译',
+        user: {
+          username: 'merge_parent',
+          avatar: 'https://pbs.twimg.com/profile_images/merged-parent.jpg'
+        }
+      }
+    }
+  });
+  const mergedReplyDelivery = deliveryFor(mergedReplySocketId);
+  assert.ok(mergedReplyDelivery);
+  const mergedReplyPost = mergedReplyDelivery.payload.posts[0];
+  assert.equal(mergedReplyPost.replyToExternalId, mergedParentId);
+  assert.equal(mergedReplyPost.replyContext.content, 'Parent text retained across observations');
+  assert.equal(mergedReplyPost.replyContext.translatedContent, '合并后的父帖翻译');
+  assert.equal(mergedReplyPost.replyContext.author.name, 'Merge Parent');
+  assert.equal(
+    mergedReplyPost.replyContext.author.avatarUrl,
+    'https://pbs.twimg.com/profile_images/merged-parent.jpg'
+  );
+
+  const replacementParentId = '1900000000000000019';
+  sendPersonalActivity({
+    ...incoming,
+    doc_id: mergedReplySocketId,
+    tweet: {
+      ...incoming.tweet,
+      tweet_id: mergedReplySocketId,
+      is_reply: true,
+      reply_to: ['new_parent'],
+      parent_post: {
+        tweet_id: replacementParentId,
+        text: 'Replacement parent text',
+        user: { username: 'new_parent' }
+      }
+    }
+  });
+  const replacementDelivery = deliveryFor(mergedReplySocketId);
+  assert.ok(replacementDelivery);
+  const replacementPost = replacementDelivery.payload.posts[0];
+  assert.equal(replacementPost.replyToExternalId, replacementParentId);
+  assert.equal(replacementPost.target.handle, 'new_parent');
+  assert.equal(replacementPost.target.name, '');
+  assert.equal(replacementPost.replyContext.externalId, replacementParentId);
+  assert.equal(replacementPost.replyContext.content, 'Replacement parent text');
+  assert.equal(replacementPost.replyContext.translatedContent, '');
+  assert.equal(replacementPost.replyContext.author.name, '');
+  assert.equal(replacementPost.replyContext.url, `https://x.com/new_parent/status/${replacementParentId}`);
+  acknowledge(replacementDelivery);
 
   const rejectedInnerChannelId = '1900000000000000105';
   const beforeRejectedInnerChannel = window.messages.filter((message) => message.type === 'posts').length;
@@ -1376,7 +1555,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const recoveredHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
   assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
   assert.equal(Object.hasOwn(recoveredHeartbeat.payload, 'error'), false);
-  assert.equal(recoveredHeartbeat.payload.version, '1.5.0');
+  assert.equal(recoveredHeartbeat.payload.version, '1.6.0');
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.accountCount >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.rawRows >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.normalizedRows >= 0, true);

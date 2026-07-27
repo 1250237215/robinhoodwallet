@@ -1816,7 +1816,7 @@ function socialLatencyMarkup(post) {
   const firstTraceAt = isInitialReceipt
     ? discoveredAt
     : post.firstWebReceivedAt ?? post.webReceivedAt;
-  const firstTraceLabel = isInitialReceipt ? 'DeBot 发现' : '网页首次接收';
+  const firstTraceLabel = isInitialReceipt ? '首次发现' : '网页首次接收';
   const vpsLabel = isInitialReceipt ? 'VPS 入库' : '本次 VPS 变更';
   const vpsAt = isInitialReceipt ? ingestedAt : latencyBaseAt;
   const webLabel = receiptMode === 'created'
@@ -1871,6 +1871,103 @@ function socialProfileActivityMarkup(post, changes = socialProfileChanges(post))
   return `<div class="social-profile-activity"><p><i data-lucide="user-round-cog" aria-hidden="true"></i><strong>${escapeHtml(actorLabel)}</strong><span>更新了账号资料</span></p>${rows}</div>`;
 }
 
+function socialXStatusIdentity(value) {
+  const candidate = safeHttpUrl(value);
+  if (!candidate) return null;
+  try {
+    const url = new URL(candidate);
+    const hostname = url.hostname.toLowerCase().replace(/^www\./, '');
+    if (hostname !== 'x.com' && hostname !== 'twitter.com') return null;
+    const match = url.pathname.match(/^\/([a-z0-9_]{1,15})\/status\/(\d{5,25})(?:\/|$)/i);
+    if (!match) return null;
+    return {
+      handle: match[1],
+      externalId: match[2],
+      url: `https://x.com/${encodeURIComponent(match[1])}/status/${match[2]}`
+    };
+  } catch {
+    return null;
+  }
+}
+
+function socialReplyIdentity(post) {
+  const context = post?.replyContext && typeof post.replyContext === 'object'
+    ? post.replyContext
+    : {};
+  const contextAuthor = context.author && typeof context.author === 'object' ? context.author : {};
+  const contextHandleCandidate = normalizeSocialHandle(contextAuthor.handle);
+  const contextHandle = SOCIAL_HANDLE_PATTERN.test(contextHandleCandidate) ? contextHandleCandidate : '';
+  const targetHandleCandidate = normalizeSocialHandle(post?.target?.handle);
+  const legacyTargetCandidate = normalizeSocialHandle(post?.replyToExternalId);
+  const targetHandle = SOCIAL_HANDLE_PATTERN.test(targetHandleCandidate)
+    ? targetHandleCandidate
+    : SOCIAL_HANDLE_PATTERN.test(legacyTargetCandidate) ? legacyTargetCandidate : '';
+  const contextExternalId = /^\d{5,25}$/.test(String(context.externalId || ''))
+    ? String(context.externalId)
+    : '';
+  const statusIdentity = socialXStatusIdentity(context.url);
+
+  if (contextHandle) {
+    const matchingStatus = statusIdentity?.handle.toLowerCase() === contextHandle.toLowerCase()
+      ? statusIdentity
+      : null;
+    const parentExternalId = contextExternalId || matchingStatus?.externalId || '';
+    return {
+      handle: contextHandle,
+      name: String(contextAuthor.name || '').trim(),
+      profileUrl: `https://x.com/${encodeURIComponent(contextHandle)}`,
+      parentUrl: parentExternalId
+        ? `https://x.com/${encodeURIComponent(contextHandle)}/status/${parentExternalId}`
+        : ''
+    };
+  }
+
+  if (targetHandle) {
+    const matchingStatus = statusIdentity?.handle.toLowerCase() === targetHandle.toLowerCase()
+      ? statusIdentity
+      : null;
+    const parentExternalId = contextExternalId || matchingStatus?.externalId || '';
+    return {
+      handle: targetHandle,
+      name: String(post?.target?.name || '').trim(),
+      profileUrl: `https://x.com/${encodeURIComponent(targetHandle)}`,
+      parentUrl: parentExternalId
+        ? `https://x.com/${encodeURIComponent(targetHandle)}/status/${parentExternalId}`
+        : ''
+    };
+  }
+
+  return {
+    handle: '',
+    name: String(contextAuthor.name || post?.target?.name || '').trim(),
+    profileUrl: '',
+    parentUrl: ''
+  };
+}
+
+function socialReplyMarkup(post) {
+  if (String(post?.kind || '').toLowerCase() !== 'reply') return '';
+  const context = post.replyContext && typeof post.replyContext === 'object' ? post.replyContext : {};
+  const identity = socialReplyIdentity(post);
+  const content = String(context.content || '').trim();
+  const translatedContent = String(context.translatedContent || '').trim();
+  if (!identity.handle && !identity.name && !content && !translatedContent) return '';
+  const targetLabel = identity.name || (identity.handle ? `@${identity.handle}` : '原帖作者');
+  return `
+    <aside class="social-reply-context">
+      <div class="social-reply-target">
+        <i data-lucide="message-circle-reply" aria-hidden="true"></i>
+        <span>回复</span>
+        ${identity.profileUrl ? `<a href="${escapeHtml(identity.profileUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(targetLabel)}</a>` : `<strong>${escapeHtml(targetLabel)}</strong>`}
+        ${identity.name && identity.handle ? `<span>@${escapeHtml(identity.handle)}</span>` : ''}
+      </div>
+      ${content ? `<div class="social-reply-original"><b>被回复原文</b><p>${escapeHtml(content)}</p></div>` : ''}
+      ${translatedContent && translatedContent !== content ? `<div class="social-reply-translation"><b>原文翻译</b><p>${escapeHtml(translatedContent)}</p></div>` : ''}
+      ${identity.parentUrl ? `<a class="social-reply-source" href="${escapeHtml(identity.parentUrl)}" target="_blank" rel="noopener noreferrer" title="查看被回复原文"><i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a>` : ''}
+    </aside>
+  `;
+}
+
 function visibleSocialPosts() {
   const query = state.socialSearchQuery.trim().toLowerCase();
   return state.socialPosts.filter((post) => {
@@ -1884,6 +1981,10 @@ function visibleSocialPosts() {
       post.author?.handle,
       post.target?.name,
       post.target?.handle,
+      post.replyContext?.content,
+      post.replyContext?.translatedContent,
+      post.replyContext?.author?.name,
+      post.replyContext?.author?.handle,
       activity?.targetHandle
     ]
       .map((value) => String(value || '').toLowerCase())
@@ -2003,6 +2104,7 @@ function renderSocialFeed() {
     const kind = post.deleted ? 'delete' : activity?.kind || String(post.kind || 'post').toLowerCase();
     const activityMarkup = socialActivityMarkup(post);
     const profileActivityMarkup = socialProfileActivityMarkup(post, visibleProfileChanges);
+    const replyMarkup = socialReplyMarkup(post);
     const nonPostActivity = Boolean(activity || profileActivityMarkup);
     const profileUrl = safeHttpUrl(socialProfileUrl(post));
     const postUrl = safeHttpUrl(post.url);
@@ -2041,6 +2143,7 @@ function renderSocialFeed() {
             <time class="social-post-time" datetime="${escapeHtml(String(post.publishedAt ?? ''))}" data-live-timestamp="${escapeHtml(String(post.publishedAt ?? ''))}" title="${escapeHtml(formatDateTime(post.publishedAt))}" aria-live="off">${escapeHtml(formatMonitorAge(post.publishedAt))}</time>
           </header>
           ${socialLatencyMarkup(post)}
+          ${replyMarkup}
           ${activityMarkup || profileActivityMarkup || (post.content ? `<p class="social-post-content">${escapeHtml(post.content)}</p>` : '')}
           ${!nonPostActivity && post.translatedContent && post.translatedContent !== post.content ? `<p class="social-post-translation">${escapeHtml(post.translatedContent)}</p>` : ''}
           ${!nonPostActivity && contractMarkup ? `<div class="social-post-contracts">${contractMarkup}</div>` : ''}

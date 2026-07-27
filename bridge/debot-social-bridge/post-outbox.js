@@ -45,6 +45,20 @@ function profileDetail(value, changes) {
   return normalized;
 }
 
+function replyContext(value) {
+  const context = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const author = account(context.author);
+  const normalized = {
+    externalId: text(context.externalId, 240),
+    author,
+    content: text(context.content, 100_000),
+    translatedContent: text(context.translatedContent, 100_000),
+    url: text(context.url, 2_000),
+    publishedAt: number(context.publishedAt)
+  };
+  return normalized.externalId || normalized.author.handle || normalized.content ? normalized : null;
+}
+
 function validPersistedPost(post) {
   if (!post.source || !post.externalId || !SOCIAL_EVENT_KINDS.has(post.kind)) return false;
   if (['follow', 'unfollow'].includes(post.kind)) {
@@ -63,14 +77,16 @@ function persistedPost(value) {
   const post = value && typeof value === 'object' ? value : {};
   const author = post.author && typeof post.author === 'object' ? post.author : {};
   const changes = post.kind === 'profile' ? profileChanges(post.profileChanges) : [];
+  const parent = post.kind === 'reply' ? replyContext(post.replyContext) : null;
   return {
     source: text(post.source, 40),
     externalId: text(post.externalId, 240),
     kind: text(post.kind, 20),
     author: account(author),
-    ...(['follow', 'unfollow'].includes(post.kind)
+    ...(['follow', 'unfollow', 'reply'].includes(post.kind)
       ? { target: account(post.target, { includeUrl: true }) }
       : {}),
+    ...(parent ? { replyContext: parent } : {}),
     ...(post.kind === 'profile'
       ? { profileChanges: changes, profileDetail: profileDetail(post.profileDetail, changes) }
       : {}),
