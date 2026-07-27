@@ -134,6 +134,7 @@ const SOCIAL_EVENT_TYPE_LABELS = Object.freeze({
 let MONITOR_THRESHOLD_STORAGE_KEY = 'robinhood-monitor-threshold';
 const MONITOR_SOUNDS = new Set(['alarm', 'bell', 'electronic', 'glass']);
 const MONITOR_EVENT_TYPES = Object.freeze(['buy', 'sell', 'transfer', 'token_create']);
+const MONITOR_TOKEN_RISK_STATUSES = new Set(['pending', 'partial', 'ready', 'unavailable', 'error']);
 
 function activeChain() {
   return CHAIN_CONFIGS[activeChainId] || CHAIN_CONFIGS.robinhood;
@@ -499,6 +500,12 @@ function finiteNumber(...values) {
     const number = Number(value);
     if (Number.isFinite(number)) return number;
   }
+  return null;
+}
+
+function nullableBoolean(value) {
+  if (value === true) return true;
+  if (value === false) return false;
   return null;
 }
 
@@ -886,6 +893,7 @@ function normalizeMonitorEvent(raw, current = null) {
   };
   const pickNumber = (keys) => finiteNumber(...keys.map((key) => source[key]))
     ?? finiteNumber(...keys.map((key) => existing[key]));
+  const pickBoolean = (keys) => nullableBoolean(pickPresent(keys, null));
   const id = pick(['id', 'eventId', 'event_id', 'sequence'], '');
   const candidateType = String(pick(['eventType', 'event_type', 'type'], 'buy')).toLowerCase();
   const eventType = MONITOR_EVENT_TYPES.includes(candidateType) ? candidateType : 'buy';
@@ -894,6 +902,13 @@ function normalizeMonitorEvent(raw, current = null) {
     .trim()
     .toLowerCase();
   const customAliasValue = pickPresent(['walletCustomAlias', 'wallet_custom_alias'], null);
+  const tokenRiskStatusValue = String(pickPresent(['tokenRiskStatus', 'token_risk_status'], '') || '')
+    .trim()
+    .toLowerCase();
+  const tokenRiskFlagsValue = pickPresent(['tokenRiskFlags', 'token_risk_flags'], []);
+  const tokenRiskFlags = Array.isArray(tokenRiskFlagsValue)
+    ? [...new Set(tokenRiskFlagsValue.map((value) => String(value || '').trim().toLowerCase()).filter(Boolean))]
+    : [];
   return {
     ...existing,
     ...source,
@@ -926,6 +941,19 @@ function normalizeMonitorEvent(raw, current = null) {
     marketCapUsd: pickNumber(['marketCapUsd', 'market_cap_usd']),
     tokenCreationTimestamp: pick(['tokenCreationTimestamp', 'token_creation_timestamp'], null),
     marketDataAt: pick(['marketDataAt', 'market_data_at'], null),
+    tokenRiskStatus: MONITOR_TOKEN_RISK_STATUSES.has(tokenRiskStatusValue) ? tokenRiskStatusValue : '',
+    sellable: pickBoolean(['sellable']),
+    liquidityUsd: pickNumber(['liquidityUsd', 'liquidity_usd']),
+    top10HolderPercent: pickNumber(['top10HolderPercent', 'top10_holder_percent']),
+    creatorHoldingPercent: pickNumber(['creatorHoldingPercent', 'creator_holding_percent']),
+    canMintMore: pickBoolean(['canMintMore', 'can_mint_more']),
+    creatorTokenCount: pickNumber(['creatorTokenCount', 'creator_token_count']),
+    creatorDeadTokenCount: pickNumber(['creatorDeadTokenCount', 'creator_dead_token_count']),
+    creatorHistoryPartial: pickBoolean(['creatorHistoryPartial', 'creator_history_partial']),
+    deadDefinition: String(pickPresent(['deadDefinition', 'dead_definition'], '') || ''),
+    tokenRiskDataAt: pick(['tokenRiskDataAt', 'token_risk_data_at'], null),
+    tokenRiskError: String(pickPresent(['tokenRiskError', 'token_risk_error'], '') || ''),
+    tokenRiskFlags,
     txHash: normalizeTransactionHash(pick(['txHash', 'tx_hash', 'transactionHash', 'hash'])),
     blockNumber: pickNumber(['blockNumber', 'block_number', 'block']),
     blockTimestamp: pick(['blockTimestamp', 'block_timestamp', 'timestamp'], null),
@@ -1141,6 +1169,123 @@ function formatMonitorTokenAge(event) {
   const years = Math.floor(totalDays / 365);
   const months = Math.floor((totalDays % 365) / 30);
   return months ? `${years} 年 ${months} 个月` : `${years} 年`;
+}
+
+function normalizedMonitorRiskPercent(value) {
+  const number = finiteNumber(value);
+  return number !== null && number >= 0 && number <= 100 ? number : null;
+}
+
+function normalizedMonitorRiskCount(value) {
+  const number = finiteNumber(value);
+  return number !== null && number >= 0 ? Math.round(number) : null;
+}
+
+function formatMonitorRiskPercent(value) {
+  const number = normalizedMonitorRiskPercent(value);
+  return number === null
+    ? '待获取'
+    : `${number.toLocaleString('zh-CN', { maximumFractionDigits: 1 })}%`;
+}
+
+function monitorTokenRiskStatus(event) {
+  const status = String(event?.tokenRiskStatus || '').trim().toLowerCase();
+  if (MONITOR_TOKEN_RISK_STATUSES.has(status)) return status;
+  const hasRiskValue = [
+    event?.sellable,
+    event?.liquidityUsd,
+    event?.top10HolderPercent,
+    event?.creatorHoldingPercent,
+    event?.canMintMore,
+    event?.creatorTokenCount,
+    event?.creatorDeadTokenCount
+  ].some((value) => value !== null && value !== undefined && value !== '');
+  return hasRiskValue ? 'partial' : '';
+}
+
+function monitorTokenRiskMetricState(value, riskFlags, riskFlag, { safe = false, danger = false } = {}) {
+  if (value === null || value === undefined) return 'pending';
+  if (danger) return 'danger';
+  if (safe) return 'safe';
+  return riskFlags.has(riskFlag) ? 'warning' : 'ready';
+}
+
+function monitorCreatorHistoryTitle(deadDefinition, partial) {
+  const definition = String(deadDefinition || '').trim();
+  const scope = partial
+    ? '当前历史仅代表已发现下限，实际发币和归零数量可能更高。'
+    : '';
+  const source = definition ? ` 服务端口径：${definition}。` : '';
+  return `归零口径：代币创建至少 24 小时，且 DexScreener 无交易对或主池流动性低于 $1,000。${scope}${source}`;
+}
+
+function renderMonitorTokenRisk(event) {
+  if (activeChain().id !== 'robinhood' || !event?.tokenAddress || event.assetType === 'native') return '';
+  const status = monitorTokenRiskStatus(event);
+  if (!status) return '';
+  const dataTitle = event.tokenRiskDataAt
+    ? ` title="${escapeHtml(`风险数据更新于 ${formatDateTime(event.tokenRiskDataAt)}`)}"`
+    : '';
+  if (status === 'pending') {
+    return '<div class="monitor-token-risk-status" data-state="pending" aria-busy="true">风险分析中</div>';
+  }
+  if (status === 'unavailable') {
+    return `<div class="monitor-token-risk-status" data-state="unavailable"${dataTitle}>暂无风险数据</div>`;
+  }
+  if (status === 'error') {
+    const errorTitle = String(event.tokenRiskError || '').trim();
+    return `<div class="monitor-token-risk-status" data-state="error"${errorTitle ? ` title="${escapeHtml(errorTitle)}"` : dataTitle}>风险资料获取失败</div>`;
+  }
+
+  const riskFlags = new Set(Array.isArray(event.tokenRiskFlags) ? event.tokenRiskFlags : []);
+  const sellable = nullableBoolean(event.sellable);
+  const recentSalesOnly = sellable === true && riskFlags.has('sellability_recent_sales_only');
+  const canMintMore = nullableBoolean(event.canMintMore);
+  const liquidityUsd = finiteNumber(event.liquidityUsd);
+  const top10HolderPercent = normalizedMonitorRiskPercent(event.top10HolderPercent);
+  const creatorHoldingPercent = normalizedMonitorRiskPercent(event.creatorHoldingPercent);
+  const creatorTokenCount = normalizedMonitorRiskCount(event.creatorTokenCount);
+  const creatorDeadTokenCount = normalizedMonitorRiskCount(event.creatorDeadTokenCount);
+  const creatorHistoryPartial = nullableBoolean(event.creatorHistoryPartial) === true;
+  const creatorHistoryPrefix = creatorHistoryPartial ? '≥' : '';
+  const creatorTokenLabel = creatorTokenCount === null
+    ? '待获取'
+    : `${creatorHistoryPrefix}${creatorTokenCount.toLocaleString('en-US')}币`;
+  const creatorDeadTokenLabel = creatorDeadTokenCount === null
+    ? '待获取'
+    : `${creatorHistoryPrefix}${creatorDeadTokenCount.toLocaleString('en-US')}个归零`;
+  const creatorHistory = creatorTokenCount === null && creatorDeadTokenCount === null
+    ? '待获取'
+    : `${creatorTokenLabel} / ${creatorDeadTokenLabel}`;
+  const creatorHistoryTitle = monitorCreatorHistoryTitle(event.deadDefinition, creatorHistoryPartial);
+  return `
+    <dl class="monitor-token-risk" data-status="${status}" aria-label="Robinhood 代币风险指标"${dataTitle}>
+      <div class="is-boolean" data-metric="sellable" data-state="${monitorTokenRiskMetricState(sellable, riskFlags, 'unsellable', { safe: sellable === true && !recentSalesOnly, danger: sellable === false })}">
+        <dt class="sr-only">卖出检测</dt>
+        <dd>${sellable === null ? '卖出待验证' : sellable ? (recentSalesOnly ? '近期有卖出' : '可卖出') : '疑似不可卖'}</dd>
+      </div>
+      <div data-metric="liquidity" data-state="${monitorTokenRiskMetricState(liquidityUsd, riskFlags, 'low_liquidity')}">
+        <dt>流动性</dt>
+        <dd>${liquidityUsd === null ? '待获取' : escapeHtml(formatMoney(liquidityUsd))}</dd>
+      </div>
+      <div data-metric="top10-holders" data-state="${monitorTokenRiskMetricState(top10HolderPercent, riskFlags, 'holder_concentration')}">
+        <dt>前10占比</dt>
+        <dd>${escapeHtml(formatMonitorRiskPercent(top10HolderPercent))}</dd>
+      </div>
+      <div data-metric="creator-holding" data-state="${monitorTokenRiskMetricState(creatorHoldingPercent, riskFlags, 'creator_concentration')}">
+        <dt>创建者持仓</dt>
+        <dd>${escapeHtml(formatMonitorRiskPercent(creatorHoldingPercent))}</dd>
+      </div>
+      <div class="is-boolean" data-metric="mintable" data-state="${monitorTokenRiskMetricState(canMintMore, riskFlags, 'mintable', { safe: canMintMore === false, danger: canMintMore === true })}">
+        <dt class="sr-only">增发权限</dt>
+        <dd>${canMintMore === null ? '增发待验证' : canMintMore ? '可增发' : '未发现增发'}</dd>
+      </div>
+      <div data-metric="creator-history" data-state="${monitorTokenRiskMetricState(creatorTokenCount === null || creatorDeadTokenCount === null ? null : creatorTokenCount, riskFlags, 'bad_creator_history')}" title="${escapeHtml(creatorHistoryTitle)}">
+        <dt>创建者历史</dt>
+        <dd>${escapeHtml(creatorHistory)}</dd>
+      </div>
+    </dl>
+  `;
 }
 
 function monitorPlatformLabel(value) {
@@ -2467,6 +2612,7 @@ function renderMonitorEvents() {
             </div>
           </dl>
         ` : ''}
+        ${renderMonitorTokenRisk(event)}
         <div class="monitor-event-links">
           <button class="inline-icon-button monitor-note-button" type="button" data-monitor-note-edit="${escapeHtml(event.walletAddress)}" data-monitor-note-event="${escapeHtml(eventKey)}" title="${walletNote ? '修改备注' : '添加备注'}" aria-label="${walletNote ? '修改' : '添加'} ${escapeHtml(walletLabel)} 的备注"><i data-lucide="notebook-pen" aria-hidden="true"></i></button>
           <a class="inline-icon-button" href="${escapeHtml(walletUrl)}" target="_blank" rel="noopener noreferrer" title="DeBot 地址" aria-label="在 DeBot 查看地址"><i data-lucide="wallet" aria-hidden="true"></i></a>

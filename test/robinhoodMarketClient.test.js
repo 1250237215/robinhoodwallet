@@ -26,7 +26,8 @@ function pair({
   liquidityUsd = 10_000,
   volume24h = 5_000,
   pairCreatedAt = 1_700_000_000_000,
-  symbol = 'TOK'
+  symbol = 'TOK',
+  txns
 } = {}) {
   return {
     chainId,
@@ -39,6 +40,7 @@ function pair({
     fdv,
     liquidity: { usd: liquidityUsd },
     volume: { h24: volume24h },
+    txns,
     pairCreatedAt
   };
 }
@@ -49,6 +51,7 @@ test('selects the highest-liquidity Robinhood base pair and the earliest valid p
       pairAddress: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
       marketCap: 2_000_000,
       liquidityUsd: 25_000,
+      txns: { m5: { sells: 500 }, h1: { sells: 600 } },
       pairCreatedAt: 1_700_000_000_000
     }),
     pair({
@@ -56,6 +59,7 @@ test('selects the highest-liquidity Robinhood base pair and the earliest valid p
       marketCap: null,
       fdv: 8_000_000,
       liquidityUsd: 250_000,
+      txns: { m5: { sells: '7' }, h1: { sells: 12 } },
       pairCreatedAt: 1_800_000_000_000
     }),
     pair({ chainId: 'base', marketCap: 999_000_000, liquidityUsd: 999_000_000 }),
@@ -70,10 +74,54 @@ test('selects the highest-liquidity Robinhood base pair and the earliest valid p
   assert.equal(metrics.marketCapSource, 'dexscreener_fdv');
   assert.equal(metrics.liquidityUsd, 250_000);
   assert.equal(metrics.primaryPoolAddress, '0xcccccccccccccccccccccccccccccccccccccccc');
+  assert.deepEqual(metrics.poolAddresses, [
+    '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    '0xcccccccccccccccccccccccccccccccccccccccc'
+  ]);
+  assert.equal(metrics.recentSellCount, 12);
+  assert.deepEqual(metrics.recentSellCounts, { m5: 7, h1: 12 });
   assert.equal(metrics.creationTimestamp, 1_700_000_000);
   assert.equal(metrics.creationTimestampSource, 'dexscreener_earliest_pair_created_at');
   assert.equal(metrics.pairCount, 2);
   assert.equal(metrics.updatedAt, 2_000_000_000);
+});
+
+test('returns every valid Robinhood pool address once without changing the selected primary pool', () => {
+  const firstPool = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const primaryPool = '0xcccccccccccccccccccccccccccccccccccccccc';
+  const metrics = normalizeRobinhoodDexScreenerMetrics([
+    pair({ pairAddress: firstPool, liquidityUsd: 10_000 }),
+    pair({ pairAddress: primaryPool, liquidityUsd: 50_000 }),
+    pair({ pairAddress: firstPool.toUpperCase(), liquidityUsd: 5_000 }),
+    pair({ pairAddress: 'invalid', liquidityUsd: 1_000_000 }),
+    pair({ pairAddress: '0xdddddddddddddddddddddddddddddddddddddddd', chainId: 'base' })
+  ], tokenA);
+
+  assert.equal(metrics.primaryPoolAddress, primaryPool);
+  assert.deepEqual(metrics.poolAddresses, [firstPool, primaryPool]);
+});
+
+test('strictly normalizes primary-pool recent sell counts and preserves missing fields', () => {
+  const oneWindow = normalizeRobinhoodDexScreenerMetrics([
+    pair({ txns: { m5: { sells: -1 }, h1: { sells: '4' } } })
+  ], tokenA);
+  assert.equal(oneWindow.recentSellCount, 4);
+  assert.deepEqual(oneWindow.recentSellCounts, { m5: null, h1: 4 });
+
+  const invalidCounts = normalizeRobinhoodDexScreenerMetrics([
+    pair({ txns: { m5: { sells: 1.5 }, h1: { sells: false } } })
+  ], tokenA);
+  assert.equal(invalidCounts.recentSellCount, null);
+  assert.deepEqual(invalidCounts.recentSellCounts, { m5: null, h1: null });
+
+  const missing = normalizeRobinhoodDexScreenerMetrics([pair()], tokenA);
+  assert.equal(missing.recentSellCount, null);
+  assert.deepEqual(missing.recentSellCounts, { m5: null, h1: null });
+
+  const empty = normalizeRobinhoodDexScreenerMetrics([], tokenA);
+  assert.equal(empty.recentSellCount, null);
+  assert.deepEqual(empty.recentSellCounts, { m5: null, h1: null });
+  assert.deepEqual(empty.poolAddresses, []);
 });
 
 test('uses the DexScreener Robinhood tokens batch endpoint and enforces its 30-address limit', async () => {

@@ -524,3 +524,272 @@ test('persists alerted token CAs idempotently across restarts', (t) => {
   assert.throws(() => store.recordMonitorTokenAlert('not-an-address'), /Invalid monitor token address/);
   store.close();
 });
+
+test('persists progressive Robinhood token risk without coercing false or zero to missing', () => {
+  const store = createRobinhoodStore(':memory:');
+  const tokenAddress = '0x1111111111111111111111111111111111111111';
+  const walletAddress = '0x2222222222222222222222222222222222222222';
+  const event = store.insertMonitorEvent({
+    eventType: 'buy',
+    assetType: 'erc20',
+    walletAddress,
+    tokenAddress,
+    tokenSymbol: 'RISK',
+    tokenName: 'Risk token',
+    tokenAmount: '1',
+    rawTokenAmount: '1000000000000000000',
+    tokenDecimals: 18,
+    txHash: `0x${'ab'.repeat(32)}`,
+    logIndex: 1,
+    blockNumber: 10,
+    blockTimestamp: 100,
+    detectedAt: 101,
+    tokenRiskStatus: 'pending'
+  }).event;
+
+  const summary = store.upsertMonitorTokenRiskData({
+    address: tokenAddress,
+    tokenRiskStatus: 'partial',
+    sellable: false,
+    liquidityUsd: 42_000,
+    top10HolderPercent: 0,
+    creatorHoldingPercent: 0,
+    canMintMore: false,
+    tokenRiskDataAt: 102,
+    tokenRiskFlags: ['unsellable']
+  }, { replace: true });
+  assert.equal(summary.sellable, false);
+  assert.equal(summary.canMintMore, false);
+  assert.equal(summary.top10HolderPercent, 0);
+  assert.equal(summary.creatorHoldingPercent, 0);
+  assert.equal(summary.liquidityUsd, 42_000);
+
+  let [updated] = store.updateMonitorEventsTokenRiskData(tokenAddress, summary, { eventIds: [event.id] });
+  assert.equal(updated.tokenRiskStatus, 'partial');
+  assert.equal(updated.sellable, false);
+  assert.equal(updated.canMintMore, false);
+
+  const complete = store.upsertMonitorTokenRiskData({
+    address: tokenAddress,
+    tokenRiskStatus: 'ready',
+    creatorTokenCount: 0,
+    creatorDeadTokenCount: 0,
+    creatorHistoryPartial: false,
+    deadDefinition: 'age>=24h && (no_pair || liquidity<1000)',
+    tokenRiskDataAt: 103
+  });
+  [updated] = store.updateMonitorEventsTokenRiskData(tokenAddress, complete, { eventIds: [event.id] });
+  assert.equal(updated.tokenRiskStatus, 'ready');
+  assert.equal(updated.creatorTokenCount, 0);
+  assert.equal(updated.creatorDeadTokenCount, 0);
+  assert.equal(updated.creatorHistoryPartial, false);
+  assert.equal(updated.sellable, false);
+  assert.equal(updated.tokenRiskDataAt, 103);
+
+  store.db.prepare('UPDATE monitor_events SET risk_payload = ? WHERE id = ?').run('{broken', event.id);
+  assert.doesNotThrow(() => store.listMonitorEvents());
+  assert.equal(store.listMonitorEvents()[0].tokenRiskStatus, '');
+  store.close();
+});
+
+test('clears stale risk liquidity only for an explicit replacement', () => {
+  const store = createRobinhoodStore(':memory:');
+  const tokenAddress = '0x1111111111111111111111111111111111111111';
+  const walletAddress = '0x2222222222222222222222222222222222222222';
+
+  let metadata = store.upsertMonitorTokenRiskData({
+    address: tokenAddress,
+    tokenRiskStatus: 'ready',
+    liquidityUsd: 42_000,
+    tokenRiskDataAt: 100
+  }, { replace: true });
+  assert.equal(metadata.liquidityUsd, 42_000);
+
+  metadata = store.upsertMonitorTokenRiskData({
+    address: tokenAddress,
+    tokenRiskStatus: 'partial',
+    tokenRiskDataAt: 101
+  }, { replace: true });
+  assert.equal(metadata.liquidityUsd, 42_000, 'an omitted field must not erase market liquidity');
+
+  metadata = store.upsertMonitorTokenRiskData({
+    address: tokenAddress,
+    tokenRiskStatus: 'partial',
+    liquidityUsd: null,
+    tokenRiskDataAt: 102
+  }, { replace: false });
+  assert.equal(metadata.liquidityUsd, 42_000, 'a progressive null must preserve existing liquidity');
+
+  metadata = store.upsertMonitorTokenRiskData({
+    address: tokenAddress,
+    tokenRiskStatus: 'partial',
+    liquidityUsd: null,
+    tokenRiskDataAt: 103
+  }, { replace: true });
+  assert.equal(metadata.liquidityUsd, null, 'an explicit replacement null must clear stale liquidity');
+  assert.equal(
+    store.db.prepare('SELECT liquidity_usd FROM monitor_token_metadata WHERE address = ?').get(tokenAddress)
+      .liquidity_usd,
+    null
+  );
+
+  metadata = store.upsertMonitorTokenRiskData({
+    address: tokenAddress,
+    tokenRiskStatus: 'ready',
+    liquidityUsd: 5_000,
+    tokenRiskDataAt: 104
+  });
+  assert.equal(metadata.liquidityUsd, 5_000);
+
+  const event = store.insertMonitorEvent({
+    eventType: 'buy',
+    assetType: 'erc20',
+    walletAddress,
+    tokenAddress,
+    tokenSymbol: 'RISK',
+    tokenName: 'Risk token',
+    tokenAmount: '1',
+    rawTokenAmount: '1000000000000000000',
+    tokenDecimals: 18,
+    txHash: `0x${'cd'.repeat(32)}`,
+    logIndex: 1,
+    blockNumber: 10,
+    blockTimestamp: 100,
+    detectedAt: 101,
+    liquidityUsd: 42_000,
+    tokenRiskStatus: 'ready'
+  }).event;
+  assert.equal(event.liquidityUsd, 42_000);
+
+  let [updated] = store.updateMonitorEventsTokenRiskData(tokenAddress, {
+    tokenRiskStatus: 'partial',
+    liquidityUsd: null,
+    tokenRiskDataAt: 105
+  }, { eventIds: [event.id], replace: false });
+  assert.equal(updated.liquidityUsd, 42_000);
+
+  [updated] = store.updateMonitorEventsTokenRiskData(tokenAddress, {
+    tokenRiskStatus: 'partial',
+    liquidityUsd: 1_000,
+    tokenRiskDataAt: 106
+  }, { eventIds: [event.id], replace: false });
+  assert.equal(updated.liquidityUsd, 42_000, 'progressive updates must retain an existing event snapshot');
+
+  [updated] = store.updateMonitorEventsTokenRiskData(tokenAddress, {
+    tokenRiskStatus: 'partial',
+    liquidityUsd: null,
+    tokenRiskDataAt: 107
+  }, { eventIds: [event.id], replace: true });
+  assert.equal(updated.liquidityUsd, null);
+  assert.equal(
+    store.db.prepare('SELECT liquidity_usd FROM monitor_events WHERE id = ?').get(event.id).liquidity_usd,
+    null
+  );
+
+  [updated] = store.updateMonitorEventsTokenRiskData(tokenAddress, {
+    tokenRiskStatus: 'ready',
+    liquidityUsd: 5_000,
+    tokenRiskDataAt: 108
+  }, { eventIds: [event.id], replace: false });
+  assert.equal(updated.liquidityUsd, 5_000, 'progressive updates may fill a missing event snapshot');
+
+  [updated] = store.updateMonitorEventsTokenRiskData(tokenAddress, {
+    tokenRiskStatus: 'ready',
+    liquidityUsd: 2_000,
+    tokenRiskDataAt: 109
+  }, { eventIds: [event.id], replace: true });
+  assert.equal(updated.liquidityUsd, 2_000, 'replacement updates may replace a non-null event snapshot');
+  store.close();
+});
+
+test('stores token risk JSON only for Robinhood ERC-20 events', () => {
+  const event = {
+    eventType: 'buy',
+    assetType: 'erc20',
+    walletAddress: '0x2222222222222222222222222222222222222222',
+    tokenAddress: '0x1111111111111111111111111111111111111111',
+    tokenSymbol: 'RISK',
+    tokenName: 'Risk token',
+    tokenAmount: '1',
+    rawTokenAmount: '1000000000000000000',
+    tokenDecimals: 18,
+    txHash: `0x${'ef'.repeat(32)}`,
+    logIndex: 1,
+    blockNumber: 10,
+    blockTimestamp: 100,
+    detectedAt: 101,
+    tokenRiskStatus: 'ready',
+    sellable: true,
+    tokenRiskDataAt: 102
+  };
+
+  const robinhood = createRobinhoodStore(':memory:');
+  robinhood.insertMonitorEvent(event);
+  let row = robinhood.db.prepare('SELECT risk_payload, risk_data_at FROM monitor_events').get();
+  assert.match(row.risk_payload, /"sellable":true/);
+  assert.equal(row.risk_data_at, 102);
+  robinhood.close();
+
+  const base = createRobinhoodStore(':memory:', { chainId: 'base', chainLabel: 'Base' });
+  base.insertMonitorEvent(event);
+  row = base.db.prepare('SELECT risk_payload, risk_data_at FROM monitor_events').get();
+  assert.equal(row.risk_payload, null);
+  assert.equal(row.risk_data_at, null);
+  base.close();
+
+  const native = createRobinhoodStore(':memory:');
+  native.insertMonitorEvent({
+    ...event,
+    assetType: 'native',
+    tokenAddress: '',
+    txHash: `0x${'aa'.repeat(32)}`
+  });
+  row = native.db.prepare('SELECT risk_payload, risk_data_at FROM monitor_events').get();
+  assert.equal(row.risk_payload, null);
+  assert.equal(row.risk_data_at, null);
+  native.close();
+});
+
+test('pages oldest unfinished token-risk events without a recency cutoff', () => {
+  const store = createRobinhoodStore(':memory:');
+  const tokenAddress = '0x1111111111111111111111111111111111111111';
+  const walletAddress = '0x2222222222222222222222222222222222222222';
+  for (let index = 1; index <= 502; index += 1) {
+    store.insertMonitorEvent({
+      eventType: 'buy',
+      assetType: 'erc20',
+      walletAddress,
+      tokenAddress,
+      tokenSymbol: 'RISK',
+      tokenName: 'Risk token',
+      tokenAmount: '1',
+      rawTokenAmount: '1',
+      tokenDecimals: 18,
+      txHash: `0x${index.toString(16).padStart(64, '0')}`,
+      logIndex: index,
+      blockNumber: index,
+      blockTimestamp: 1,
+      detectedAt: 1,
+      tokenRiskStatus: 'pending'
+    });
+  }
+
+  const firstPage = store.listMonitorEventsNeedingTokenRisk({ limit: 500 });
+  assert.equal(firstPage.length, 500);
+  assert.equal(firstPage[0].id, 1);
+  assert.equal(firstPage.at(-1).id, 500);
+  store.updateMonitorEventsTokenRiskData(tokenAddress, {
+    tokenRiskStatus: 'ready',
+    creatorTokenCount: 8,
+    creatorDeadTokenCount: 6,
+    tokenRiskDataAt: 2
+  }, { eventIds: firstPage.map((event) => event.id) });
+  assert.deepEqual(
+    store.listMonitorEventsNeedingTokenRisk({ limit: 500 }).map((event) => event.id),
+    [501, 502]
+  );
+
+  store.db.prepare('UPDATE monitor_events SET risk_payload = ? WHERE id = ?').run('{broken', 501);
+  assert.deepEqual(store.listMonitorEventsNeedingTokenRisk({ limit: 500 }).map((event) => event.id), [502]);
+  store.close();
+});

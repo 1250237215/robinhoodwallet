@@ -4255,7 +4255,7 @@ select:hover {
   min-width: 0;
   display: grid;
   grid-template-columns: 64px minmax(0, 1fr) minmax(96px, auto);
-  grid-template-rows: auto auto;
+  grid-template-rows: auto auto auto;
   align-items: center;
   gap: 5px 10px;
   min-height: 84px;
@@ -4623,6 +4623,107 @@ select:hover {
 .monitor-event-metrics > div[data-state="pending"] dd {
   color: var(--faint);
   font-weight: 650;
+}
+
+.monitor-token-risk,
+.monitor-token-risk-status {
+  min-width: 0;
+  grid-column: 2 / -1;
+  grid-row: 3;
+  margin: 2px 0 0;
+}
+
+.monitor-token-risk {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px 10px;
+}
+
+.monitor-token-risk > div {
+  --risk-state: var(--line-strong);
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px;
+  padding-left: 6px;
+  border-left: 2px solid var(--risk-state);
+}
+
+.monitor-token-risk > div.is-boolean {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.monitor-token-risk dt,
+.monitor-token-risk dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-token-risk dt {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.monitor-token-risk dd {
+  color: var(--ink);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 730;
+}
+
+.monitor-token-risk > div[data-state="safe"] {
+  --risk-state: #16834b;
+}
+
+.monitor-token-risk > div[data-state="safe"] dd {
+  color: #12683b;
+}
+
+.monitor-token-risk > div[data-state="danger"] {
+  --risk-state: #ba3540;
+}
+
+.monitor-token-risk > div[data-state="danger"] dd {
+  color: #9d3039;
+}
+
+.monitor-token-risk > div[data-state="warning"] {
+  --risk-state: #bd8121;
+}
+
+.monitor-token-risk > div[data-state="warning"] dd {
+  color: #8a5d0d;
+}
+
+.monitor-token-risk > div[data-state="pending"] dd {
+  color: var(--faint);
+  font-weight: 650;
+}
+
+.monitor-token-risk-status {
+  padding-left: 7px;
+  overflow: hidden;
+  border-left: 2px solid var(--line-strong);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-token-risk-status[data-state="pending"] {
+  border-left-color: #bd8121;
+  color: #8a5d0d;
+}
+
+.monitor-token-risk-status[data-state="error"] {
+  border-left-color: #ba3540;
+  color: #9d3039;
 }
 
 .monitor-event-links {
@@ -5281,7 +5382,7 @@ select:hover {
 
   .monitor-event-item {
     grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: auto auto auto auto;
+    grid-template-rows: auto auto auto auto auto;
     gap: 8px 10px;
     min-height: 0;
     padding: 12px 11px 13px 15px;
@@ -5312,6 +5413,18 @@ select:hover {
     width: 100%;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
+  }
+
+  .monitor-token-risk,
+  .monitor-token-risk-status {
+    grid-column: 1 / -1;
+    grid-row: 5;
+    width: 100%;
+  }
+
+  .monitor-token-risk {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px 8px;
   }
 
   .monitor-event-links {

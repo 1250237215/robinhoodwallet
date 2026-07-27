@@ -33,6 +33,34 @@ const MARKET_DATA_RETRY_MAX_MS = 5 * 60_000;
 const MARKET_DATA_MAX_FAILURES = 6;
 const MARKET_DATA_BATCH_SIZE = 30;
 const MARKET_DATA_BATCH_WINDOW_MS = 0;
+const TOKEN_RISK_CACHE_SECONDS = 10 * 60;
+const TOKEN_RISK_RETRY_BASE_MS = 15_000;
+const TOKEN_RISK_RETRY_MAX_MS = 5 * 60_000;
+const TOKEN_RISK_MAX_FAILURES = 4;
+const TOKEN_RISK_PRIORITY_MAX_WAIT_MS = 30_000;
+const TOKEN_RISK_RECOVERY_INTERVAL_MS = 30_000;
+const TOKEN_RISK_QUEUE_MAX = 500;
+const TOKEN_RISK_STATUS_SET = new Set(['pending', 'partial', 'ready', 'unavailable', 'error']);
+const TOKEN_RISK_PATCH_FIELDS = Object.freeze([
+  'tokenRiskStatus',
+  'sellable',
+  'liquidityUsd',
+  'top10HolderPercent',
+  'top10HolderCount',
+  'top10HolderPartial',
+  'creatorAddress',
+  'creatorAddressSource',
+  'creatorHoldingPercent',
+  'canMintMore',
+  'creatorTokenCount',
+  'creatorDeadTokenCount',
+  'creatorHistoryPartial',
+  'deadDefinition',
+  'tokenRiskDataAt',
+  'tokenRiskError',
+  'tokenRiskFlags',
+  'tokenRiskSource'
+]);
 const DEBOT_TOKEN_ROOT = 'https://debot.ai/token/robinhood/308574_';
 const DEFAULT_CHAIN_PROFILE = Object.freeze({
   id: 'robinhood',
@@ -247,6 +275,41 @@ function boundedInteger(value, fallback, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, Math.floor(number)));
 }
 
+function tokenRiskPatch(source = {}) {
+  const patch = {};
+  for (const field of TOKEN_RISK_PATCH_FIELDS) {
+    if (Object.hasOwn(source || {}, field)) patch[field] = source[field];
+  }
+  if (Array.isArray(patch.tokenRiskFlags)) patch.tokenRiskFlags = [...patch.tokenRiskFlags];
+  const status = String(patch.tokenRiskStatus || '').trim().toLowerCase();
+  if (status && !TOKEN_RISK_STATUS_SET.has(status)) delete patch.tokenRiskStatus;
+  return patch;
+}
+
+function tokenRiskFiniteNumber(value) {
+  return value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
+}
+
+function tokenRiskComplete(source = {}) {
+  return source.sellable !== null && source.sellable !== undefined &&
+    tokenRiskFiniteNumber(source.liquidityUsd) &&
+    tokenRiskFiniteNumber(source.top10HolderPercent) &&
+    tokenRiskFiniteNumber(source.creatorHoldingPercent) &&
+    source.canMintMore !== null && source.canMintMore !== undefined &&
+    tokenRiskFiniteNumber(source.creatorTokenCount) &&
+    tokenRiskFiniteNumber(source.creatorDeadTokenCount);
+}
+
+function tokenRiskNeedsRefresh(source = {}) {
+  const status = String(source.tokenRiskStatus || '').trim().toLowerCase();
+  return status === 'pending' || (
+    status === 'partial' && (
+      !tokenRiskFiniteNumber(source.creatorTokenCount) ||
+      !tokenRiskFiniteNumber(source.creatorDeadTokenCount)
+    )
+  );
+}
+
 function parseJson(value, fallback) {
   if (typeof value !== 'string' || !value.trim()) return fallback;
   try {
@@ -335,6 +398,11 @@ export class RobinhoodWalletMonitor {
     marketDataBatchWindowMs = MARKET_DATA_BATCH_WINDOW_MS,
     marketDataRetryBaseMs = MARKET_DATA_RETRY_BASE_MS,
     marketDataRetryMaxMs = MARKET_DATA_RETRY_MAX_MS,
+    riskClient = null,
+    tokenRiskCacheSeconds = TOKEN_RISK_CACHE_SECONDS,
+    tokenRiskConcurrency = 1,
+    tokenRiskRetryBaseMs = TOKEN_RISK_RETRY_BASE_MS,
+    tokenRiskRetryMaxMs = TOKEN_RISK_RETRY_MAX_MS,
     quoteTokenAddresses = [ROBINHOOD_CHAIN.weth, ROBINHOOD_CHAIN.usdg],
     noxaLaunchFactory = NOXA_LAUNCH_FACTORY,
     chainProfile = DEFAULT_CHAIN_PROFILE
@@ -420,6 +488,40 @@ export class RobinhoodWalletMonitor {
       ...DEFAULT_CHAIN_PROFILE,
       ...(chainProfile || {})
     };
+    if (riskClient !== null && typeof riskClient?.fetchTokenRiskSummary !== 'function') {
+      throw new TypeError('A Robinhood token risk client is required');
+    }
+    this.riskClient = this.chainProfile.id === 'robinhood' ? riskClient : null;
+    this.tokenRiskCacheSeconds = boundedInteger(
+      tokenRiskCacheSeconds,
+      TOKEN_RISK_CACHE_SECONDS,
+      30,
+      24 * 60 * 60
+    );
+    this.tokenRiskConcurrency = boundedInteger(tokenRiskConcurrency, 1, 1, 2);
+    this.tokenRiskRetryBaseMs = boundedInteger(
+      tokenRiskRetryBaseMs,
+      TOKEN_RISK_RETRY_BASE_MS,
+      100,
+      TOKEN_RISK_RETRY_MAX_MS
+    );
+    this.tokenRiskRetryMaxMs = Math.max(
+      this.tokenRiskRetryBaseMs,
+      boundedInteger(tokenRiskRetryMaxMs, TOKEN_RISK_RETRY_MAX_MS, 100, 60 * 60_000)
+    );
+    this.tokenRiskAbortController = new AbortController();
+    this.tokenRiskQueue = [];
+    this.tokenRiskQueued = new Map();
+    this.tokenRiskLookups = new Map();
+    this.tokenRiskRetryTimers = new Map();
+    this.tokenRiskFailures = new Map();
+    this.tokenRiskPendingEventIds = new Map();
+    this.tokenRiskActive = 0;
+    this.tokenRiskRecoveryTimer = null;
+    this.tokenRiskHistoryQueue = [];
+    this.tokenRiskHistoryQueued = new Map();
+    this.tokenRiskHistoryLookups = new Map();
+    this.tokenRiskHistoryActive = 0;
     this.quoteTokenAddresses = new Set(quoteTokenAddresses.map(normalizeAddress).filter((value) => ADDRESS_PATTERN.test(value)));
     this.noxaLaunchFactory = noxaLaunchFactory ? normalizeAddress(noxaLaunchFactory) : '';
     if (this.noxaLaunchFactory && !ADDRESS_PATTERN.test(this.noxaLaunchFactory)) {
@@ -520,6 +622,8 @@ export class RobinhoodWalletMonitor {
     if (this.closed || this.started) return this.getSnapshot();
     this.started = true;
     this.#queueRecentMarketData();
+    this.#queueRecentTokenRisk();
+    this.#scheduleTokenRiskRecovery();
     this.#scheduleFast(0);
     this.#scheduleFastGap(this.fastGapPollIntervalMs);
     this.#scheduleDeep(0);
@@ -543,6 +647,9 @@ export class RobinhoodWalletMonitor {
     this.deepAbortController?.abort(new Error('Robinhood wallet deep monitor stopped'));
     this.gapAbortController?.abort(new Error('Robinhood wallet gap monitor stopped'));
     this.marketDataAbortController.abort(new Error('Robinhood wallet monitor stopped'));
+    this.tokenRiskAbortController.abort(new Error('Robinhood token risk monitor stopped'));
+    if (this.tokenRiskRecoveryTimer) this.clearTimer(this.tokenRiskRecoveryTimer);
+    this.tokenRiskRecoveryTimer = null;
     if (this.marketDataDrainTimer) this.clearTimer(this.marketDataDrainTimer);
     this.marketDataDrainTimer = null;
     for (const timer of this.marketDataRetryTimers.values()) this.clearTimer(timer);
@@ -551,6 +658,14 @@ export class RobinhoodWalletMonitor {
     this.marketDataQueued.clear();
     this.marketDataPendingEventIds.clear();
     this.marketDataFailures.clear();
+    for (const timer of this.tokenRiskRetryTimers.values()) this.clearTimer(timer);
+    this.tokenRiskRetryTimers.clear();
+    this.tokenRiskQueue.length = 0;
+    this.tokenRiskQueued.clear();
+    this.tokenRiskHistoryQueue.length = 0;
+    this.tokenRiskHistoryQueued.clear();
+    this.tokenRiskPendingEventIds.clear();
+    this.tokenRiskFailures.clear();
     this.abortController = null;
     this.fastGapAbortController = null;
     this.deepAbortController = null;
@@ -1488,6 +1603,9 @@ export class RobinhoodWalletMonitor {
       const marketData = candidate.assetType === 'erc20'
         ? this.#cachedMarketData(candidate.tokenAddress)
         : { marketCapUsd: null, tokenCreationTimestamp: null, marketDataAt: null };
+      const riskData = candidate.assetType === 'erc20'
+        ? this.#cachedTokenRisk(candidate.tokenAddress, { pendingWhenStale: true })
+        : {};
       const result = this.store.insertMonitorEvent({
         ...candidate,
         walletAlias: annotation?.alias || '',
@@ -1499,7 +1617,8 @@ export class RobinhoodWalletMonitor {
         detectedAt: unixSeconds(this.now),
         soundAlert: rule.sound,
         barkAlert: rule.bark,
-        ...marketData
+        ...marketData,
+        ...riskData
       });
       if (!result.inserted) continue;
       const event = publicEvent(result.event, this.chainProfile, annotation);
@@ -1790,19 +1909,23 @@ export class RobinhoodWalletMonitor {
     for (const event of events) {
       this.#emit('event', event);
       if (event.assetType === 'erc20' && ADDRESS_PATTERN.test(event.tokenAddress)) {
-        if (!this.#trackMarketDataEvent(event)) continue;
-        const cached = this.#cachedMarketData(event.tokenAddress);
-        if (cached.marketCapUsd !== null && cached.tokenCreationTimestamp !== null) {
-          const updatedEvents = this.store.updateMonitorEventsTokenMarketData?.(
-            event.tokenAddress,
-            cached,
-            { eventIds: [event.id] }
-          ) || [];
-          this.#removePendingMarketDataEvents(event.tokenAddress, [event.id]);
-          this.#emitMarketDataPatches(updatedEvents);
-          continue;
+        if (this.#trackMarketDataEvent(event)) {
+          const cached = this.#cachedMarketData(event.tokenAddress);
+          if (cached.marketCapUsd !== null && cached.tokenCreationTimestamp !== null) {
+            const updatedEvents = this.store.updateMonitorEventsTokenMarketData?.(
+              event.tokenAddress,
+              cached,
+              { eventIds: [event.id] }
+            ) || [];
+            this.#removePendingMarketDataEvents(event.tokenAddress, [event.id]);
+            this.#emitMarketDataPatches(updatedEvents);
+          } else {
+            this.#queueTokenMarketData(event.tokenAddress, { priority: true });
+          }
         }
-        this.#queueTokenMarketData(event.tokenAddress, { priority: true });
+        if (this.#trackTokenRiskEvent(event)) {
+          this.#queueTokenRisk(event.tokenAddress, { priority: true });
+        }
       }
     }
   }
@@ -1847,6 +1970,7 @@ export class RobinhoodWalletMonitor {
     for (const event of events) {
       const key = JSON.stringify([
         event.marketCapUsd,
+        event.liquidityUsd,
         event.tokenCreationTimestamp,
         event.marketDataAt
       ]);
@@ -1854,6 +1978,7 @@ export class RobinhoodWalletMonitor {
         eventIds: [],
         tokenAddress: event.tokenAddress,
         marketCapUsd: event.marketCapUsd,
+        liquidityUsd: event.liquidityUsd,
         tokenCreationTimestamp: event.tokenCreationTimestamp,
         marketDataAt: event.marketDataAt
       };
@@ -1870,10 +1995,11 @@ export class RobinhoodWalletMonitor {
       ? Number(cached.tokenCreationTimestamp)
       : null;
     if (!this.#marketDataIsFresh(cached)) {
-      return { marketCapUsd: null, tokenCreationTimestamp, marketDataAt: null };
+      return { marketCapUsd: null, liquidityUsd: null, tokenCreationTimestamp, marketDataAt: null };
     }
     return {
       marketCapUsd: Number(cached.marketCapUsd),
+      liquidityUsd: Number.isFinite(Number(cached.liquidityUsd)) ? Number(cached.liquidityUsd) : null,
       tokenCreationTimestamp,
       marketDataAt: Number(cached.marketDataAt)
     };
@@ -2004,7 +2130,12 @@ export class RobinhoodWalletMonitor {
     const creation = Number(metrics?.creationTimestamp);
     const tokenCreationTimestamp = Number.isSafeInteger(creation) && creation > 0 ? creation : null;
     const normalizedMarketCap = Number.isFinite(marketCapUsd) && marketCapUsd >= 0 ? marketCapUsd : null;
-    if (normalizedMarketCap === null && tokenCreationTimestamp === null) {
+    const liquidity = metrics?.liquidityUsd;
+    const liquidityUsd = liquidity === null || liquidity === undefined || liquidity === ''
+      ? null
+      : Number(liquidity);
+    const normalizedLiquidity = Number.isFinite(liquidityUsd) && liquidityUsd >= 0 ? liquidityUsd : null;
+    if (normalizedMarketCap === null && normalizedLiquidity === null && tokenCreationTimestamp === null) {
       const error = new Error('Token metrics did not include market cap or creation time');
       error.retryable = metrics?.retryable !== false;
       error.status = metrics?.upstreamStatus ?? null;
@@ -2013,6 +2144,7 @@ export class RobinhoodWalletMonitor {
     const marketData = {
       address,
       marketCapUsd: normalizedMarketCap,
+      liquidityUsd: normalizedLiquidity,
       tokenCreationTimestamp,
       marketDataAt: normalizedMarketCap === null ? null : unixSeconds(this.now)
     };
@@ -2064,6 +2196,329 @@ export class RobinhoodWalletMonitor {
     }, delay);
     timer?.unref?.();
     this.marketDataRetryTimers.set(address, timer);
+  }
+
+  #queueRecentTokenRisk() {
+    if (!this.riskClient || !this.store.listMonitorEvents) return;
+    const events = this.store.listMonitorEventsNeedingTokenRisk?.({ limit: TOKEN_RISK_QUEUE_MAX }) ||
+      this.store.listMonitorEvents({ limit: TOKEN_RISK_QUEUE_MAX });
+    for (const event of events) {
+      if (event.assetType !== 'erc20' ||
+        !tokenRiskNeedsRefresh(event) || !this.#trackTokenRiskEvent(event, { force: true })) continue;
+      this.#queueTokenRisk(event.tokenAddress, {
+        priority: false,
+        force: event.tokenRiskStatus === 'partial'
+      });
+    }
+  }
+
+  #scheduleTokenRiskRecovery() {
+    if (this.closed || !this.riskClient || this.tokenRiskRecoveryTimer) return;
+    const timer = this.setTimer(() => {
+      this.tokenRiskRecoveryTimer = null;
+      this.#queueRecentTokenRisk();
+      this.#scheduleTokenRiskRecovery();
+    }, TOKEN_RISK_RECOVERY_INTERVAL_MS);
+    timer?.unref?.();
+    this.tokenRiskRecoveryTimer = timer;
+  }
+
+  #tokenRiskIsFresh(cached) {
+    const status = String(cached?.tokenRiskStatus || '').toLowerCase();
+    const riskDataAt = Number(cached?.tokenRiskDataAt);
+    if (!['partial', 'ready', 'unavailable'].includes(status) ||
+      !Number.isSafeInteger(riskDataAt) || riskDataAt <= 0) return false;
+    const age = unixSeconds(this.now) - riskDataAt;
+    return age >= 0 && age <= this.tokenRiskCacheSeconds;
+  }
+
+  #cachedTokenRisk(address, { pendingWhenStale = false } = {}) {
+    if (!this.riskClient) return {};
+    const cached = this.store.getMonitorTokenMetadata?.(address);
+    if (!this.#tokenRiskIsFresh(cached)) {
+      return pendingWhenStale ? { tokenRiskStatus: 'pending' } : {};
+    }
+    return tokenRiskPatch(cached);
+  }
+
+  #trackTokenRiskEvent(event, { force = false } = {}) {
+    if (!this.riskClient) return false;
+    const address = normalizeAddress(event?.tokenAddress);
+    const eventId = Number(event?.id);
+    if (!ADDRESS_PATTERN.test(address) || !Number.isSafeInteger(eventId) || eventId <= 0) return false;
+    const workPending = this.tokenRiskLookups.has(address) ||
+      this.tokenRiskRetryTimers.has(address) ||
+      this.tokenRiskHistoryLookups.has(address) ||
+      this.tokenRiskHistoryQueued.has(address);
+    if (!force && !workPending && event.tokenRiskStatus !== 'pending' &&
+      this.#tokenRiskIsFresh(this.store.getMonitorTokenMetadata?.(address))) return false;
+    if (!this.tokenRiskPendingEventIds.has(address)) this.tokenRiskPendingEventIds.set(address, new Set());
+    this.tokenRiskPendingEventIds.get(address).add(eventId);
+    return true;
+  }
+
+  #removePendingTokenRiskEvents(address, eventIds) {
+    const pending = this.tokenRiskPendingEventIds.get(address);
+    if (!pending) return;
+    for (const eventId of eventIds) pending.delete(Number(eventId));
+    if (pending.size === 0) this.tokenRiskPendingEventIds.delete(address);
+  }
+
+  #queueTokenRisk(address, { priority = true, force = false } = {}) {
+    const normalized = normalizeAddress(address);
+    if (this.closed || !this.riskClient || !ADDRESS_PATTERN.test(normalized)) return;
+    if (this.tokenRiskLookups.has(normalized) || this.tokenRiskRetryTimers.has(normalized) ||
+      this.tokenRiskHistoryLookups.has(normalized) || this.tokenRiskHistoryQueued.has(normalized)) return;
+    if (!force && this.#tokenRiskIsFresh(this.store.getMonitorTokenMetadata?.(normalized))) {
+      const eventIds = [...(this.tokenRiskPendingEventIds.get(normalized) || [])];
+      const cached = this.#cachedTokenRisk(normalized);
+      const updated = this.store.updateMonitorEventsTokenRiskData?.(
+        normalized,
+        cached,
+        { eventIds }
+      ) || [];
+      this.#emitTokenRiskPatches(updated);
+      this.#removePendingTokenRiskEvents(normalized, eventIds);
+      return;
+    }
+    const queued = this.tokenRiskQueued.get(normalized);
+    if (queued) {
+      queued.force ||= force;
+      queued.priority ||= priority;
+      return;
+    }
+    if (this.tokenRiskQueue.length >= TOKEN_RISK_QUEUE_MAX) {
+      this.#applyTokenRisk(normalized, {
+        tokenRiskStatus: 'pending',
+        tokenRiskDataAt: unixSeconds(this.now),
+        tokenRiskError: 'Token risk queue capacity was reached; recovery will retry later'
+      }, { replace: false, final: true });
+      return;
+    }
+    const job = {
+      address: normalized,
+      force,
+      priority,
+      enqueuedAt: Number(this.now()) || Date.now()
+    };
+    this.tokenRiskQueued.set(normalized, job);
+    this.tokenRiskQueue.push(job);
+    this.#drainTokenRiskQueue();
+  }
+
+  #nextTokenRiskJob() {
+    if (!this.tokenRiskQueue.length) return null;
+    const now = Number(this.now()) || Date.now();
+    let oldestIndex = 0;
+    for (let index = 1; index < this.tokenRiskQueue.length; index += 1) {
+      if (this.tokenRiskQueue[index].enqueuedAt < this.tokenRiskQueue[oldestIndex].enqueuedAt) {
+        oldestIndex = index;
+      }
+    }
+    const oldest = this.tokenRiskQueue[oldestIndex];
+    const oldestWaitMs = Math.max(0, now - oldest.enqueuedAt);
+    const priorityIndex = this.tokenRiskQueue.findIndex((job) => job.priority);
+    const index = oldestWaitMs >= TOKEN_RISK_PRIORITY_MAX_WAIT_MS
+      ? oldestIndex
+      : priorityIndex >= 0 ? priorityIndex : oldestIndex;
+    return this.tokenRiskQueue.splice(index, 1)[0] || null;
+  }
+
+  #drainTokenRiskQueue() {
+    if (this.closed || !this.riskClient) return;
+    while (this.tokenRiskActive < this.tokenRiskConcurrency && this.tokenRiskQueue.length > 0) {
+      const job = this.#nextTokenRiskJob();
+      if (!job) return;
+      this.tokenRiskQueued.delete(job.address);
+      if (this.tokenRiskLookups.has(job.address) || this.tokenRiskRetryTimers.has(job.address)) continue;
+      if (!job.force && this.#tokenRiskIsFresh(this.store.getMonitorTokenMetadata?.(job.address))) continue;
+      this.tokenRiskActive += 1;
+      const lookup = this.#fetchTokenRisk(job.address, { force: job.force });
+      this.tokenRiskLookups.set(job.address, lookup);
+      void lookup.finally(() => {
+        if (this.tokenRiskLookups.get(job.address) === lookup) this.tokenRiskLookups.delete(job.address);
+        this.tokenRiskActive = Math.max(0, this.tokenRiskActive - 1);
+        this.#drainTokenRiskQueue();
+      }).catch(() => {});
+    }
+  }
+
+  async #fetchTokenRisk(address, { force = false } = {}) {
+    let summaryApplied = false;
+    try {
+      const summary = await this.riskClient.fetchTokenRiskSummary(address, {
+        signal: this.tokenRiskAbortController.signal,
+        force
+      });
+      if (this.closed || this.tokenRiskAbortController.signal.aborted) return;
+      const creatorContext = summary?.creatorContext || null;
+      const publicSummary = tokenRiskPatch(summary);
+      const canFetchHistory = typeof this.riskClient.fetchCreatorHistory === 'function' &&
+        creatorContext &&
+        (!tokenRiskFiniteNumber(publicSummary.creatorTokenCount) ||
+          !tokenRiskFiniteNumber(publicSummary.creatorDeadTokenCount));
+      const summaryStatus = TOKEN_RISK_STATUS_SET.has(publicSummary.tokenRiskStatus)
+        ? publicSummary.tokenRiskStatus
+        : tokenRiskComplete(publicSummary)
+          ? 'ready'
+          : Object.keys(publicSummary).length > 0 ? 'partial' : 'unavailable';
+      const displayedSummaryStatus = canFetchHistory && summaryStatus === 'ready' ? 'partial' : summaryStatus;
+      const retryAfterSummary = !canFetchHistory && (
+        summaryStatus === 'error' ||
+        (summaryStatus === 'partial' && Boolean(publicSummary.tokenRiskError))
+      );
+      this.#applyTokenRisk(address, {
+        ...publicSummary,
+        tokenRiskStatus: displayedSummaryStatus,
+        tokenRiskDataAt: unixSeconds(this.now)
+      }, { replace: true, final: !canFetchHistory && !retryAfterSummary });
+      summaryApplied = ['partial', 'ready'].includes(displayedSummaryStatus);
+      if (canFetchHistory) {
+        this.#queueTokenRiskHistory(address, { creatorContext, publicSummary, force });
+        return;
+      } else if (retryAfterSummary) {
+        const error = new Error(publicSummary.tokenRiskError || 'Token risk sources were unavailable');
+        error.retryable = true;
+        throw error;
+      }
+      this.tokenRiskFailures.delete(address);
+      this.tokenRiskPendingEventIds.delete(address);
+    } catch (error) {
+      if (this.closed || this.tokenRiskAbortController.signal.aborted) return;
+      this.#scheduleTokenRiskRetry(address, error, { summaryApplied });
+    }
+  }
+
+  #queueTokenRiskHistory(address, { creatorContext, publicSummary, force = false }) {
+    if (this.closed || !this.riskClient || typeof this.riskClient.fetchCreatorHistory !== 'function') return;
+    const normalized = normalizeAddress(address);
+    if (!ADDRESS_PATTERN.test(normalized) || this.tokenRiskHistoryLookups.has(normalized)) return;
+    const queued = this.tokenRiskHistoryQueued.get(normalized);
+    if (queued) {
+      queued.creatorContext = creatorContext;
+      queued.publicSummary = publicSummary;
+      queued.force ||= force;
+      return;
+    }
+    if (this.tokenRiskHistoryQueue.length >= TOKEN_RISK_QUEUE_MAX) return;
+    const job = { address: normalized, creatorContext, publicSummary, force };
+    this.tokenRiskHistoryQueued.set(normalized, job);
+    this.tokenRiskHistoryQueue.push(job);
+    this.#drainTokenRiskHistoryQueue();
+  }
+
+  #drainTokenRiskHistoryQueue() {
+    if (this.closed || !this.riskClient || this.tokenRiskHistoryActive > 0) return;
+    const job = this.tokenRiskHistoryQueue.shift();
+    if (!job) return;
+    this.tokenRiskHistoryQueued.delete(job.address);
+    if (this.tokenRiskHistoryLookups.has(job.address) || this.tokenRiskRetryTimers.has(job.address)) {
+      this.#drainTokenRiskHistoryQueue();
+      return;
+    }
+    this.tokenRiskHistoryActive = 1;
+    const lookup = this.#fetchTokenRiskHistory(job);
+    this.tokenRiskHistoryLookups.set(job.address, lookup);
+    void lookup.finally(() => {
+      if (this.tokenRiskHistoryLookups.get(job.address) === lookup) {
+        this.tokenRiskHistoryLookups.delete(job.address);
+      }
+      this.tokenRiskHistoryActive = 0;
+      this.#drainTokenRiskHistoryQueue();
+    }).catch(() => {});
+  }
+
+  async #fetchTokenRiskHistory({ address, creatorContext, publicSummary, force }) {
+    try {
+      const history = await this.riskClient.fetchCreatorHistory(address, {
+        creatorContext,
+        signal: this.tokenRiskAbortController.signal,
+        force
+      });
+      if (this.closed || this.tokenRiskAbortController.signal.aborted) return;
+      const historyPatch = tokenRiskPatch(history);
+      const combinedFlags = [...new Set([
+        ...(publicSummary.tokenRiskFlags || []),
+        ...(historyPatch.tokenRiskFlags || [])
+      ])];
+      const combined = { ...publicSummary, ...historyPatch, tokenRiskFlags: combinedFlags };
+      const combinedStatus = tokenRiskComplete(combined) ? 'ready' : 'partial';
+      const retry = combinedStatus === 'partial' && Boolean(publicSummary.tokenRiskError);
+      this.#applyTokenRisk(address, {
+        ...historyPatch,
+        tokenRiskFlags: combinedFlags,
+        tokenRiskStatus: combinedStatus,
+        tokenRiskDataAt: unixSeconds(this.now)
+      }, { replace: false, final: !retry });
+      if (retry) {
+        const error = new Error(publicSummary.tokenRiskError || 'Token risk sources were incomplete');
+        error.retryable = true;
+        throw error;
+      }
+      this.tokenRiskFailures.delete(address);
+      this.tokenRiskPendingEventIds.delete(address);
+    } catch (error) {
+      if (this.closed || this.tokenRiskAbortController.signal.aborted) return;
+      this.#scheduleTokenRiskRetry(address, error, { summaryApplied: true });
+    }
+  }
+
+  #applyTokenRisk(address, riskData, { replace = false, final = true } = {}) {
+    const publicRisk = tokenRiskPatch(riskData);
+    const metadataInput = { address, ...publicRisk };
+    if (!tokenRiskFiniteNumber(metadataInput.liquidityUsd)) delete metadataInput.liquidityUsd;
+    const metadata = this.store.upsertMonitorTokenRiskData?.(
+      metadataInput,
+      { replace }
+    ) || metadataInput;
+    const eventIds = [...(this.tokenRiskPendingEventIds.get(address) || [])];
+    const updated = this.store.updateMonitorEventsTokenRiskData?.(
+      address,
+      metadata,
+      { eventIds, replace: false }
+    ) || [];
+    this.#emitTokenRiskPatches(updated);
+    if (final) this.#removePendingTokenRiskEvents(address, eventIds);
+  }
+
+  #emitTokenRiskPatches(events) {
+    const patches = new Map();
+    for (const event of events) {
+      const data = tokenRiskPatch(event);
+      const key = JSON.stringify(data);
+      const patch = patches.get(key) || { eventIds: [], tokenAddress: event.tokenAddress, ...data };
+      patch.eventIds.push(event.id);
+      patches.set(key, patch);
+    }
+    for (const patch of patches.values()) this.#emit('event_update', patch);
+  }
+
+  #scheduleTokenRiskRetry(address, error, { summaryApplied = false } = {}) {
+    if (this.closed || this.tokenRiskRetryTimers.has(address)) return;
+    const failures = (this.tokenRiskFailures.get(address) || 0) + 1;
+    const retryable = error?.retryable !== false;
+    if (!retryable || failures >= TOKEN_RISK_MAX_FAILURES) {
+      this.tokenRiskFailures.delete(address);
+      const cached = this.store.getMonitorTokenMetadata?.(address) || {};
+      const hasPartial = summaryApplied || ['partial', 'ready'].includes(cached.tokenRiskStatus);
+      this.#applyTokenRisk(address, {
+        tokenRiskStatus: hasPartial ? 'partial' : 'error',
+        tokenRiskDataAt: unixSeconds(this.now),
+        tokenRiskError: errorMessage(error)
+      }, { replace: false, final: true });
+      return;
+    }
+    this.tokenRiskFailures.set(address, failures);
+    const delay = Math.min(
+      this.tokenRiskRetryMaxMs,
+      this.tokenRiskRetryBaseMs * (2 ** Math.min(8, failures - 1))
+    );
+    const timer = this.setTimer(() => {
+      this.tokenRiskRetryTimers.delete(address);
+      this.#queueTokenRisk(address, { priority: true, force: true });
+    }, delay);
+    timer?.unref?.();
+    this.tokenRiskRetryTimers.set(address, timer);
   }
 
   async #getTokenMetadata(address, signal) {

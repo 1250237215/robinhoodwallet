@@ -77,6 +77,27 @@ function executableGeneratedWalletProfitPosition() {
   return Function(`${source}\nreturn generatedWalletProfitPosition;`)();
 }
 
+function executableRenderMonitorTokenRisk(chainId = 'robinhood') {
+  const source = `
+    ${appSourceBetween('function escapeHtml(value)', 'function safeHttpUrl(value)')}
+    ${appSourceBetween('function finiteNumber(...values)', 'function firstValue(source, keys, fallback = null)')}
+    ${appSourceBetween('function normalizedMonitorRiskPercent(value)', 'function monitorPlatformLabel(value)')}
+    return renderMonitorTokenRisk;
+  `;
+  return Function(
+    'activeChain',
+    'formatMoney',
+    'formatDateTime',
+    'MONITOR_TOKEN_RISK_STATUSES',
+    source
+  )(
+    () => ({ id: chainId }),
+    (value) => `$${Number(value) / 1_000}K`,
+    (value) => String(value),
+    new Set(['pending', 'partial', 'ready', 'unavailable', 'error'])
+  );
+}
+
 test('home is the manual Robinhood smart-money workspace', () => {
   assert.match(indexHtml, /<title>1874catch<\/title>/);
   assert.match(indexHtml, /<link rel="icon" href="assets\/ikun-chick\.svg" type="image\/svg\+xml" \/>/);
@@ -1764,6 +1785,115 @@ test('real-time token events upsert asynchronous market cap and token-age enrich
   assert.match(appJs, /event\.eventType === 'buy' \? '买入时币龄' : '事件时币龄'/);
   assert.match(appJs, /marketCap === null \? '待获取'/);
   assert.match(appJs, /tokenAge !== '待获取'/);
+});
+
+test('Robinhood token risk enrichment is progressive, nullable and isolated from other chains', () => {
+  const normalizeSource = appSourceBetween('function normalizeMonitorEvent(raw, current = null)', 'function generatedWalletProfitPosition(');
+  assert.match(normalizeSource, /const pickBoolean = \(keys\) => nullableBoolean\(pickPresent\(keys, null\)\)/);
+  const normalizeBoolean = Function(`${appSourceBetween('function nullableBoolean(value)', 'function firstValue(source, keys, fallback = null)')}\nreturn nullableBoolean;`)();
+  assert.equal(normalizeBoolean(false), false);
+  assert.equal(normalizeBoolean(true), true);
+  assert.equal(normalizeBoolean(0), null);
+  for (const field of [
+    ['tokenRiskStatus', 'token_risk_status'],
+    ['liquidityUsd', 'liquidity_usd'],
+    ['top10HolderPercent', 'top10_holder_percent'],
+    ['creatorHoldingPercent', 'creator_holding_percent'],
+    ['canMintMore', 'can_mint_more'],
+    ['creatorTokenCount', 'creator_token_count'],
+    ['creatorDeadTokenCount', 'creator_dead_token_count'],
+    ['creatorHistoryPartial', 'creator_history_partial'],
+    ['deadDefinition', 'dead_definition'],
+    ['tokenRiskDataAt', 'token_risk_data_at'],
+    ['tokenRiskError', 'token_risk_error'],
+    ['tokenRiskFlags', 'token_risk_flags']
+  ]) {
+    assert.match(normalizeSource, new RegExp(`${field[0]}[\\s\\S]{0,100}${field[1]}`));
+  }
+  assert.match(normalizeSource, /sellable: pickBoolean\(\['sellable'\]\)/);
+  assert.match(normalizeSource, /canMintMore: pickBoolean\(\['canMintMore', 'can_mint_more'\]\)/);
+
+  const renderRobinhoodRisk = executableRenderMonitorTokenRisk();
+  const readyMarkup = renderRobinhoodRisk({
+    tokenAddress: '0x0000000000000000000000000000000000000001',
+    assetType: 'token',
+    tokenRiskStatus: 'ready',
+    sellable: false,
+    liquidityUsd: 42_000,
+    top10HolderPercent: 1,
+    creatorHoldingPercent: 0,
+    canMintMore: false,
+    creatorTokenCount: 0,
+    creatorDeadTokenCount: 0,
+    tokenRiskFlags: []
+  });
+  assert.match(readyMarkup, /data-status="ready"/);
+  assert.match(readyMarkup, /data-metric="sellable" data-state="danger"[\s\S]*疑似不可卖/);
+  assert.match(readyMarkup, /流动性[\s\S]*\$42K/);
+  assert.match(readyMarkup, /前10占比[\s\S]*<dd>1%<\/dd>/);
+  assert.doesNotMatch(readyMarkup, /100%/);
+  assert.match(readyMarkup, /创建者持仓[\s\S]*<dd>0%<\/dd>/);
+  assert.match(readyMarkup, /data-metric="mintable" data-state="safe"[\s\S]*未发现增发/);
+  assert.doesNotMatch(readyMarkup, /不可增发/);
+  assert.match(readyMarkup, /0币 \/ 0个归零/);
+
+  const recentSalesMarkup = renderRobinhoodRisk({
+    tokenAddress: '0x0000000000000000000000000000000000000001',
+    assetType: 'token',
+    tokenRiskStatus: 'ready',
+    sellable: true,
+    tokenRiskFlags: ['sellability_recent_sales_only']
+  });
+  assert.match(recentSalesMarkup, /data-metric="sellable" data-state="ready"[\s\S]*近期有卖出/);
+  assert.doesNotMatch(recentSalesMarkup, />可卖出</);
+
+  const confirmedSellableMarkup = renderRobinhoodRisk({
+    tokenAddress: '0x0000000000000000000000000000000000000001',
+    assetType: 'token',
+    tokenRiskStatus: 'ready',
+    sellable: true,
+    tokenRiskFlags: []
+  });
+  assert.match(confirmedSellableMarkup, /data-metric="sellable" data-state="safe"[\s\S]*>可卖出</);
+  assert.doesNotMatch(confirmedSellableMarkup, /近期有卖出/);
+
+  const partialHistoryMarkup = renderRobinhoodRisk({
+    tokenAddress: '0x0000000000000000000000000000000000000001',
+    assetType: 'token',
+    tokenRiskStatus: 'ready',
+    creatorTokenCount: 8,
+    creatorDeadTokenCount: 6,
+    creatorHistoryPartial: true,
+    deadDefinition: 'age>=24h && (no_pair || liquidity<1000)'
+  });
+  assert.match(partialHistoryMarkup, /≥8币 \/ ≥6个归零/);
+  assert.match(partialHistoryMarkup, /data-metric="creator-history"[\s\S]*title="归零口径：/);
+  assert.match(partialHistoryMarkup, /当前历史仅代表已发现下限，实际发币和归零数量可能更高/);
+  assert.match(partialHistoryMarkup, /服务端口径：age&gt;=24h &amp;&amp; \(no_pair \|\| liquidity&lt;1000\)/);
+
+  assert.match(renderRobinhoodRisk({ tokenAddress: '0x1', assetType: 'token', tokenRiskStatus: 'pending' }), /风险分析中/);
+  assert.match(renderRobinhoodRisk({ tokenAddress: '0x1', assetType: 'token', tokenRiskStatus: 'partial' }), /data-status="partial"[\s\S]*卖出待验证/);
+  assert.match(renderRobinhoodRisk({ tokenAddress: '0x1', assetType: 'token', tokenRiskStatus: 'unavailable' }), /暂无风险数据/);
+  assert.match(renderRobinhoodRisk({ tokenAddress: '0x1', assetType: 'token', tokenRiskStatus: 'error' }), /风险资料获取失败/);
+  assert.equal(renderRobinhoodRisk({ tokenAddress: '0x1', assetType: 'native', tokenRiskStatus: 'ready' }), '');
+  assert.equal(executableRenderMonitorTokenRisk('base')({ tokenAddress: '0x1', assetType: 'token', tokenRiskStatus: 'ready' }), '');
+  assert.equal(executableRenderMonitorTokenRisk('base')({
+    tokenAddress: '0x1',
+    assetType: 'token',
+    tokenRiskStatus: 'ready',
+    creatorTokenCount: 8,
+    creatorDeadTokenCount: 6,
+    creatorHistoryPartial: true
+  }), '');
+  assert.equal(executableRenderMonitorTokenRisk('solana')({ tokenAddress: 'mint', assetType: 'token', tokenRiskStatus: 'ready' }), '');
+
+  const renderSource = appSourceBetween('function normalizedMonitorRiskPercent(value)', 'function monitorPlatformLabel(value)');
+  assert.match(renderSource, /activeChain\(\)\.id !== 'robinhood'/);
+  assert.doesNotMatch(renderSource, /\bfetch\s*\(/);
+  assert.match(stylesCss, /\.monitor-token-risk \{[\s\S]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
+  assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.monitor-token-risk \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  const riskStyles = stylesCss.slice(stylesCss.indexOf('.monitor-token-risk,'), stylesCss.indexOf('.monitor-event-links {'));
+  assert.doesNotMatch(riskStyles, /background(?:-color)?\s*:|border-radius\s*:/);
 });
 
 test('real-time feed distinguishes proven top-profit buyers and manually named wallets', () => {

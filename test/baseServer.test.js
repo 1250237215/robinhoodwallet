@@ -82,6 +82,7 @@ test('starts an isolated Base API, scanner, monitor, Bark store, and database', 
     assert.equal(running.debotClient.chain, 'base');
     assert.equal(running.marketDataClient instanceof BaseMarketClient, true);
     assert.equal(running.monitor.debotClient, running.marketDataClient);
+    assert.equal(running.monitor.riskClient, null);
     assert.equal(running.holderClient instanceof RobinhoodHolderClient, true);
     assert.equal(running.holderClient.baseUrl, BASE_CHAIN.blockscoutApiUrl);
     assert.equal(running.monitor.chainProfile.id, 'base');

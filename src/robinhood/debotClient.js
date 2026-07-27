@@ -59,11 +59,20 @@ function ratioToPercent(value) {
 
 function normalizeSafety(raw = {}) {
   const goplus = raw?.goplus || raw?.safe_info?.goplus || {};
-  const booleanFlag = (value) => (value === 0 ? false : value === 1 ? true : null);
+  const ownership = goplus?.ownership_detail || {};
+  const booleanFlag = (value) => {
+    if (value === false || value === 0 || value === '0') return false;
+    if (value === true || value === 1 || value === '1') return true;
+    return null;
+  };
   return {
     trusted: raw?.debot_trust === true,
     honeypot: booleanFlag(goplus.is_honeypot),
+    cannotSellAll: booleanFlag(goplus.cannot_sell_all),
+    inDex: booleanFlag(goplus.is_in_dex),
+    mintable: booleanFlag(ownership.is_mintable ?? goplus.is_mintable),
     openSource: booleanFlag(goplus.is_open_source),
+    isProxy: booleanFlag(goplus.is_proxy),
     ownershipAbandoned: booleanFlag(goplus.is_ownership_abandoned),
     poolLocked: booleanFlag(goplus.is_pool_locked),
     buyTax: asNumber(goplus.buy_tax),

@@ -10,6 +10,7 @@ import { createRobinhoodStore } from '../src/robinhood/store.js';
 
 const wallet = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const token = '0x1111111111111111111111111111111111111111';
+const tokenB = '0x2222222222222222222222222222222222222222';
 const sender = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const router = '0xcccccccccccccccccccccccccccccccccccccccc';
 
@@ -475,6 +476,466 @@ test('does not schedule monitor retries for a non-retryable market-data 403', as
   assert.equal(monitor.marketDataRetryTimers.size, 0);
   assert.equal(monitor.marketDataFailures.size, 0);
   assert.equal(store.listMonitorEvents()[0].marketCapUsd, null);
+  monitor.close();
+  store.close();
+});
+
+test('emits token events before risk enrichment and patches all same-CA events progressively', async () => {
+  const store = createRobinhoodStore(':memory:');
+  store.upsertWalletAnnotation({
+    address: wallet,
+    alias: 'Alpha',
+    status: 'active',
+    monitorRules: { buy: { enabled: true } },
+    createdAt: 1,
+    updatedAt: 1
+  });
+  store.setMeta('robinhood:monitor:cursor', '100');
+  let head = 101;
+  let logs = [
+    incomingLog({ transactionHash: hash('31'), index: 1, blockNumber: 101 }),
+    incomingLog({ transactionHash: hash('32'), index: 2, blockNumber: 101 })
+  ];
+  const summary = deferred();
+  const history = deferred();
+  const riskCalls = [];
+  const messages = [];
+  const nowMs = 2_000_000_100_000;
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    now: () => nowMs,
+    debotClient: {
+      async fetchTokenMetrics() {
+        return { marketCapUsd: 90_000, liquidityUsd: 42_000, creationTimestamp: 1_999_999_000 };
+      }
+    },
+    riskClient: {
+      fetchTokenRiskSummary(address) {
+        riskCalls.push(`summary:${address}`);
+        return summary.promise;
+      },
+      fetchCreatorHistory(address) {
+        riskCalls.push(`history:${address}`);
+        return history.promise;
+      }
+    },
+    rpcClient: {
+      async getBlockNumber() {
+        return head;
+      },
+      async getLogs() {
+        return logs;
+      },
+      async getTransactionsByHashes(hashes) {
+        return hashes.map((transactionHash) => ({ hash: transactionHash, from: wallet, to: router }));
+      },
+      async getTransactionReceipts(hashes) {
+        return hashes.map((transactionHash) => ({
+          transactionHash,
+          status: '0x1',
+          logs: [{ topics: [V2_SWAP_TOPIC] }]
+        }));
+      },
+      async getBlockByNumber(blockNumber) {
+        return { number: quantity(blockNumber), timestamp: quantity(Math.floor(nowMs / 1_000) - 1) };
+      },
+      async ethCall({ data }) {
+        if (data === '0x95d89b41') return abiString('TOK');
+        if (data === '0x06fdde03') return abiString('Token');
+        return `0x${'12'.padStart(64, '0')}`;
+      }
+    }
+  });
+  monitor.subscribe((message) => messages.push(message));
+
+  await monitor.pollOnce();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(messages.filter((message) => message.type === 'event').length, 2);
+  assert.deepEqual(riskCalls, [`summary:${token}`]);
+  assert.equal(store.listMonitorEvents().every((event) => event.tokenRiskStatus === 'pending'), true);
+
+  summary.resolve({
+    sellable: true,
+    liquidityUsd: 42_000,
+    top10HolderPercent: 31,
+    creatorHoldingPercent: 2.8,
+    canMintMore: true,
+    creatorTokenCount: null,
+    creatorDeadTokenCount: null,
+    tokenRiskStatus: 'partial',
+    tokenRiskFlags: ['mintable'],
+    creatorContext: { creatorAddress: sender }
+  });
+  await eventually(() => {
+    assert.equal(store.listMonitorEvents().every((event) => event.tokenRiskStatus === 'partial'), true);
+    assert.deepEqual(riskCalls, [`summary:${token}`, `history:${token}`]);
+  });
+  const partialPatch = messages
+    .filter((message) => message.type === 'event_update')
+    .map((message) => message.data)
+    .find((patch) => patch.tokenRiskStatus === 'partial');
+  assert.deepEqual(partialPatch.eventIds, [1, 2]);
+  assert.equal(partialPatch.liquidityUsd, 42_000);
+
+  head = 102;
+  logs = [incomingLog({ transactionHash: hash('33'), index: 3, blockNumber: 102 })];
+  await monitor.pollOnce();
+  assert.deepEqual(riskCalls, [`summary:${token}`, `history:${token}`]);
+  assert.equal(store.listMonitorEvents()[0].tokenRiskStatus, 'partial');
+  assert.deepEqual([...(monitor.tokenRiskPendingEventIds.get(token) || [])], [1, 2, 3]);
+
+  history.resolve({
+    creatorTokenCount: 8,
+    creatorDeadTokenCount: 6,
+    creatorHistoryPartial: false,
+    tokenRiskFlags: ['bad_creator_history'],
+    deadDefinition: 'age>=24h && (no_pair || liquidity<1000)'
+  });
+  await eventually(() => {
+    assert.equal(store.listMonitorEvents().every((event) => event.tokenRiskStatus === 'ready'), true);
+  });
+  const readyPatch = messages
+    .filter((message) => message.type === 'event_update')
+    .map((message) => message.data)
+    .find((patch) => patch.tokenRiskStatus === 'ready');
+  assert.deepEqual(readyPatch.eventIds, [1, 2, 3]);
+  assert.equal(readyPatch.creatorTokenCount, 8);
+  assert.equal(readyPatch.creatorDeadTokenCount, 6);
+  assert.deepEqual(readyPatch.tokenRiskFlags, ['mintable', 'bad_creator_history']);
+  assert.deepEqual(store.listMonitorEvents()[0].tokenRiskFlags, ['mintable', 'bad_creator_history']);
+
+  head = 103;
+  logs = [incomingLog({ transactionHash: hash('34'), index: 4, blockNumber: 103 })];
+  await monitor.pollOnce();
+  assert.deepEqual(riskCalls, [`summary:${token}`, `history:${token}`]);
+  const newest = store.listMonitorEvents()[0];
+  assert.equal(newest.tokenRiskStatus, 'ready');
+  assert.equal(newest.creatorTokenCount, 8);
+  assert.equal(store.listMonitorEvents().length, 4);
+  monitor.close();
+  store.close();
+});
+
+test('keeps explicit null risk numbers partial and still fetches creator history', async () => {
+  const store = createRobinhoodStore(':memory:');
+  const inserted = insertEvent(store).event;
+  store.updateMonitorEventsTokenRiskData(
+    token,
+    { tokenRiskStatus: 'pending' },
+    { eventIds: [inserted.id] }
+  );
+  let historyCalls = 0;
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    now: () => 2_000_000_002_000,
+    riskClient: {
+      async fetchTokenRiskSummary() {
+        return {
+          sellable: true,
+          liquidityUsd: 42_000,
+          top10HolderPercent: null,
+          creatorHoldingPercent: 2.8,
+          canMintMore: false,
+          creatorTokenCount: null,
+          creatorDeadTokenCount: null,
+          creatorContext: { creatorAddress: sender }
+        };
+      },
+      async fetchCreatorHistory() {
+        historyCalls += 1;
+        return {
+          creatorTokenCount: 8,
+          creatorDeadTokenCount: 6,
+          creatorHistoryPartial: false
+        };
+      }
+    },
+    rpcClient: {
+      async getBlockNumber() {
+        return 100;
+      },
+      async getLogs() {
+        return [];
+      }
+    }
+  });
+
+  monitor.start();
+  await eventually(() => {
+    const event = store.listMonitorEvents()[0];
+    assert.equal(event.creatorTokenCount, 8);
+    assert.equal(event.tokenRiskStatus, 'partial');
+  });
+  assert.equal(historyCalls, 1);
+  assert.equal(store.listMonitorEvents()[0].top10HolderPercent, null);
+  monitor.close();
+  store.close();
+});
+
+test('resumes interrupted partial creator history after restart', async () => {
+  const store = createRobinhoodStore(':memory:');
+  const inserted = insertEvent(store, { detectedAt: 1_999_000_000 }).event;
+  const interrupted = {
+    address: token,
+    tokenRiskStatus: 'partial',
+    sellable: true,
+    liquidityUsd: 42_000,
+    top10HolderPercent: 31,
+    creatorHoldingPercent: 2.8,
+    canMintMore: false,
+    creatorTokenCount: null,
+    creatorDeadTokenCount: null,
+    tokenRiskDataAt: 2_000_000_001
+  };
+  store.upsertMonitorTokenRiskData(interrupted, { replace: true });
+  store.updateMonitorEventsTokenRiskData(token, interrupted, {
+    eventIds: [inserted.id],
+    replace: true
+  });
+  const calls = [];
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    now: () => 2_000_000_002_000,
+    riskClient: {
+      async fetchTokenRiskSummary() {
+        calls.push('summary');
+        return {
+          ...interrupted,
+          creatorContext: { creatorAddress: sender }
+        };
+      },
+      async fetchCreatorHistory() {
+        calls.push('history');
+        return {
+          creatorTokenCount: 8,
+          creatorDeadTokenCount: 6,
+          creatorHistoryPartial: false
+        };
+      }
+    },
+    rpcClient: {
+      async getBlockNumber() {
+        return 100;
+      },
+      async getLogs() {
+        return [];
+      }
+    }
+  });
+
+  monitor.start();
+  await eventually(() => assert.equal(store.listMonitorEvents()[0].tokenRiskStatus, 'ready'));
+  assert.deepEqual(calls, ['summary', 'history']);
+  assert.equal(store.listMonitorEvents()[0].creatorTokenCount, 8);
+  monitor.close();
+  store.close();
+});
+
+test('retries resolved partial risk results with a forced fresh lookup', async () => {
+  const store = createRobinhoodStore(':memory:');
+  const inserted = insertEvent(store).event;
+  store.updateMonitorEventsTokenRiskData(
+    token,
+    { tokenRiskStatus: 'pending' },
+    { eventIds: [inserted.id] }
+  );
+  const forces = [];
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    now: () => 2_000_000_002_000,
+    tokenRiskRetryBaseMs: 10,
+    tokenRiskRetryMaxMs: 10,
+    riskClient: {
+      async fetchTokenRiskSummary(_address, options) {
+        forces.push(options.force === true);
+        if (forces.length === 1) {
+          return {
+            tokenRiskStatus: 'partial',
+            liquidityUsd: 42_000,
+            tokenRiskError: 'holders: temporary HTTP 429'
+          };
+        }
+        return {
+          tokenRiskStatus: 'ready',
+          sellable: true,
+          liquidityUsd: 42_000,
+          top10HolderPercent: 31,
+          creatorHoldingPercent: 2.8,
+          canMintMore: false,
+          creatorTokenCount: 8,
+          creatorDeadTokenCount: 6
+        };
+      }
+    },
+    rpcClient: {
+      async getBlockNumber() {
+        return 100;
+      },
+      async getLogs() {
+        return [];
+      }
+    }
+  });
+
+  monitor.start();
+  await eventually(() => assert.equal(store.listMonitorEvents()[0].tokenRiskStatus, 'ready'));
+  assert.deepEqual(forces, [false, true]);
+  assert.equal(monitor.tokenRiskFailures.size, 0);
+  monitor.close();
+  store.close();
+});
+
+test('a failed risk liquidity lookup does not erase market enrichment', async () => {
+  const store = createRobinhoodStore(':memory:');
+  store.upsertMonitorTokenMarketData({
+    address: token,
+    liquidityUsd: 77_000,
+    marketCapUsd: 125_000,
+    tokenCreationTimestamp: 1_999_999_000,
+    marketDataAt: 2_000_000_001
+  });
+  const inserted = insertEvent(store, {
+    marketCapUsd: 125_000,
+    marketDataAt: 2_000_000_001
+  }).event;
+  store.updateMonitorEventsTokenMarketData(token, {
+    liquidityUsd: 77_000,
+    marketDataAt: 2_000_000_001
+  }, { eventIds: [inserted.id] });
+  store.updateMonitorEventsTokenRiskData(
+    token,
+    { tokenRiskStatus: 'pending' },
+    { eventIds: [inserted.id] }
+  );
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    now: () => 2_000_000_002_000,
+    riskClient: {
+      async fetchTokenRiskSummary() {
+        return {
+          tokenRiskStatus: 'partial',
+          sellable: true,
+          liquidityUsd: null,
+          top10HolderPercent: 31,
+          creatorHoldingPercent: 2.8,
+          canMintMore: false,
+          creatorTokenCount: 8,
+          creatorDeadTokenCount: 6
+        };
+      }
+    },
+    rpcClient: {
+      async getBlockNumber() {
+        return 100;
+      },
+      async getLogs() {
+        return [];
+      }
+    }
+  });
+
+  monitor.start();
+  await eventually(() => assert.equal(store.listMonitorEvents()[0].tokenRiskStatus, 'partial'));
+  assert.equal(store.listMonitorEvents()[0].liquidityUsd, 77_000);
+  assert.equal(store.getMonitorTokenMetadata(token).liquidityUsd, 77_000);
+  monitor.close();
+  store.close();
+});
+
+test('slow creator history does not block the next token risk summary', async () => {
+  const store = createRobinhoodStore(':memory:');
+  const first = insertEvent(store, { tokenAddress: token, logIndex: 1 }).event;
+  const second = insertEvent(store, {
+    tokenAddress: tokenB,
+    transactionHash: hash('89'),
+    logIndex: 2
+  }).event;
+  store.updateMonitorEventsTokenRiskData(token, { tokenRiskStatus: 'pending' }, { eventIds: [first.id] });
+  store.updateMonitorEventsTokenRiskData(tokenB, { tokenRiskStatus: 'pending' }, { eventIds: [second.id] });
+  const firstHistory = deferred();
+  const summaryCalls = [];
+  const historyCalls = [];
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    now: () => 2_000_000_002_000,
+    tokenRiskConcurrency: 1,
+    riskClient: {
+      async fetchTokenRiskSummary(address) {
+        summaryCalls.push(address);
+        return {
+          tokenRiskStatus: 'partial',
+          sellable: true,
+          liquidityUsd: 42_000,
+          top10HolderPercent: 31,
+          creatorHoldingPercent: 2.8,
+          canMintMore: false,
+          creatorTokenCount: null,
+          creatorDeadTokenCount: null,
+          creatorContext: { creatorAddress: sender }
+        };
+      },
+      async fetchCreatorHistory(address) {
+        historyCalls.push(address);
+        if (historyCalls.length === 1) return firstHistory.promise;
+        return {
+          creatorTokenCount: 4,
+          creatorDeadTokenCount: 2,
+          creatorHistoryPartial: false
+        };
+      }
+    },
+    rpcClient: {
+      async getBlockNumber() {
+        return 100;
+      },
+      async getLogs() {
+        return [];
+      }
+    }
+  });
+
+  monitor.start();
+  await eventually(() => assert.equal(summaryCalls.length, 2));
+  assert.deepEqual(summaryCalls, [token, tokenB]);
+  assert.deepEqual(historyCalls, [token]);
+  firstHistory.resolve({
+    creatorTokenCount: 8,
+    creatorDeadTokenCount: 6,
+    creatorHistoryPartial: false
+  });
+  await eventually(() => assert.equal(historyCalls.length, 2));
+  await eventually(() => {
+    assert.equal(store.listMonitorEvents().every((event) => event.tokenRiskStatus === 'ready'), true);
+  });
+  monitor.close();
+  store.close();
+});
+
+test('marks terminal token-risk failures as error instead of leaving pending forever', async () => {
+  const store = createRobinhoodStore(':memory:');
+  const inserted = insertEvent(store).event;
+  store.updateMonitorEventsTokenRiskData(token, { tokenRiskStatus: 'pending' }, { eventIds: [inserted.id] });
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    riskClient: {
+      async fetchTokenRiskSummary() {
+        const error = new Error('risk source denied the request');
+        error.retryable = false;
+        throw error;
+      }
+    },
+    rpcClient: {
+      async getBlockNumber() {
+        return 100;
+      },
+      async getLogs() {
+        return [];
+      }
+    }
+  });
+  monitor.start();
+  await eventually(() => assert.equal(store.listMonitorEvents()[0].tokenRiskStatus, 'error'));
+  assert.match(store.listMonitorEvents()[0].tokenRiskError, /denied/);
   monitor.close();
   store.close();
 });

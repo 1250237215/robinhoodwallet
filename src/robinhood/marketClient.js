@@ -27,6 +27,19 @@ function nonNegativeNumber(value) {
   return parsed !== null && parsed >= 0 ? parsed : null;
 }
 
+function nonNegativeCount(value) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!/^\d+$/.test(trimmed)) return null;
+    value = trimmed;
+  } else if (typeof value !== 'number') {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) return null;
+  return parsed === 0 ? 0 : parsed;
+}
+
 function positiveTimestamp(value) {
   const parsed = number(value);
   if (!(parsed > 0)) return null;
@@ -66,6 +79,9 @@ function emptyMetrics(address, { retryable = true } = {}) {
     address,
     marketCapUsd: null,
     creationTimestamp: null,
+    recentSellCount: null,
+    recentSellCounts: { m5: null, h1: null },
+    poolAddresses: [],
     source: 'dexscreener_robinhood',
     retryable
   };
@@ -83,6 +99,12 @@ export function normalizeRobinhoodDexScreenerMetrics(rows, tokenAddress, { now =
     .filter((timestamp) => timestamp !== null)
     .sort((left, right) => left - right)[0] ?? null;
   const marketCapUsd = marketCapForPair(primaryPair);
+  const recentSellCounts = {
+    m5: nonNegativeCount(primaryPair?.txns?.m5?.sells),
+    h1: nonNegativeCount(primaryPair?.txns?.h1?.sells)
+  };
+  const availableRecentSellCounts = Object.values(recentSellCounts)
+    .filter((count) => count !== null);
 
   return {
     chain: 'robinhood',
@@ -96,8 +118,13 @@ export function normalizeRobinhoodDexScreenerMetrics(rows, tokenAddress, { now =
     creationTimestampSource: creationTimestamp === null ? null : 'dexscreener_earliest_pair_created_at',
     updatedAt: Math.floor(now() / 1_000),
     primaryPoolAddress: normalizeAddress(primaryPair?.pairAddress),
+    poolAddresses: [...new Set(pairs.map((pair) => normalizeAddress(pair?.pairAddress)))],
     primaryDex: String(primaryPair?.dexId || ''),
     pairCount: pairs.length,
+    recentSellCount: availableRecentSellCounts.length
+      ? Math.max(...availableRecentSellCounts)
+      : null,
+    recentSellCounts,
     marketCapSource: nonNegativeNumber(primaryPair?.marketCap) !== null
       ? 'dexscreener_market_cap'
       : marketCapUsd === null

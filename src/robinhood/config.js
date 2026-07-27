@@ -133,6 +133,42 @@ export function createRobinhoodConfig(env = process.env) {
       1,
       30
     )),
+    tokenRiskRequestTimeoutMs: boundedNumber(
+      env.ROBINHOOD_TOKEN_RISK_REQUEST_TIMEOUT_MS,
+      12_000,
+      1_000,
+      60_000
+    ),
+    monitorTokenRiskCacheSeconds: Math.floor(boundedNumber(
+      env.ROBINHOOD_MONITOR_TOKEN_RISK_CACHE_SECONDS,
+      600,
+      30,
+      86_400
+    )),
+    monitorTokenRiskConcurrency: Math.floor(boundedNumber(
+      env.ROBINHOOD_MONITOR_TOKEN_RISK_CONCURRENCY,
+      1,
+      1,
+      2
+    )),
+    monitorTokenRiskRetryBaseMs: boundedNumber(
+      env.ROBINHOOD_MONITOR_TOKEN_RISK_RETRY_BASE_MS,
+      15_000,
+      100,
+      300_000
+    ),
+    monitorTokenRiskRetryMaxMs: boundedNumber(
+      env.ROBINHOOD_MONITOR_TOKEN_RISK_RETRY_MAX_MS,
+      300_000,
+      100,
+      3_600_000
+    ),
+    tokenRiskDeadLiquidityUsd: boundedNumber(
+      env.ROBINHOOD_TOKEN_RISK_DEAD_LIQUIDITY_USD,
+      1_000,
+      0,
+      1_000_000
+    ),
     rpcMaxRetries: boundedNumber(env.ROBINHOOD_RPC_MAX_RETRIES, 6, 0, 12),
     rpcRetryDelayMs: boundedNumber(env.ROBINHOOD_RPC_RETRY_DELAY_MS, 500, 0, 10_000),
     rpcMaxRetryDelayMs: boundedNumber(env.ROBINHOOD_RPC_MAX_RETRY_DELAY_MS, 15_000, 100, 60_000),

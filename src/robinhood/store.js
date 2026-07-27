@@ -11,6 +11,7 @@ import { WALLET_MONITOR_TIERS } from './tiering.js';
 
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 const MONITOR_EVENT_TYPE_SET = new Set(WALLET_MONITOR_EVENT_TYPES);
+const MONITOR_TOKEN_RISK_STATUS_SET = new Set(['pending', 'partial', 'ready', 'unavailable', 'error']);
 const WALLET_ALIAS_SOURCE_SET = new Set(['none', 'generated', 'manual', 'unknown']);
 const DEFAULT_MONITOR_RULES_JSON = JSON.stringify(defaultWalletMonitorRules());
 const LEGACY_PROFIT_RANK_ALIAS_PATTERN = /^(.+?) 盈利榜第 ([1-9][0-9]*|待定) 名$/;
@@ -33,6 +34,58 @@ function parseJson(value, fallback = null) {
   } catch {
     return fallback;
   }
+}
+
+function optionalFiniteNumber(value, { minimum = -Infinity, maximum = Infinity } = {}) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= minimum && number <= maximum ? number : null;
+}
+
+function optionalBoolean(value) {
+  return value === true ? true : value === false ? false : null;
+}
+
+function normalizeMonitorTokenRisk(value = {}) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const status = String(source.tokenRiskStatus || '').trim().toLowerCase();
+  const flags = Array.isArray(source.tokenRiskFlags)
+    ? [...new Set(source.tokenRiskFlags
+      .map((flag) => String(flag || '').trim().toLowerCase())
+      .filter(Boolean))].slice(0, 20)
+    : [];
+  return {
+    tokenRiskStatus: MONITOR_TOKEN_RISK_STATUS_SET.has(status) ? status : '',
+    sellable: optionalBoolean(source.sellable),
+    top10HolderPercent: optionalFiniteNumber(source.top10HolderPercent, { minimum: 0, maximum: 100 }),
+    top10HolderCount: optionalFiniteNumber(source.top10HolderCount, { minimum: 0 }),
+    top10HolderPartial: optionalBoolean(source.top10HolderPartial),
+    creatorAddress: String(source.creatorAddress || '').trim().toLowerCase().slice(0, 80),
+    creatorAddressSource: String(source.creatorAddressSource || '').trim().slice(0, 80),
+    creatorHoldingPercent: optionalFiniteNumber(source.creatorHoldingPercent, { minimum: 0, maximum: 100 }),
+    canMintMore: optionalBoolean(source.canMintMore),
+    creatorTokenCount: optionalFiniteNumber(source.creatorTokenCount, { minimum: 0 }),
+    creatorDeadTokenCount: optionalFiniteNumber(source.creatorDeadTokenCount, { minimum: 0 }),
+    creatorHistoryPartial: optionalBoolean(source.creatorHistoryPartial),
+    deadDefinition: String(source.deadDefinition || '').trim().slice(0, 240),
+    tokenRiskError: String(source.tokenRiskError || '').trim().slice(0, 500),
+    tokenRiskFlags: flags,
+    tokenRiskSource: String(source.tokenRiskSource || '').trim().slice(0, 240)
+  };
+}
+
+function monitorTokenRiskFromRow(row) {
+  if (row?.risk_payload === null && row?.liquidity_usd === null && row?.risk_data_at === null) return null;
+  const risk = normalizeMonitorTokenRisk(parseJson(row?.risk_payload, {}));
+  return {
+    ...risk,
+    liquidityUsd: row?.liquidity_usd === null || row?.liquidity_usd === undefined
+      ? null
+      : Number(row.liquidity_usd),
+    tokenRiskDataAt: row?.risk_data_at === null || row?.risk_data_at === undefined
+      ? null
+      : Number(row.risk_data_at)
+  };
 }
 
 function compactLegacyProfitRankAlias(value) {
@@ -184,8 +237,11 @@ export function createRobinhoodStore(filename, {
       decimals INTEGER NOT NULL,
       complete INTEGER NOT NULL DEFAULT 0,
       market_cap_usd REAL,
+      liquidity_usd REAL,
       token_creation_timestamp INTEGER,
       market_data_at INTEGER,
+      risk_payload TEXT,
+      risk_data_at INTEGER,
       updated_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS monitor_events (
@@ -210,8 +266,11 @@ export function createRobinhoodStore(filename, {
       sound_alert INTEGER NOT NULL DEFAULT 0,
       bark_alert INTEGER NOT NULL DEFAULT 0,
       market_cap_usd REAL,
+      liquidity_usd REAL,
       token_creation_timestamp INTEGER,
       market_data_at INTEGER,
+      risk_payload TEXT,
+      risk_data_at INTEGER,
       UNIQUE(tx_hash, log_index)
     );
     CREATE TABLE IF NOT EXISTS monitor_bark_targets (
@@ -267,8 +326,11 @@ export function createRobinhoodStore(filename, {
   );
   const monitorTokenMetadataMigrations = [
     ['market_cap_usd', 'REAL'],
+    ['liquidity_usd', 'REAL'],
     ['token_creation_timestamp', 'INTEGER'],
-    ['market_data_at', 'INTEGER']
+    ['market_data_at', 'INTEGER'],
+    ['risk_payload', 'TEXT'],
+    ['risk_data_at', 'INTEGER']
   ];
   for (const [column, definition] of monitorTokenMetadataMigrations) {
     if (!monitorTokenMetadataColumns.has(column)) {
@@ -287,8 +349,11 @@ export function createRobinhoodStore(filename, {
     ['sound_alert', 'INTEGER NOT NULL DEFAULT 0'],
     ['bark_alert', 'INTEGER NOT NULL DEFAULT 0'],
     ['market_cap_usd', 'REAL'],
+    ['liquidity_usd', 'REAL'],
     ['token_creation_timestamp', 'INTEGER'],
-    ['market_data_at', 'INTEGER']
+    ['market_data_at', 'INTEGER'],
+    ['risk_payload', 'TEXT'],
+    ['risk_data_at', 'INTEGER']
   ];
   for (const [column, definition] of monitorEventMigrations) {
     if (!monitorEventColumns.has(column)) db.exec(`ALTER TABLE monitor_events ADD COLUMN ${column} ${definition}`);
@@ -380,6 +445,7 @@ export function createRobinhoodStore(filename, {
         ? null
         : Number(row.token_creation_timestamp),
       marketDataAt: row.market_data_at === null ? null : Number(row.market_data_at),
+      ...(normalizedChainId === 'robinhood' ? monitorTokenRiskFromRow(row) || {} : {}),
       updatedAt: Number(row.updated_at)
     };
   }
@@ -411,7 +477,8 @@ export function createRobinhoodStore(filename, {
       tokenCreationTimestamp: row.token_creation_timestamp === null
         ? null
         : Number(row.token_creation_timestamp),
-      marketDataAt: row.market_data_at === null ? null : Number(row.market_data_at)
+      marketDataAt: row.market_data_at === null ? null : Number(row.market_data_at),
+      ...(normalizedChainId === 'robinhood' ? monitorTokenRiskFromRow(row) || {} : {})
     };
   }
 
@@ -741,21 +808,26 @@ export function createRobinhoodStore(filename, {
       const marketCap = marketData.marketCapUsd === null || marketData.marketCapUsd === undefined ||
         marketData.marketCapUsd === '' ? NaN : Number(marketData.marketCapUsd);
       const marketCapUsd = Number.isFinite(marketCap) && marketCap >= 0 ? marketCap : null;
+      const liquidity = marketData.liquidityUsd === null || marketData.liquidityUsd === undefined ||
+        marketData.liquidityUsd === '' ? NaN : Number(marketData.liquidityUsd);
+      const liquidityUsd = Number.isFinite(liquidity) && liquidity >= 0 ? liquidity : null;
       const creationTimestamp = Number(marketData.tokenCreationTimestamp);
       const tokenCreationTimestamp = Number.isSafeInteger(creationTimestamp) && creationTimestamp > 0
         ? creationTimestamp
         : null;
       const fetchedAt = Number(marketData.marketDataAt);
-      const marketDataAt = marketCapUsd !== null && Number.isSafeInteger(fetchedAt) && fetchedAt > 0
+      const marketDataAt = (marketCapUsd !== null || liquidityUsd !== null) &&
+        Number.isSafeInteger(fetchedAt) && fetchedAt > 0
         ? fetchedAt
         : null;
       db.prepare(`
         INSERT INTO monitor_token_metadata(
-          address, symbol, name, decimals, complete, market_cap_usd,
+          address, symbol, name, decimals, complete, market_cap_usd, liquidity_usd,
           token_creation_timestamp, market_data_at, updated_at
-        ) VALUES (?, ?, ?, 18, 0, ?, ?, ?, 0)
+        ) VALUES (?, ?, ?, 18, 0, ?, ?, ?, ?, 0)
         ON CONFLICT(address) DO UPDATE SET
           market_cap_usd = COALESCE(excluded.market_cap_usd, monitor_token_metadata.market_cap_usd),
+          liquidity_usd = COALESCE(excluded.liquidity_usd, monitor_token_metadata.liquidity_usd),
           token_creation_timestamp = COALESCE(
             excluded.token_creation_timestamp,
             monitor_token_metadata.token_creation_timestamp
@@ -766,6 +838,7 @@ export function createRobinhoodStore(filename, {
         address,
         address,
         marketCapUsd,
+        liquidityUsd,
         tokenCreationTimestamp,
         marketDataAt
       );
@@ -773,20 +846,55 @@ export function createRobinhoodStore(filename, {
         db.prepare('SELECT * FROM monitor_token_metadata WHERE address = ?').get(address)
       );
     },
+    upsertMonitorTokenRiskData(riskData, { replace = false } = {}) {
+      const address = normalizeAddress(riskData.address);
+      if (!isValidAddress(address)) throw new TypeError('Invalid monitor token address');
+      const existingRow = db.prepare('SELECT * FROM monitor_token_metadata WHERE address = ?').get(address);
+      const existingPayload = parseJson(existingRow?.risk_payload, {});
+      const patch = Object.fromEntries(Object.entries(riskData).filter(([, value]) => value !== undefined));
+      const risk = normalizeMonitorTokenRisk(replace ? patch : { ...existingPayload, ...patch });
+      const liquidityUsd = optionalFiniteNumber(riskData.liquidityUsd, { minimum: 0 });
+      const replaceLiquidity = replace && Object.hasOwn(riskData, 'liquidityUsd');
+      const riskDataAt = optionalFiniteNumber(riskData.tokenRiskDataAt, { minimum: 1 });
+      db.prepare(`
+        INSERT INTO monitor_token_metadata(
+          address, symbol, name, decimals, complete, liquidity_usd,
+          risk_payload, risk_data_at, updated_at
+        ) VALUES (?, ?, ?, 18, 0, ?, ?, ?, 0)
+        ON CONFLICT(address) DO UPDATE SET
+          liquidity_usd = CASE
+            WHEN ? = 1 THEN excluded.liquidity_usd
+            ELSE COALESCE(excluded.liquidity_usd, monitor_token_metadata.liquidity_usd)
+          END,
+          risk_payload = excluded.risk_payload,
+          risk_data_at = COALESCE(excluded.risk_data_at, monitor_token_metadata.risk_data_at)
+      `).run(address, address, address, liquidityUsd, json(risk), riskDataAt, replaceLiquidity ? 1 : 0);
+      return monitorTokenMetadataFromRow(
+        db.prepare('SELECT * FROM monitor_token_metadata WHERE address = ?').get(address)
+      );
+    },
     insertMonitorEvent(event) {
       const eventType = String(event.eventType || 'buy').toLowerCase();
       if (!MONITOR_EVENT_TYPE_SET.has(eventType)) throw new TypeError('Unsupported monitor event type');
+      const assetType = String(event.assetType || 'token').trim().toLowerCase() || 'token';
+      const storesTokenRisk = normalizedChainId === 'robinhood' && assetType === 'erc20';
+      const risk = storesTokenRisk ? normalizeMonitorTokenRisk(event) : null;
+      const liquidityUsd = optionalFiniteNumber(event.liquidityUsd, { minimum: 0 });
+      const riskDataAt = storesTokenRisk
+        ? optionalFiniteNumber(event.tokenRiskDataAt, { minimum: 1 })
+        : null;
       const result = db.prepare(`
         INSERT OR IGNORE INTO monitor_events(
           event_type, asset_type, wallet_address, wallet_alias, counterparty_address, platform,
           token_address, token_symbol, token_name,
           token_amount, raw_token_amount, token_decimals, tx_hash, log_index,
           block_number, block_timestamp, detected_at, sound_alert, bark_alert,
-          market_cap_usd, token_creation_timestamp, market_data_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          market_cap_usd, liquidity_usd, token_creation_timestamp, market_data_at,
+          risk_payload, risk_data_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         eventType,
-        String(event.assetType || 'token').trim().toLowerCase() || 'token',
+        assetType,
         normalizeAddress(event.walletAddress),
         String(event.walletAlias || ''),
         normalizeAddress(event.counterpartyAddress),
@@ -808,12 +916,15 @@ export function createRobinhoodStore(filename, {
           Number.isFinite(Number(event.marketCapUsd)) && Number(event.marketCapUsd) >= 0
           ? Number(event.marketCapUsd)
           : null,
+        liquidityUsd,
         Number.isSafeInteger(Number(event.tokenCreationTimestamp)) && Number(event.tokenCreationTimestamp) > 0
           ? Number(event.tokenCreationTimestamp)
           : null,
         Number.isSafeInteger(Number(event.marketDataAt)) && Number(event.marketDataAt) > 0
           ? Number(event.marketDataAt)
-          : null
+          : null,
+        storesTokenRisk ? json(risk) : null,
+        riskDataAt
       );
       const row = db.prepare('SELECT * FROM monitor_events WHERE tx_hash = ? AND log_index = ?').get(
         normalizeTransaction(event.txHash),
@@ -827,15 +938,19 @@ export function createRobinhoodStore(filename, {
       const marketCap = marketData.marketCapUsd === null || marketData.marketCapUsd === undefined ||
         marketData.marketCapUsd === '' ? NaN : Number(marketData.marketCapUsd);
       const marketCapUsd = Number.isFinite(marketCap) && marketCap >= 0 ? marketCap : null;
+      const liquidity = marketData.liquidityUsd === null || marketData.liquidityUsd === undefined ||
+        marketData.liquidityUsd === '' ? NaN : Number(marketData.liquidityUsd);
+      const liquidityUsd = Number.isFinite(liquidity) && liquidity >= 0 ? liquidity : null;
       const creationTimestamp = Number(marketData.tokenCreationTimestamp);
       const tokenCreationTimestamp = Number.isSafeInteger(creationTimestamp) && creationTimestamp > 0
         ? creationTimestamp
         : null;
       const fetchedAt = Number(marketData.marketDataAt);
-      const marketDataAt = marketCapUsd !== null && Number.isSafeInteger(fetchedAt) && fetchedAt > 0
+      const marketDataAt = (marketCapUsd !== null || liquidityUsd !== null) &&
+        Number.isSafeInteger(fetchedAt) && fetchedAt > 0
         ? fetchedAt
         : null;
-      if (marketCapUsd === null && tokenCreationTimestamp === null) return [];
+      if (marketCapUsd === null && liquidityUsd === null && tokenCreationTimestamp === null) return [];
       const hasEventFilter = Array.isArray(eventIds);
       const normalizedEventIds = hasEventFilter
         ? [...new Set(eventIds.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))]
@@ -849,32 +964,33 @@ export function createRobinhoodStore(filename, {
         FROM monitor_events
         WHERE token_address = ?
           AND ((? IS NOT NULL AND market_cap_usd IS NULL)
+            OR (? IS NOT NULL AND liquidity_usd IS NULL)
             OR (? IS NOT NULL AND token_creation_timestamp IS NULL))
           ${eventFilter}
         ORDER BY id
-      `).all(address, marketCapUsd, tokenCreationTimestamp, ...normalizedEventIds);
+      `).all(address, marketCapUsd, liquidityUsd, tokenCreationTimestamp, ...normalizedEventIds);
       if (!rows.length) return [];
       db.exec('BEGIN');
       try {
         db.prepare(`
           UPDATE monitor_events
           SET market_cap_usd = COALESCE(market_cap_usd, ?),
+              liquidity_usd = COALESCE(liquidity_usd, ?),
               token_creation_timestamp = COALESCE(token_creation_timestamp, ?),
-              market_data_at = CASE
-                WHEN market_cap_usd IS NULL AND ? IS NOT NULL THEN ?
-                ELSE market_data_at
-              END
+              market_data_at = COALESCE(market_data_at, ?)
           WHERE token_address = ?
             AND ((? IS NOT NULL AND market_cap_usd IS NULL)
+              OR (? IS NOT NULL AND liquidity_usd IS NULL)
               OR (? IS NOT NULL AND token_creation_timestamp IS NULL))
             ${eventFilter}
         `).run(
           marketCapUsd,
+          liquidityUsd,
           tokenCreationTimestamp,
-          marketCapUsd,
           marketDataAt,
           address,
           marketCapUsd,
+          liquidityUsd,
           tokenCreationTimestamp,
           ...normalizedEventIds
         );
@@ -883,6 +999,49 @@ export function createRobinhoodStore(filename, {
         db.exec('ROLLBACK');
         throw error;
       }
+      const select = db.prepare('SELECT * FROM monitor_events WHERE id = ?');
+      return rows.map((row) => monitorEventFromRow(select.get(row.id)));
+    },
+    updateMonitorEventsTokenRiskData(tokenAddress, riskData, { eventIds, replace = false } = {}) {
+      const address = normalizeAddress(tokenAddress);
+      if (!isValidAddress(address)) throw new TypeError('Invalid monitor token address');
+      const risk = normalizeMonitorTokenRisk(riskData);
+      const liquidityUsd = optionalFiniteNumber(riskData.liquidityUsd, { minimum: 0 });
+      const replaceLiquidity = replace && Object.hasOwn(riskData, 'liquidityUsd');
+      const riskDataAt = optionalFiniteNumber(riskData.tokenRiskDataAt, { minimum: 1 });
+      const hasEventFilter = Array.isArray(eventIds);
+      const normalizedEventIds = hasEventFilter
+        ? [...new Set(eventIds.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))]
+        : [];
+      if (hasEventFilter && normalizedEventIds.length === 0) return [];
+      const eventFilter = hasEventFilter
+        ? ` AND id IN (${normalizedEventIds.map(() => '?').join(', ')})`
+        : '';
+      const rows = db.prepare(`
+        SELECT id
+        FROM monitor_events
+        WHERE token_address = ?${eventFilter}
+        ORDER BY id
+      `).all(address, ...normalizedEventIds);
+      if (!rows.length) return [];
+      db.prepare(`
+        UPDATE monitor_events
+        SET liquidity_usd = CASE
+              WHEN ? = 1 THEN ?
+              ELSE COALESCE(liquidity_usd, ?)
+            END,
+            risk_payload = ?,
+            risk_data_at = COALESCE(?, risk_data_at)
+        WHERE token_address = ?${eventFilter}
+      `).run(
+        replaceLiquidity ? 1 : 0,
+        liquidityUsd,
+        liquidityUsd,
+        json(risk),
+        riskDataAt,
+        address,
+        ...normalizedEventIds
+      );
       const select = db.prepare('SELECT * FROM monitor_events WHERE id = ?');
       return rows.map((row) => monitorEventFromRow(select.get(row.id)));
     },
@@ -896,6 +1055,28 @@ export function createRobinhoodStore(filename, {
           )
         : db.prepare('SELECT * FROM monitor_events ORDER BY id DESC LIMIT ?').all(normalizedLimit);
       return rows.map(monitorEventFromRow);
+    },
+    listMonitorEventsNeedingTokenRisk({ limit = 500 } = {}) {
+      if (normalizedChainId !== 'robinhood') return [];
+      const normalizedLimit = Math.max(1, Math.min(500, Math.floor(Number(limit) || 500)));
+      const safePayload = "CASE WHEN json_valid(risk_payload) THEN risk_payload ELSE '{}' END";
+      return db.prepare(`
+        SELECT *
+        FROM monitor_events
+        WHERE asset_type = 'erc20'
+          AND (
+            json_extract(${safePayload}, '$.tokenRiskStatus') = 'pending'
+            OR (
+              json_extract(${safePayload}, '$.tokenRiskStatus') = 'partial'
+              AND (
+                json_extract(${safePayload}, '$.creatorTokenCount') IS NULL
+                OR json_extract(${safePayload}, '$.creatorDeadTokenCount') IS NULL
+              )
+            )
+          )
+        ORDER BY id ASC
+        LIMIT ?
+      `).all(normalizedLimit).map(monitorEventFromRow);
     },
     listRecentMonitorEvents(sinceTimestamp, { limit = 5000 } = {}) {
       const normalizedLimit = Math.max(1, Math.min(50_000, Math.floor(Number(limit) || 5000)));

@@ -49,6 +49,34 @@ test('normalizes DeBot ratio fields into explicit percentages', () => {
   assert.equal(token.effectiveWallets, 1231);
 });
 
+test('normalizes nested GoPlus sell and mint flags from numeric and string values', async () => {
+  const client = new RobinhoodDebotClient({
+    baseUrl: 'https://debot.test/api',
+    fetchImpl: async () => Response.json({
+      code: 0,
+      data: {
+        goplus: {
+          is_honeypot: '0',
+          cannot_sell_all: '1',
+          is_in_dex: 1,
+          is_open_source: '1',
+          is_proxy: '0',
+          ownership_detail: { is_mintable: '0' }
+        }
+      }
+    })
+  });
+
+  const safety = await client.fetchTokenSafety(tokenAddress);
+
+  assert.equal(safety.honeypot, false);
+  assert.equal(safety.cannotSellAll, true);
+  assert.equal(safety.inDex, true);
+  assert.equal(safety.mintable, false);
+  assert.equal(safety.openSource, true);
+  assert.equal(safety.isProxy, false);
+});
+
 test('normalizes detailed metric windows without double converting DeBot ratios', () => {
   const metrics = normalizeTokenMetrics({
     chain: 'robinhood',

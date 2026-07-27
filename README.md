@@ -165,5 +165,15 @@ marked partial.
 Runtime databases, environment files, cookies, browser artifacts, logs, and
 build output are intentionally ignored and must not be committed.
 
+Robinhood real-time ERC-20 events are enriched asynchronously with sellability,
+liquidity, top-10 holder concentration, creator holdings, mintability, and
+creator launch history. These fields are cached per token and patched into the
+live feed after the event is emitted, so upstream risk services do not delay
+buy, sell, transfer, or launch detection. Base and Solana do not request or
+render this Robinhood-only enrichment. Creator "dead" history means a token is
+at least 24 hours old and either has no DexScreener pair or has less than
+`$1,000` of primary-pool liquidity; partial history is displayed as a lower
+bound.
+
 This repository is research tooling, not an execution engine or financial
 advice. Verify detected activity independently before acting on it.

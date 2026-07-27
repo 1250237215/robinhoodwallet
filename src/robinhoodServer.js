@@ -11,6 +11,7 @@ import { RobinhoodDexScreenerClient, RobinhoodMarketDataClient } from './robinho
 import { createRobinhoodWalletMonitor } from './robinhood/monitor.js';
 import { validateWalletMonitorRulesPatch } from './robinhood/monitorRules.js';
 import { RobinhoodPoolClient } from './robinhood/poolClient.js';
+import { RobinhoodTokenRiskClient } from './robinhood/riskClient.js';
 import { RobinhoodRpcClient } from './robinhood/rpcClient.js';
 import { createRobinhoodResilientScanner } from './robinhood/resilientScanner.js';
 import { createRobinhoodService, MAX_WALLET_BATCH_LINES } from './robinhood/service.js';
@@ -731,6 +732,7 @@ export async function startRobinhoodStandaloneServer(
     debotClient = null,
     dexScreenerClient = null,
     marketDataClient = null,
+    riskClient = null,
     fetchImpl = globalThis.fetch
   } = {}
 ) {
@@ -766,6 +768,22 @@ export async function startRobinhoodStandaloneServer(
     fallbackConcurrency: config.marketDebotFallbackConcurrency,
     fallbackBatchBudgetMs: config.marketDebotFallbackBatchBudgetMs
   });
+  const activeHolderClient = new RobinhoodHolderClient({
+    baseUrl: config.blockscoutApiUrl,
+    timeoutMs: config.requestTimeoutMs,
+    fetchImpl
+  });
+  const activeTokenRiskClient = riskClient || new RobinhoodTokenRiskClient({
+    debotClient: activeDebotClient,
+    marketClient: activeDexScreenerClient,
+    holderClient: activeHolderClient,
+    blockscoutBaseUrl: config.blockscoutApiUrl,
+    rpcUrl: config.rpcUrl,
+    fetchImpl,
+    requestTimeoutMs: config.tokenRiskRequestTimeoutMs,
+    historyRequestTimeoutMs: config.tokenRiskRequestTimeoutMs,
+    deadLiquidityUsd: config.tokenRiskDeadLiquidityUsd
+  });
   const rpcClient = monitorRpcClient || new RobinhoodRpcClient({
     rpcUrl: config.rpcUrl,
     timeoutMs: config.requestTimeoutMs,
@@ -784,11 +802,7 @@ export async function startRobinhoodStandaloneServer(
     config,
     store,
     debotClient: activeDebotClient,
-    holderClient: new RobinhoodHolderClient({
-      baseUrl: config.blockscoutApiUrl,
-      timeoutMs: config.requestTimeoutMs,
-      fetchImpl
-    }),
+    holderClient: activeHolderClient,
     poolClient,
     scanToken: createRobinhoodResilientScanner({
       poolClient,
@@ -824,7 +838,12 @@ export async function startRobinhoodStandaloneServer(
     marketDataBatchSize: config.monitorMarketDataBatchSize,
     noxaLaunchFactory: config.noxaLaunchFactory,
     barkNotifier,
-    debotClient: activeMarketDataClient
+    debotClient: activeMarketDataClient,
+    riskClient: activeTokenRiskClient,
+    tokenRiskCacheSeconds: config.monitorTokenRiskCacheSeconds,
+    tokenRiskConcurrency: config.monitorTokenRiskConcurrency,
+    tokenRiskRetryBaseMs: config.monitorTokenRiskRetryBaseMs,
+    tokenRiskRetryMaxMs: config.monitorTokenRiskRetryMaxMs
   });
   const server = createRobinhoodStandaloneServer({
     service,
@@ -850,6 +869,8 @@ export async function startRobinhoodStandaloneServer(
     debotClient: activeDebotClient,
     dexScreenerClient: activeDexScreenerClient,
     marketDataClient: activeMarketDataClient,
+    holderClient: activeHolderClient,
+    riskClient: activeTokenRiskClient,
     socialService,
     host,
     port

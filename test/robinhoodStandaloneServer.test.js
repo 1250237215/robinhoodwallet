@@ -14,6 +14,7 @@ import { RobinhoodDebotClient } from '../src/robinhood/debotClient.js';
 import { RobinhoodHolderClient } from '../src/robinhood/holderClient.js';
 import { RobinhoodDexScreenerClient, RobinhoodMarketDataClient } from '../src/robinhood/marketClient.js';
 import { RobinhoodPoolClient } from '../src/robinhood/poolClient.js';
+import { RobinhoodTokenRiskClient } from '../src/robinhood/riskClient.js';
 
 const wallet = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const token = '0x1111111111111111111111111111111111111111';
@@ -495,8 +496,15 @@ test('standalone startup wires resilient holder scans separately from DexScreene
       PORT: '0',
       ROBINHOOD_DATA_FILE: path.join(directory, 'radar.sqlite'),
       ROBINHOOD_PUBLIC_DIR: path.resolve('public'),
+      ROBINHOOD_RPC_URL: 'https://rpc.risk.test',
       ROBINHOOD_MARKET_DEBOT_FALLBACK_CONCURRENCY: '4',
-      ROBINHOOD_MARKET_DEBOT_FALLBACK_BATCH_BUDGET_MS: '6500'
+      ROBINHOOD_MARKET_DEBOT_FALLBACK_BATCH_BUDGET_MS: '6500',
+      ROBINHOOD_TOKEN_RISK_REQUEST_TIMEOUT_MS: '7000',
+      ROBINHOOD_MONITOR_TOKEN_RISK_CACHE_SECONDS: '1200',
+      ROBINHOOD_MONITOR_TOKEN_RISK_CONCURRENCY: '2',
+      ROBINHOOD_MONITOR_TOKEN_RISK_RETRY_BASE_MS: '2500',
+      ROBINHOOD_MONITOR_TOKEN_RISK_RETRY_MAX_MS: '10000',
+      ROBINHOOD_TOKEN_RISK_DEAD_LIQUIDITY_USD: '2500'
     },
     {
       monitorRpcClient: {
@@ -525,6 +533,21 @@ test('standalone startup wires resilient holder scans separately from DexScreene
     assert.equal(running.monitor.marketDataBatchSize, 30);
     assert.equal(running.monitor.marketDataCacheSeconds, 60);
     assert.equal(running.service.holderClient instanceof RobinhoodHolderClient, true);
+    assert.equal(running.holderClient, running.service.holderClient);
+    assert.equal(running.riskClient instanceof RobinhoodTokenRiskClient, true);
+    assert.equal(running.monitor.riskClient, running.riskClient);
+    assert.equal(running.riskClient.debotClient, running.debotClient);
+    assert.equal(running.riskClient.marketClient, running.dexScreenerClient);
+    assert.equal(running.riskClient.holderClient, running.holderClient);
+    assert.equal(running.riskClient.blockscoutBaseUrl, running.holderClient.baseUrl);
+    assert.equal(running.riskClient.rpcUrl, 'https://rpc.risk.test');
+    assert.equal(running.riskClient.requestTimeoutMs, 7_000);
+    assert.equal(running.riskClient.historyRequestTimeoutMs, 7_000);
+    assert.equal(running.riskClient.deadLiquidityUsd, 2_500);
+    assert.equal(running.monitor.tokenRiskCacheSeconds, 1_200);
+    assert.equal(running.monitor.tokenRiskConcurrency, 2);
+    assert.equal(running.monitor.tokenRiskRetryBaseMs, 2_500);
+    assert.equal(running.monitor.tokenRiskRetryMaxMs, 10_000);
     const health = running.monitor.getSnapshot().health;
     assert.equal(health.running, true);
     assert.equal(health.fastPollIntervalMs, 500);
