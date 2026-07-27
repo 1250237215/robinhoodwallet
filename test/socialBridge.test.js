@@ -244,7 +244,7 @@ function createTimelineBridgeHarness(initialHandler, {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.2.0');
+  assert.equal(manifest.version, '1.3.0');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -261,8 +261,8 @@ test('extension manifest, configuration and scripts are valid and narrowly scope
   assert.equal(relayScript.run_at, 'document_start');
   const pageSource = bridgeSource('debot-page.js');
   const backgroundSource = bridgeSource('background.js');
-  assert.match(pageSource, /const PRIMARY_POLL_INTERVAL_MS = 2_000/);
-  assert.match(pageSource, /const PRIMARY_API_TIMEOUT_MS = 3_500/);
+  assert.match(pageSource, /const PRIMARY_POLL_INTERVAL_MS = 1_000/);
+  assert.match(pageSource, /const PRIMARY_API_TIMEOUT_MS = 1_500/);
   assert.match(pageSource, /const TIMELINE_PAGE_SIZE = 50/);
   assert.match(pageSource, /const TIMELINE_CATCHUP_PAGES_PER_POLL = 3/);
   assert.match(pageSource, /const TIMELINE_CATCHUP_MAX_PAGES = 100/);
@@ -669,7 +669,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     .filter((call) => call.url.startsWith('/api/social/twitter/'))
     .every((call) => new URL(call.url, 'https://debot.ai').searchParams.get('tw_types')
       === 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow'), true);
-  assert.deepEqual(intervals.map((interval) => interval.delay), [2_000, 30_000]);
+  assert.deepEqual(intervals.map((interval) => interval.delay), [1_000, 30_000]);
   assert.equal(calls.every((call) => call.options.credentials === 'include'), true);
 
   window.dispatchMessage({
@@ -713,9 +713,9 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
 
   calls.length = 0;
   fetchMode = 'deferred-primary';
-  intervals.find((interval) => interval.delay === 2_000).callback();
+  intervals.find((interval) => interval.delay === 1_000).callback();
   await eventually(() => assert.equal(typeof resolveDeferredPrimary, 'function'));
-  intervals.find((interval) => interval.delay === 2_000).callback();
+  intervals.find((interval) => interval.delay === 1_000).callback();
   assert.equal(calls.filter((call) => call.url.startsWith('/api/social/twitter/timeline?')).length, 1);
   fetchMode = 'ok';
   resolveDeferredPrimary();

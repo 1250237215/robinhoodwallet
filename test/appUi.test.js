@@ -1218,12 +1218,15 @@ test('social cards show DeBot discovery, VPS ingestion and browser receipt laten
   assert.match(appJs, /return `\$\{sign\}\$\{Math\.abs\(difference\)\.toLocaleString\('en-US'\)\}ms`/);
   assert.match(appJs, /post\.debotDiscoveredAt \?\? post\.discoveredAt \?\? post\.receivedAt/);
   assert.match(appJs, /post\.vpsIngestedAt \?\? post\.ingestedAt \?\? post\.storedAt/);
+  assert.match(appJs, /function socialChangeLatencyBaseAt\(change\)[\s\S]*monitorTimestampMs\(change\?\.createdAt\)[\s\S]*monitorTimestampMs\(post\?\.updatedAt\)[\s\S]*socialInitialLatencyBaseAt\(post\)/);
+  assert.match(appJs, /firstWebReceivedAt/);
+  assert.match(appJs, /latestWebReceivedAt/);
   assert.match(appJs, /webReceiptMode: 'snapshot'/);
-  assert.match(appJs, /webReceiptMode: 'live'/);
+  assert.match(appJs, /webReceiptMode: mode/);
   assert.match(appJs, /<div class="social-latency-trace" aria-label="消息传输时间">/);
-  assert.match(appJs, /<b>DeBot 发现<\/b>/);
-  assert.match(appJs, /<b>VPS 入库<\/b>/);
-  assert.match(appJs, /const webLabel = post\.webReceiptMode === 'live' \? '网页接收' : '网页载入'/);
+  assert.match(appJs, /const firstTraceLabel = isInitialReceipt \? 'DeBot 发现' : '网页首次接收'/);
+  assert.match(appJs, /const vpsLabel = isInitialReceipt \? 'VPS 入库' : '本次 VPS 变更'/);
+  assert.match(appJs, /\? '网页首次接收'/);
   assert.match(stylesCss, /\.social-latency-trace \{[\s\S]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
   assert.match(stylesCss, /\.social-latency-trace em \{[\s\S]*font-variant-numeric|\.social-latency-trace \{[\s\S]*font-variant-numeric: tabular-nums/);
 });
@@ -1298,6 +1301,18 @@ test('social snapshot and SSE lifecycle stay pinned to the Robinhood host servic
   assert.match(appJs, /const SOCIAL_STATUS_REFRESH_MS = 2_000/);
   assert.match(appJs, /const SOCIAL_STATUS_TIMEOUT_MS = 1_500/);
   assert.match(appJs, /const SOCIAL_SNAPSHOT_TIMEOUT_MS = 5_000/);
+  assert.match(appJs, /const SOCIAL_STREAM_RETRY_INITIAL_MS = 250/);
+  assert.match(appJs, /const SOCIAL_STREAM_RETRY_MAX_MS = 2_000/);
+  assert.match(appJs, /const delay = Math\.min\([\s\S]*SOCIAL_STREAM_RETRY_INITIAL_MS \* \(2 \*\* state\.socialReconnectAttempt\)[\s\S]*SOCIAL_STREAM_RETRY_MAX_MS/);
+  const socialStartSource = appJs.slice(
+    appJs.indexOf('function startSocialMonitor'),
+    appJs.indexOf('function stopSocialMonitor')
+  );
+  assert.ok(
+    socialStartSource.indexOf('connectSocialStream(sequence);')
+      < socialStartSource.indexOf('void loadSocialSnapshot({ quiet: !manual, expectedSequence: sequence });'),
+    'SSE must start before the initial snapshot request'
+  );
   assert.match(appJs, /state\.socialStatusAbortController\?\.abort\(\)/);
   assert.match(appJs, /const SOCIAL_STREAM_STALE_MS = 35_000/);
   assert.match(appJs, /Math\.trunc\(remoteLatestChangeId\) > state\.socialLatestChangeId/);

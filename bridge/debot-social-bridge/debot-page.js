@@ -3,8 +3,10 @@
   const RELAY_SOURCE = 'debot-social-relay';
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
-  const PRIMARY_POLL_INTERVAL_MS = 2_000;
-  const PRIMARY_API_TIMEOUT_MS = 3_500;
+  // The WebSocket is the primary lane. This short, coalesced REST poll only
+  // covers frames DeBot does not expose or cannot be decoded in the page.
+  const PRIMARY_POLL_INTERVAL_MS = 1_000;
+  const PRIMARY_API_TIMEOUT_MS = 1_500;
   const TIMELINE_PAGE_SIZE = 50;
   const TIMELINE_CATCHUP_PAGES_PER_POLL = 3;
   const TIMELINE_CATCHUP_MAX_PAGES = 100;
@@ -1496,7 +1498,7 @@
       return;
     }
     void socketFrameText(frame).then(observeSocketText).catch(() => {
-      // The two-second primary fallback poll covers unreadable binary frames.
+      // The one-second primary fallback poll covers unreadable binary frames.
     });
   }
 

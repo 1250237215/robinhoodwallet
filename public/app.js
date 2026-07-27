@@ -85,7 +85,8 @@ if (!SOCIAL_WRITE_CONTEXT_ALLOWED) {
   }
 }
 const SOCIAL_SEARCH_DEBOUNCE_MS = 180;
-const SOCIAL_STREAM_RETRY_MS = 2_000;
+const SOCIAL_STREAM_RETRY_INITIAL_MS = 250;
+const SOCIAL_STREAM_RETRY_MAX_MS = 2_000;
 const SOCIAL_STATUS_REFRESH_MS = 2_000;
 const SOCIAL_STATUS_TIMEOUT_MS = 1_500;
 const SOCIAL_SNAPSHOT_TIMEOUT_MS = 5_000;
@@ -411,6 +412,7 @@ const state = {
   socialSequence: 0,
   socialEventSource: null,
   socialReconnectTimer: null,
+  socialReconnectAttempt: 0,
   socialStatusTimer: null,
   socialStatusBusy: false,
   socialStatusRequestSequence: 0,
@@ -1443,6 +1445,96 @@ function socialFeedSources(post) {
   return Array.isArray(sources) ? sources.map((value) => String(value).toLowerCase()) : [];
 }
 
+function socialReceiptModeIsLive(mode) {
+  return ['created', 'updated', 'deleted', 'restored', 'live'].includes(String(mode || '').toLowerCase());
+}
+
+function socialInitialLatencyBaseAt(post, fallback = null) {
+  return monitorTimestampMs(post?.vpsIngestedAt ?? post?.ingestedAt ?? post?.storedAt)
+    ?? monitorTimestampMs(fallback);
+}
+
+function socialChangeLatencyBaseAt(change) {
+  const post = change?.data;
+  return monitorTimestampMs(change?.createdAt)
+    ?? monitorTimestampMs(post?.updatedAt)
+    ?? socialInitialLatencyBaseAt(post);
+}
+
+function socialChangeReceiptMode(change) {
+  const type = String(change?.type || '').toLowerCase();
+  return /^post\.(created|updated|deleted|restored)$/.test(type)
+    ? type.slice('post.'.length)
+    : 'live';
+}
+
+function socialReceiptFromPost(post, phase) {
+  const first = phase === 'first';
+  const receivedAt = monitorTimestampMs(first
+    ? post?.firstWebReceivedAt ?? post?.webReceivedAt
+    : post?.latestWebReceivedAt ?? post?.webReceivedAt);
+  if (receivedAt === null) return null;
+  return {
+    receivedAt,
+    latencyBaseAt: monitorTimestampMs(first
+      ? post?.firstWebLatencyBaseAt ?? post?.webLatencyBaseAt
+      : post?.latestWebLatencyBaseAt ?? post?.webLatencyBaseAt)
+      ?? socialInitialLatencyBaseAt(post),
+    mode: String(first
+      ? post?.firstWebReceiptMode ?? post?.webReceiptMode ?? ''
+      : post?.webReceiptMode ?? post?.firstWebReceiptMode ?? '')
+  };
+}
+
+function applySocialReceipt(merged, firstReceipt, latestReceipt) {
+  if (firstReceipt) {
+    merged.firstWebReceivedAt = firstReceipt.receivedAt;
+    merged.firstWebLatencyBaseAt = firstReceipt.latencyBaseAt;
+    merged.firstWebReceiptMode = firstReceipt.mode;
+  }
+  if (latestReceipt) {
+    merged.latestWebReceivedAt = latestReceipt.receivedAt;
+    merged.latestWebLatencyBaseAt = latestReceipt.latencyBaseAt;
+    // Keep these aliases for existing cards and any cached client-side records.
+    merged.webReceivedAt = latestReceipt.receivedAt;
+    merged.webLatencyBaseAt = latestReceipt.latencyBaseAt;
+    merged.webReceiptMode = latestReceipt.mode;
+  }
+}
+
+function socialSnapshotReceipt(post, webReceivedAt) {
+  const latencyBaseAt = socialInitialLatencyBaseAt(post);
+  return {
+    ...post,
+    firstWebReceivedAt: webReceivedAt,
+    firstWebLatencyBaseAt: latencyBaseAt,
+    firstWebReceiptMode: 'snapshot',
+    latestWebReceivedAt: webReceivedAt,
+    latestWebLatencyBaseAt: latencyBaseAt,
+    webReceivedAt,
+    webLatencyBaseAt: latencyBaseAt,
+    webReceiptMode: 'snapshot'
+  };
+}
+
+function socialLiveReceipt(change, webReceivedAt) {
+  const post = change?.data || {};
+  const mode = socialChangeReceiptMode(change);
+  const initialLatencyBaseAt = socialInitialLatencyBaseAt(post, change?.createdAt);
+  const latestLatencyBaseAt = socialChangeLatencyBaseAt(change);
+  return {
+    ...post,
+    firstWebReceivedAt: webReceivedAt,
+    firstWebLatencyBaseAt: initialLatencyBaseAt,
+    firstWebReceiptMode: mode,
+    latestWebReceivedAt: webReceivedAt,
+    latestWebLatencyBaseAt: latestLatencyBaseAt,
+    webReceivedAt,
+    webLatencyBaseAt: latestLatencyBaseAt,
+    webReceiptMode: mode
+  };
+}
+
 function mergeSocialPosts(posts) {
   const recency = (post) => [
     monitorTimestampMs(post?.sourceUpdatedAt) ?? 0,
@@ -1479,14 +1571,22 @@ function mergeSocialPosts(posts) {
     }
     const feedSources = [...new Set([...socialFeedSources(older), ...socialFeedSources(newer)])];
     if (feedSources.length) merged.feedSources = feedSources;
-    const liveReceipts = [older, newer]
-      .filter((post) => post.webReceiptMode === 'live')
-      .map((post) => monitorTimestampMs(post.webReceivedAt))
-      .filter((value) => value !== null);
-    if (liveReceipts.length) {
-      merged.webReceivedAt = Math.min(...liveReceipts);
-      merged.webReceiptMode = 'live';
-    }
+    const receiptPosts = [current, incoming];
+    const firstReceipts = receiptPosts
+      .map((post) => socialReceiptFromPost(post, 'first'))
+      .filter((receipt) => receipt !== null);
+    const latestReceipts = receiptPosts
+      .map((post) => socialReceiptFromPost(post, 'latest'))
+      .filter((receipt) => receipt !== null);
+    const firstReceipt = firstReceipts.reduce((selected, receipt) => (
+      !selected || receipt.receivedAt < selected.receivedAt ? receipt : selected
+    ), null);
+    const liveReceipts = latestReceipts.filter((receipt) => socialReceiptModeIsLive(receipt.mode));
+    const preferredLatestReceipts = liveReceipts.length ? liveReceipts : latestReceipts;
+    const latestReceipt = preferredLatestReceipts.reduce((selected, receipt) => (
+      !selected || receipt.receivedAt >= selected.receivedAt ? receipt : selected
+    ), null);
+    applySocialReceipt(merged, firstReceipt, latestReceipt);
     return merged;
   };
   const byKey = new Map();
@@ -1558,6 +1658,7 @@ function applySocialBridgeStatus(bridge) {
 
 function markSocialStreamActivity() {
   state.socialLastStreamActivityAt = performance.now();
+  state.socialReconnectAttempt = 0;
 }
 
 function completeSocialRecovery(remoteLatestChangeId = state.socialLatestChangeId) {
@@ -1591,11 +1692,7 @@ function applySocialSnapshot(payload, { resetCursor = false } = {}) {
   }
   if (Array.isArray(record.posts)) {
     const webReceivedAt = Date.now();
-    mergeSocialPosts(record.posts.map((post) => ({
-      ...post,
-      webReceivedAt,
-      webReceiptMode: 'snapshot'
-    })));
+    mergeSocialPosts(record.posts.map((post) => socialSnapshotReceipt(post, webReceivedAt)));
   }
   flushDeferredSocialPosts();
   applySocialBridgeStatus(record.bridge);
@@ -1638,11 +1735,7 @@ function applySocialChange(change) {
   if (id !== null && id <= state.socialLatestChangeId) return;
   if (id !== null) state.socialLatestChangeId = Math.max(state.socialLatestChangeId, id);
   if (change.entityType === 'post' && change.data) {
-    const added = mergeSocialPosts([{
-      ...change.data,
-      webReceivedAt: Date.now(),
-      webReceiptMode: 'live'
-    }]);
+    const added = mergeSocialPosts([socialLiveReceipt(change, Date.now())]);
     if (added > 0) {
       const previous = finiteNumber(state.socialCounts.posts) ?? Math.max(0, state.socialPosts.length - added);
       state.socialCounts.posts = previous + added;
@@ -1712,13 +1805,28 @@ function formatSocialLatencyMs(start, end) {
 function socialLatencyMarkup(post) {
   const discoveredAt = post.debotDiscoveredAt ?? post.discoveredAt ?? post.receivedAt;
   const ingestedAt = post.vpsIngestedAt ?? post.ingestedAt ?? post.storedAt;
-  const webReceivedAt = post.webReceivedAt;
-  const webLabel = post.webReceiptMode === 'live' ? '网页接收' : '网页载入';
+  const receiptMode = String(post.webReceiptMode || post.firstWebReceiptMode || 'unknown');
+  const isInitialReceipt = receiptMode === 'created' || receiptMode === 'snapshot';
+  const webReceivedAt = isInitialReceipt
+    ? post.firstWebReceivedAt ?? post.webReceivedAt
+    : post.latestWebReceivedAt ?? post.webReceivedAt;
+  const latencyBaseAt = isInitialReceipt
+    ? post.firstWebLatencyBaseAt ?? ingestedAt
+    : post.latestWebLatencyBaseAt ?? post.webLatencyBaseAt ?? post.updatedAt ?? ingestedAt;
+  const firstTraceAt = isInitialReceipt
+    ? discoveredAt
+    : post.firstWebReceivedAt ?? post.webReceivedAt;
+  const firstTraceLabel = isInitialReceipt ? 'DeBot 发现' : '网页首次接收';
+  const vpsLabel = isInitialReceipt ? 'VPS 入库' : '本次 VPS 变更';
+  const vpsAt = isInitialReceipt ? ingestedAt : latencyBaseAt;
+  const webLabel = receiptMode === 'created'
+    ? '网页首次接收'
+    : receiptMode === 'snapshot' ? '网页载入' : '网页接收';
   return `
     <div class="social-latency-trace" aria-label="消息传输时间">
-      <span><b>DeBot 发现</b><time datetime="${escapeHtml(String(discoveredAt ?? ''))}">${escapeHtml(formatSocialClock(discoveredAt))}</time></span>
-      <span><b>VPS 入库</b><time datetime="${escapeHtml(String(ingestedAt ?? ''))}">${escapeHtml(formatSocialClock(ingestedAt))}</time><em>${escapeHtml(formatSocialLatencyMs(discoveredAt, ingestedAt))}</em></span>
-      <span data-receipt-mode="${escapeHtml(post.webReceiptMode || 'unknown')}"><b>${webLabel}</b><time datetime="${escapeHtml(String(webReceivedAt ?? ''))}">${escapeHtml(formatSocialClock(webReceivedAt))}</time><em>${escapeHtml(formatSocialLatencyMs(ingestedAt, webReceivedAt))}</em></span>
+      <span><b>${firstTraceLabel}</b><time datetime="${escapeHtml(String(firstTraceAt ?? ''))}">${escapeHtml(formatSocialClock(firstTraceAt))}</time></span>
+      <span><b>${vpsLabel}</b><time datetime="${escapeHtml(String(vpsAt ?? ''))}">${escapeHtml(formatSocialClock(vpsAt))}</time>${isInitialReceipt ? `<em>${escapeHtml(formatSocialLatencyMs(discoveredAt, vpsAt))}</em>` : ''}</span>
+      <span data-receipt-mode="${escapeHtml(receiptMode)}"><b>${webLabel}</b><time datetime="${escapeHtml(String(webReceivedAt ?? ''))}">${escapeHtml(formatSocialClock(webReceivedAt))}</time><em>${escapeHtml(formatSocialLatencyMs(vpsAt, webReceivedAt))}</em></span>
     </div>
   `;
 }
@@ -2611,11 +2719,14 @@ async function loadSocialSnapshot({ quiet = false, expectedSequence = state.soci
     return applySocialSnapshot(payload);
   } catch (error) {
     if ((error?.name === 'AbortError' && !timedOut) || !socialLifecycleIsCurrent(expectedSequence)) return false;
-    state.socialConnected = false;
-    renderSocialBridgeStatus();
     const message = timedOut ? '请求超时，正在切换实时流' : error.message;
-    elements.socialMonitorSummary.textContent = message;
-    if (!quiet) showToast(`社媒监控刷新失败：${message}`, 'error');
+    // The SSE may have become healthy while this optional snapshot was in flight.
+    if (state.socialTransport !== 'sse') {
+      state.socialConnected = false;
+      renderSocialBridgeStatus();
+      elements.socialMonitorSummary.textContent = message;
+      if (!quiet) showToast(`社媒监控刷新失败：${message}`, 'error');
+    }
     return false;
   } finally {
     clearTimeout(timeout);
@@ -2680,11 +2791,16 @@ function scheduleSocialReconnect(sequence) {
   if (!socialLifecycleIsCurrent(sequence)) return;
   state.socialTransport = 'reconnecting';
   renderSocialBridgeStatus();
+  const delay = Math.min(
+    SOCIAL_STREAM_RETRY_INITIAL_MS * (2 ** state.socialReconnectAttempt),
+    SOCIAL_STREAM_RETRY_MAX_MS
+  );
+  state.socialReconnectAttempt += 1;
   state.socialReconnectTimer = setTimeout(() => {
     state.socialReconnectTimer = null;
     if (!socialLifecycleIsCurrent(sequence)) return;
     connectSocialStream(sequence);
-  }, SOCIAL_STREAM_RETRY_MS);
+  }, delay);
 }
 
 function recoverSocialStream(sequence, remoteLatestChangeId = state.socialLatestChangeId) {
@@ -2733,7 +2849,7 @@ function connectSocialStream(sequence = state.socialSequence) {
   const isCurrent = () => state.socialEventSource === source && socialLifecycleIsCurrent(sequence);
   source.addEventListener('open', () => {
     if (!isCurrent()) return;
-    markSocialStreamActivity();
+    state.socialLastStreamActivityAt = performance.now();
     state.socialConnected = true;
     state.socialTransport = 'sse';
     renderSocialBridgeStatus();
@@ -2786,19 +2902,19 @@ function connectSocialStream(sequence = state.socialSequence) {
   });
 }
 
-async function startSocialMonitor({ manual = false } = {}) {
+function startSocialMonitor({ manual = false } = {}) {
   stopSocialMonitor();
   state.socialStarted = true;
   state.socialTransport = 'connecting';
   state.socialLatestChangeId = 0;
   state.socialStreamEpoch = '';
+  state.socialReconnectAttempt = 0;
   state.socialLastStreamActivityAt = performance.now();
   const sequence = state.socialSequence;
   renderSocialMonitor();
-  await loadSocialSnapshot({ quiet: !manual, expectedSequence: sequence });
-  if (!socialLifecycleIsCurrent(sequence)) return;
-  state.socialStatusTimer = setInterval(() => void loadSocialStatus(sequence), SOCIAL_STATUS_REFRESH_MS);
   connectSocialStream(sequence);
+  state.socialStatusTimer = setInterval(() => void loadSocialStatus(sequence), SOCIAL_STATUS_REFRESH_MS);
+  void loadSocialSnapshot({ quiet: !manual, expectedSequence: sequence });
 }
 
 function stopSocialMonitor() {
@@ -2813,6 +2929,7 @@ function stopSocialMonitor() {
   clearInterval(state.socialStatusTimer);
   state.socialSearchTimer = null;
   state.socialReconnectTimer = null;
+  state.socialReconnectAttempt = 0;
   state.socialWatchlistSnapshotTimer = null;
   state.socialStatusTimer = null;
   state.socialStatusAbortController?.abort();
