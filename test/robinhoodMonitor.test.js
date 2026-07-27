@@ -261,6 +261,8 @@ test('monitors only confirmed non-excluded wallets, verifies swaps, and persists
   assert.equal(snapshot.events.length, 1);
   assert.equal(snapshot.events[0].walletAddress, walletA);
   assert.equal(snapshot.events[0].walletAlias, 'VEX profit #2');
+  assert.equal(snapshot.events[0].walletAliasSource, 'manual');
+  assert.equal(snapshot.events[0].walletCustomAlias, true);
   assert.equal(snapshot.events[0].walletNote, 'early buyer');
   assert.equal(snapshot.events[0].tokenSymbol, 'TINY');
   assert.equal(snapshot.events[0].tokenAmount, '0.000000000000000001');
@@ -271,9 +273,17 @@ test('monitors only confirmed non-excluded wallets, verifies swaps, and persists
   assert.equal(snapshot.clusters[0].distinctWallets, 1);
   assert.equal(snapshot.clusters[0].triggered, false);
 
-  store.upsertWalletAnnotation({ address: walletA, alias: 'VEX 2', note: 'watch exits', updatedAt: 2 });
+  store.upsertWalletAnnotation({
+    address: walletA,
+    alias: 'VEX 2',
+    aliasSource: 'generated',
+    note: 'watch exits',
+    updatedAt: 2
+  });
   const refreshedSnapshot = monitor.getSnapshot();
   assert.equal(refreshedSnapshot.events[0].walletAlias, 'VEX 2');
+  assert.equal(refreshedSnapshot.events[0].walletAliasSource, 'generated');
+  assert.equal(refreshedSnapshot.events[0].walletCustomAlias, false);
   assert.equal(refreshedSnapshot.events[0].walletNote, 'watch exits');
 
   const duplicate = store.insertMonitorEvent({

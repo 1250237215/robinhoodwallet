@@ -11,8 +11,10 @@ import { WALLET_MONITOR_TIERS } from './tiering.js';
 
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 const MONITOR_EVENT_TYPE_SET = new Set(WALLET_MONITOR_EVENT_TYPES);
+const WALLET_ALIAS_SOURCE_SET = new Set(['none', 'generated', 'manual', 'unknown']);
 const DEFAULT_MONITOR_RULES_JSON = JSON.stringify(defaultWalletMonitorRules());
 const LEGACY_PROFIT_RANK_ALIAS_PATTERN = /^(.+?) 盈利榜第 ([1-9][0-9]*|待定) 名$/;
+const COMPACT_PROFIT_RANK_ALIAS_PATTERN = /^.+?\s+[1-9][0-9]*$/;
 const BUY_FREQUENCY_TIMEZONE = 'Asia/Shanghai';
 const BUY_FREQUENCY_UTC_OFFSET_SECONDS = 8 * 60 * 60;
 
@@ -37,6 +39,38 @@ function compactLegacyProfitRankAlias(value) {
   const alias = String(value ?? '');
   const match = alias.match(LEGACY_PROFIT_RANK_ALIAS_PATTERN);
   return match ? `${match[1]} ${match[2]}` : alias;
+}
+
+function normalizeWalletAliasSource(value, fallback = 'unknown') {
+  const source = String(value || '').trim().toLowerCase();
+  return WALLET_ALIAS_SOURCE_SET.has(source) ? source : fallback;
+}
+
+function migrateWalletAliasSources(db, migrationKey) {
+  const migrated = db.prepare('SELECT 1 FROM metadata WHERE key = ?').get(migrationKey);
+  if (migrated) return;
+
+  const update = db.prepare('UPDATE wallet_annotations SET alias_source = ? WHERE address = ?');
+  db.exec('BEGIN');
+  try {
+    for (const row of db.prepare('SELECT address, alias, alias_source FROM wallet_annotations').all()) {
+      const current = normalizeWalletAliasSource(row.alias_source);
+      const alias = String(row.alias || '').trim();
+      const generated = LEGACY_PROFIT_RANK_ALIAS_PATTERN.test(alias) ||
+        COMPACT_PROFIT_RANK_ALIAS_PATTERN.test(alias);
+      const source = !alias
+        ? 'none'
+        : generated || current === 'generated'
+          ? 'generated'
+          : 'manual';
+      if (source !== current) update.run(source, row.address);
+    }
+    db.prepare('INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)').run(migrationKey, '1');
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 function migrateLegacyProfitRankAliases(db, migrationKey) {
@@ -87,6 +121,7 @@ export function createRobinhoodStore(filename, {
   const isValidAddress = (value) => addressValidator(normalizeAddress(value)) === true;
   const normalizeTransaction = (value) => String(transactionNormalizer(value) ?? '');
   const compactProfitRankAliasMigration = `${normalizedChainId}:compact_profit_rank_aliases_v1`;
+  const walletAliasSourceMigration = `${normalizedChainId}:wallet_alias_sources_v1`;
   if (filename !== ':memory:') fs.mkdirSync(path.dirname(filename), { recursive: true });
   const db = new DatabaseSync(filename);
   db.exec(`
@@ -127,6 +162,7 @@ export function createRobinhoodStore(filename, {
     CREATE TABLE IF NOT EXISTS wallet_annotations (
       address TEXT PRIMARY KEY,
       alias TEXT NOT NULL DEFAULT '',
+      alias_source TEXT NOT NULL DEFAULT 'unknown',
       note TEXT NOT NULL DEFAULT '',
       tags TEXT NOT NULL DEFAULT '[]',
       status TEXT NOT NULL DEFAULT 'active',
@@ -210,6 +246,9 @@ export function createRobinhoodStore(filename, {
   if (!walletAnnotationColumns.has('monitor_rules')) {
     db.exec(`ALTER TABLE wallet_annotations ADD COLUMN monitor_rules TEXT NOT NULL DEFAULT '${DEFAULT_MONITOR_RULES_JSON}'`);
   }
+  if (!walletAnnotationColumns.has('alias_source')) {
+    db.exec("ALTER TABLE wallet_annotations ADD COLUMN alias_source TEXT NOT NULL DEFAULT 'unknown'");
+  }
   db.exec(`
     UPDATE wallet_annotations
     SET monitor_tier = 'watch'
@@ -276,6 +315,7 @@ export function createRobinhoodStore(filename, {
     CREATE INDEX IF NOT EXISTS monitor_events_wallet_buy_frequency_idx
       ON monitor_events(event_type, wallet_address, block_timestamp, token_address);
   `);
+  migrateWalletAliasSources(db, walletAliasSourceMigration);
   migrateLegacyProfitRankAliases(db, compactProfitRankAliasMigration);
   const upsertTokenStatement = db.prepare(`
     INSERT INTO tokens(address, symbol, name, logo, payload, updated_at)
@@ -295,11 +335,12 @@ export function createRobinhoodStore(filename, {
   `);
   const upsertWalletAnnotationStatement = db.prepare(`
     INSERT INTO wallet_annotations(
-      address, alias, note, tags, status, classification_override, monitor_tier, monitor_rules,
+      address, alias, alias_source, note, tags, status, classification_override, monitor_tier, monitor_rules,
       created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(address) DO UPDATE SET
       alias = excluded.alias,
+      alias_source = excluded.alias_source,
       note = excluded.note,
       tags = excluded.tags,
       status = excluded.status,
@@ -314,6 +355,7 @@ export function createRobinhoodStore(filename, {
     return {
       address: row.address,
       alias: row.alias,
+      aliasSource: normalizeWalletAliasSource(row.alias_source, row.alias ? 'manual' : 'none'),
       note: row.note,
       tags: parseJson(row.tags, []),
       status: row.status,
@@ -621,9 +663,17 @@ export function createRobinhoodStore(filename, {
       const tags = Array.isArray(annotation.tags)
         ? [...new Set(annotation.tags.map((tag) => String(tag).trim()).filter(Boolean))]
         : parseJson(existing?.tags, []);
+      const alias = String(annotation.alias ?? existing?.alias ?? '');
+      const requestedAliasSource = annotation.aliasSource === undefined
+        ? existing?.alias_source
+        : annotation.aliasSource;
+      const aliasSource = alias
+        ? normalizeWalletAliasSource(requestedAliasSource, 'manual')
+        : 'none';
       upsertWalletAnnotationStatement.run(
         address,
-        String(annotation.alias ?? existing?.alias ?? ''),
+        alias,
+        aliasSource,
         String(annotation.note ?? existing?.note ?? ''),
         json(tags),
         String(annotation.status ?? existing?.status ?? 'active'),

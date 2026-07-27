@@ -14,6 +14,7 @@ const DEFAULT_DEBOT_ADDRESS_ROOT = 'https://debot.ai/address/robinhood';
 const ALLOWED_TABS = new Set(['all_round', 'realized', 'unrealized', 'single_hit', 'all']);
 const WALLET_STATUSES = new Set(['active', 'excluded', 'watch']);
 const WALLET_CLASSIFICATIONS = new Set(['all_round', 'realized', 'unrealized', 'single_hit']);
+const WALLET_ALIAS_SOURCES = new Set(['none', 'generated', 'manual']);
 
 const DEFAULT_FILTERS = Object.freeze({
   multiple: 10,
@@ -159,6 +160,7 @@ function walletAnnotationDefaults(address) {
   return {
     address,
     alias: '',
+    aliasSource: 'none',
     note: '',
     tags: [],
     status: 'active',
@@ -1073,11 +1075,24 @@ export class RobinhoodService {
     if (Object.hasOwn(patch, 'tags') && !Array.isArray(patch.tags)) {
       throw new TypeError('Wallet tags must be an array');
     }
+    if (Object.hasOwn(patch, 'aliasSource') && !WALLET_ALIAS_SOURCES.has(String(patch.aliasSource || ''))) {
+      throw new TypeError('Unsupported wallet alias source');
+    }
+    const aliasProvided = Object.hasOwn(patch, 'alias');
+    const alias = aliasProvided ? String(patch.alias ?? '').trim() : existing.alias;
+    const aliasChanged = aliasProvided && alias !== existing.alias;
+    const requestedAliasSource = Object.hasOwn(patch, 'aliasSource')
+      ? String(patch.aliasSource)
+      : null;
+    const aliasSource = !alias
+      ? 'none'
+      : requestedAliasSource || (aliasChanged ? 'manual' : existing.aliasSource || 'manual');
     const now = unixSeconds(this.now);
     this.store.upsertWalletAnnotation({
       ...existing,
       address: normalized,
-      alias: Object.hasOwn(patch, 'alias') ? String(patch.alias ?? '').trim() : existing.alias,
+      alias,
+      aliasSource,
       note: Object.hasOwn(patch, 'note') ? String(patch.note ?? '').trim() : existing.note,
       tags: Object.hasOwn(patch, 'tags') ? normalizedTags(patch.tags) : existing.tags,
       status,

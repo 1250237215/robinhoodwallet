@@ -159,14 +159,18 @@ function isoFromSeconds(value) {
 
 function publicEvent(event, annotation = null) {
   const currentAnnotation = annotation && typeof annotation === 'object' ? annotation : null;
+  const walletAlias = String(currentAnnotation?.alias ?? event.walletAlias ?? '');
+  const walletAliasSource = String(currentAnnotation?.aliasSource ?? event.walletAliasSource ?? (walletAlias ? 'manual' : 'none'));
   return {
     ...event,
     ...(currentAnnotation ? {
-      walletAlias: String(currentAnnotation.alias || ''),
+      walletAlias,
       walletNote: String(currentAnnotation.note || '')
     } : {
       walletNote: String(event.walletNote || '')
     }),
+    walletAliasSource,
+    walletCustomAlias: Boolean(walletAlias) && walletAliasSource === 'manual',
     chain: 'solana',
     blockTimestampUnix: Number(event.blockTimestamp),
     blockTimestamp: isoFromSeconds(event.blockTimestamp),

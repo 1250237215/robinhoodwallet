@@ -4286,6 +4286,33 @@ select:hover {
   --event-soft: #fbf5e8;
 }
 
+.monitor-event-item.is-profit-top-10 {
+  background: #fffdf5;
+}
+
+.monitor-event-item.is-profit-top-10::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border: 2px solid #c99718;
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.monitor-event-item.is-profit-top-10:hover {
+  background: #fff8e4;
+}
+
+.monitor-event-item.is-manual-alias,
+.monitor-event-item.is-profit-top-10.is-manual-alias {
+  background: #fff1f1;
+}
+
+.monitor-event-item.is-manual-alias:hover,
+.monitor-event-item.is-profit-top-10.is-manual-alias:hover {
+  background: #ffe7e7;
+}
+
 .monitor-event-item:last-child {
   border-bottom: 0;
 }
@@ -4428,6 +4455,26 @@ select:hover {
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.monitor-event-meta .monitor-profit-rank-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: min(150px, 100%);
+  padding: 1px 4px;
+  border: 1px solid #d7ae43;
+  border-radius: 3px;
+  background: #fff1bd;
+  color: #704d00;
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.monitor-profit-rank-badge svg {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
 }
 
 .monitor-note-chip {

@@ -1119,10 +1119,12 @@ test('keeps smart candidates pending until confirmation and suggests token profi
 
   const confirmed = service.updateWallet(walletA, {
     alias: summaries.get(walletA).suggestedAlias,
+    aliasSource: 'generated',
     status: 'active'
   });
   assert.equal(confirmed.wallet.reviewState, 'confirmed');
   assert.equal(confirmed.wallet.confirmed, true);
+  assert.equal(confirmed.wallet.aliasSource, 'generated');
   assert.equal(confirmed.wallet.debotUrl, `https://debot.ai/address/robinhood/${walletA}`);
   assert.deepEqual(service.listWallets({ tab: 'all', review: 'confirmed' }).map((wallet) => wallet.address), [walletA]);
   assert.deepEqual(service.listWallets({ tab: 'all', review: 'pending' }).map((wallet) => wallet.address), [walletB]);
@@ -1164,6 +1166,7 @@ test('merges persistent curation and filters the smart wallet library server-sid
     classificationOverride: 'realized'
   });
   assert.equal(updated.wallet.alias, 'Desk alpha');
+  assert.equal(updated.wallet.aliasSource, 'manual');
   assert.deepEqual(updated.wallet.tags, ['Repeat-Hit', 'swing']);
   assert.equal(updated.wallet.computedClassification, 'all_round');
   assert.equal(updated.wallet.classification, 'realized');

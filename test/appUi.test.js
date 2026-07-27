@@ -69,6 +69,14 @@ function executableSortSocialWatchlistByAdded() {
   return Function(`${source}\nreturn sortSocialWatchlistByAdded;`)();
 }
 
+function executableGeneratedWalletProfitPosition() {
+  const source = appSourceBetween(
+    'function generatedWalletProfitPosition(alias, aliasSource)',
+    'function monitorEventTimestamp(event)'
+  );
+  return Function(`${source}\nreturn generatedWalletProfitPosition;`)();
+}
+
 test('home is the manual Robinhood smart-money workspace', () => {
   assert.match(indexHtml, /<title>1874catch<\/title>/);
   assert.match(indexHtml, /<link rel="icon" href="assets\/ikun-chick\.svg" type="image\/svg\+xml" \/>/);
@@ -1758,6 +1766,45 @@ test('real-time token events upsert asynchronous market cap and token-age enrich
   assert.match(appJs, /tokenAge !== '待获取'/);
 });
 
+test('real-time feed distinguishes proven top-profit buyers and manually named wallets', () => {
+  const normalizeSource = appJs.slice(
+    appJs.indexOf('function normalizeMonitorEvent'),
+    appJs.indexOf('function monitorEventTimestamp')
+  );
+  assert.match(normalizeSource, /walletAliasSource.*wallet_alias_source/);
+  assert.match(normalizeSource, /walletCustomAlias.*wallet_custom_alias/);
+
+  const rankSource = appJs.slice(
+    appJs.indexOf('function generatedWalletProfitPosition'),
+    appJs.indexOf('function monitorEventTimestamp')
+  );
+  assert.match(rankSource, /aliasSource[\s\S]*!== 'generated'/);
+  assert.match(rankSource, /\^\(\.\+\?\)\\s\+\(10\|\[1-9\]\)\$/);
+  assert.match(rankSource, /tokenSymbol: match\[1\]\.trim\(\), rank: Number\(match\[2\]\)/);
+  const position = executableGeneratedWalletProfitPosition();
+  assert.deepEqual(position('AI 5', 'generated'), { tokenSymbol: 'AI', rank: 5 });
+  assert.deepEqual(position('VIBE CAT 10', 'generated'), { tokenSymbol: 'VIBE CAT', rank: 10 });
+  assert.equal(position('AI 11', 'generated'), null);
+  assert.equal(position('AI 5', 'manual'), null);
+  assert.equal(position('没有排名', 'generated'), null);
+
+  const renderSource = appJs.slice(
+    appJs.indexOf('function renderMonitorEvents'),
+    appJs.indexOf('function monitorEventByKey')
+  );
+  assert.match(renderSource, /eventType === 'buy'[\s\S]*generatedWalletProfitPosition\(walletLabel, aliasSource\)/);
+  assert.match(renderSource, /is-profit-top-10/);
+  assert.match(renderSource, /data-profit-rank/);
+  assert.match(renderSource, /monitor-profit-rank-badge/);
+  assert.match(renderSource, /data-lucide="trophy"/);
+  assert.match(renderSource, /is-manual-alias/);
+  assert.match(renderSource, /data-manual-alias="true"/);
+
+  assert.match(stylesCss, /\.monitor-event-item\.is-profit-top-10::after \{[\s\S]*border: 2px solid #c99718/);
+  assert.match(stylesCss, /\.monitor-event-item\.is-manual-alias,[\s\S]*background: #fff1f1/);
+  assert.match(stylesCss, /\.monitor-event-meta \.monitor-profit-rank-badge \{[\s\S]*max-width: min\(150px, 100%\)/);
+});
+
 test('real-time feed supports immediate wallet-note editing without a full dashboard reload', () => {
   assert.match(appJs, /walletNote: String\(pickPresent\(\['walletNote', 'wallet_note', 'note'\]/);
   assert.match(appJs, /data-monitor-note-edit="\$\{escapeHtml\(event\.walletAddress\)\}"/);
@@ -1784,6 +1831,16 @@ test('real-time feed supports immediate wallet-note editing without a full dashb
   assert.match(appJs, /const pickPresent = \(keys, fallback = null\)/);
   assert.match(quickNoteSource, /const sessionId = \+\+state\.monitorNoteSessionSequence/);
   assert.match(quickNoteSource, /state\.monitorNoteEditor\?\.sessionId === sessionId/);
+});
+
+test('wallet editor immediately refreshes monitor alias provenance', () => {
+  const source = appJs.slice(
+    appJs.indexOf('async function saveWalletEditor'),
+    appJs.indexOf('async function disableConfirmedWallet')
+  );
+  assert.match(source, /const savedWallet = record\.wallet/);
+  assert.match(source, /updateMonitorWalletAnnotation\(address, savedWallet\)/);
+  assert.match(source, /updateMonitorWalletAnnotation\(address, savedWallet\)[\s\S]*renderMonitorEvents\(\)/);
 });
 
 test('real-time feed uses a compact scan-friendly hierarchy, event colors and one-shot arrival emphasis', () => {

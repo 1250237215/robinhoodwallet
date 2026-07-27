@@ -389,11 +389,20 @@ test('combined server exposes filtered wallet curation PATCH and DELETE routes',
     assert.equal(invalidRules.status, 400);
     assert.equal((await invalidRules.json()).code, 'INVALID_WALLET_UPDATE');
 
+    const invalidAliasSource = await fetch(`${baseUrl}/api/robinhood/wallets/${wallet}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ aliasSource: 'guessed' })
+    });
+    assert.equal(invalidAliasSource.status, 400);
+    assert.equal((await invalidAliasSource.json()).code, 'INVALID_WALLET_UPDATE');
+
     const patch = await fetch(`${baseUrl}/api/robinhood/wallets/${wallet}`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         alias: 'Desk alpha',
+        aliasSource: 'generated',
         status: 'watch',
         classificationOverride: 'realized',
         monitorTier: 'high_frequency',
@@ -405,6 +414,7 @@ test('combined server exposes filtered wallet curation PATCH and DELETE routes',
       address: wallet,
       patch: {
         alias: 'Desk alpha',
+        aliasSource: 'generated',
         status: 'watch',
         classificationOverride: 'realized',
         monitorTier: 'high_frequency',

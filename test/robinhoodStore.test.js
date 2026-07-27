@@ -76,6 +76,7 @@ test('persists wallet curation independently and deletes annotations idempotentl
   store = createRobinhoodStore(filename);
   const annotation = store.getWalletAnnotation('0x0000000000000000000000000000000000000002');
   assert.equal(annotation.alias, 'Desk alpha');
+  assert.equal(annotation.aliasSource, 'manual');
   assert.equal(annotation.note, 'Updated note');
   assert.deepEqual(annotation.tags, ['repeat-hit', 'Repeat-Hit', 'swing']);
   assert.equal(annotation.status, 'watch');
@@ -101,6 +102,8 @@ test('compacts legacy generated profit-rank aliases across stored wallet data', 
   const rankedWallet = '0x0000000000000000000000000000000000000002';
   const customWallet = '0x0000000000000000000000000000000000000003';
   const token = '0x0000000000000000000000000000000000000004';
+  const shiftedRankWallet = '0x0000000000000000000000000000000000000005';
+  const laterManualWallet = '0x0000000000000000000000000000000000000006';
 
   let store = createRobinhoodStore(filename);
   store.upsertWalletAnnotation({
@@ -115,8 +118,15 @@ test('compacts legacy generated profit-rank aliases across stored wallet data', 
     createdAt: 100,
     updatedAt: 100
   });
+  store.upsertWalletAnnotation({
+    address: shiftedRankWallet,
+    alias: 'VEX 3',
+    createdAt: 100,
+    updatedAt: 100
+  });
   store.replaceWalletSummaries([
-    { address: rankedWallet, score: 10, suggestedAlias: 'HOODIE 盈利榜第 2 名' }
+    { address: rankedWallet, score: 10, suggestedAlias: 'HOODIE 盈利榜第 2 名' },
+    { address: shiftedRankWallet, score: 9, suggestedAlias: 'VEX 19' }
   ]);
   store.insertMonitorEvent({
     walletAddress: rankedWallet,
@@ -134,14 +144,26 @@ test('compacts legacy generated profit-rank aliases across stored wallet data', 
     detectedAt: 101
   });
   store.db.prepare('DELETE FROM metadata WHERE key = ?').run('robinhood:compact_profit_rank_aliases_v1');
+  store.db.prepare('DELETE FROM metadata WHERE key = ?').run('robinhood:wallet_alias_sources_v1');
+  store.db.prepare("UPDATE wallet_annotations SET alias_source = 'unknown'").run();
   store.close();
 
   store = createRobinhoodStore(filename);
   assert.equal(store.getWalletAnnotation(rankedWallet).alias, 'HOODIE 2');
+  assert.equal(store.getWalletAnnotation(rankedWallet).aliasSource, 'generated');
   assert.equal(store.getWalletAnnotation(customWallet).alias, '我手工填写的名字');
-  assert.equal(store.listWalletSummaries()[0].suggestedAlias, 'HOODIE 2');
+  assert.equal(store.getWalletAnnotation(customWallet).aliasSource, 'manual');
+  assert.equal(store.getWalletAnnotation(shiftedRankWallet).alias, 'VEX 3');
+  assert.equal(store.getWalletAnnotation(shiftedRankWallet).aliasSource, 'generated');
+  assert.deepEqual(
+    store.listWalletSummaries().map((summary) => summary.suggestedAlias),
+    ['HOODIE 2', 'VEX 19']
+  );
   assert.equal(store.listMonitorEvents()[0].walletAlias, 'HOODIE 2');
   assert.equal(store.getMeta('robinhood:compact_profit_rank_aliases_v1'), '1');
+  assert.equal(store.getMeta('robinhood:wallet_alias_sources_v1'), '1');
+  store.upsertWalletAnnotation({ address: laterManualWallet, alias: '鲸鱼 5', updatedAt: 200 });
+  assert.equal(store.getWalletAnnotation(laterManualWallet).aliasSource, 'manual');
   store.close();
 });
 

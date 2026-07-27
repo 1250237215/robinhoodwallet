@@ -890,6 +890,10 @@ function normalizeMonitorEvent(raw, current = null) {
   const candidateType = String(pick(['eventType', 'event_type', 'type'], 'buy')).toLowerCase();
   const eventType = MONITOR_EVENT_TYPES.includes(candidateType) ? candidateType : 'buy';
   const soundAlert = pick(['soundAlert', 'sound_alert'], false) === true;
+  const walletAliasSource = String(pickPresent(['walletAliasSource', 'wallet_alias_source'], '') || '')
+    .trim()
+    .toLowerCase();
+  const customAliasValue = pickPresent(['walletCustomAlias', 'wallet_custom_alias'], null);
   return {
     ...existing,
     ...source,
@@ -898,6 +902,8 @@ function normalizeMonitorEvent(raw, current = null) {
     assetType: String(pick(['assetType', 'asset_type'], 'token') || 'token').toLowerCase(),
     walletAddress: normalizeAddress(pick(['walletAddress', 'wallet_address', 'wallet', 'address'])),
     walletAlias: String(pickPresent(['walletAlias', 'wallet_alias', 'alias', 'walletName'], '') || ''),
+    walletAliasSource,
+    walletCustomAlias: customAliasValue === true || (customAliasValue !== false && walletAliasSource === 'manual'),
     walletNote: String(pickPresent(['walletNote', 'wallet_note', 'note'], '') || ''),
     walletNoteKnown: ['walletNote', 'wallet_note', 'note'].some((key) => Object.hasOwn(source, key))
       || existing.walletNoteKnown === true,
@@ -925,6 +931,13 @@ function normalizeMonitorEvent(raw, current = null) {
     blockTimestamp: pick(['blockTimestamp', 'block_timestamp', 'timestamp'], null),
     detectedAt: pick(['detectedAt', 'detected_at', 'createdAt', 'created_at'], null)
   };
+}
+
+function generatedWalletProfitPosition(alias, aliasSource) {
+  if (String(aliasSource || '').trim().toLowerCase() !== 'generated') return null;
+  const match = String(alias || '').trim().match(/^(.+?)\s+(10|[1-9])$/);
+  if (!match) return null;
+  return { tokenSymbol: match[1].trim(), rank: Number(match[2]) };
 }
 
 function monitorEventTimestamp(event) {
@@ -2383,6 +2396,15 @@ function renderMonitorEvents() {
       ? state.monitorNoteEditor
       : null;
     const eventType = MONITOR_EVENT_TYPES.includes(event.eventType) ? event.eventType : 'buy';
+    const aliasSource = String(event.walletAliasSource || wallet?.aliasSource || wallet?.alias_source || '')
+      .trim()
+      .toLowerCase();
+    const hasManualAlias = Boolean(walletLabel) && (event.walletCustomAlias === true || aliasSource === 'manual');
+    const profitPosition = eventType === 'buy'
+      ? generatedWalletProfitPosition(walletLabel, aliasSource)
+      : null;
+    const profitRank = profitPosition?.rank ?? null;
+    const isProfitTopTen = profitPosition !== null;
     const symbol = event.tokenSymbol || (event.assetType === 'native' ? activeChain().nativeSymbol : 'TOKEN');
     const eventTime = event.blockTimestamp || event.detectedAt;
     const walletUrl = safeHttpUrl(event.debotAddressUrl) || `${DEBOT_ADDRESS_ROOT}/${event.walletAddress}`;
@@ -2397,13 +2419,17 @@ function renderMonitorEvents() {
     const hasTokenAge = tokenAge !== '待获取';
     const marketDataTitle = event.marketDataAt ? `市值数据更新于 ${formatDateTime(event.marketDataAt)}` : '';
     const ageLabel = event.eventType === 'buy' ? '买入时币龄' : '事件时币龄';
+    const profitTokenSymbol = String(profitPosition?.tokenSymbol || '金狗').trim().slice(0, 32) || '金狗';
+    const profitRankTitle = isProfitTopTen
+      ? `${profitTokenSymbol} 盈利榜第 ${profitRank} 名`
+      : '';
     const target = tokenUrl
       ? `<a class="monitor-event-token" href="${escapeHtml(tokenUrl)}" target="_blank" rel="noopener noreferrer" title="在 DeBot 查看代币">${escapeHtml(symbol)}</a>`
       : event.recipient
         ? `<strong class="monitor-event-recipient-target" title="${escapeHtml(event.recipient)}">${escapeHtml(recipientLabel)}</strong>`
         : `<strong class="monitor-event-recipient-target monitor-event-token">${escapeHtml(symbol)}</strong>`;
     return `
-      <article class="monitor-event-item${isFresh ? ' is-new' : ''}" data-event-id="${escapeHtml(event.id)}" data-event-type="${eventType}">
+      <article class="monitor-event-item${isFresh ? ' is-new' : ''}${isProfitTopTen ? ' is-profit-top-10' : ''}${hasManualAlias ? ' is-manual-alias' : ''}" data-event-id="${escapeHtml(event.id)}" data-event-type="${eventType}"${isProfitTopTen ? ` data-profit-rank="${profitRank}"` : ''}${hasManualAlias ? ' data-manual-alias="true"' : ''}>
         <time datetime="${escapeHtml(String(eventTime ?? ''))}" data-live-timestamp="${escapeHtml(String(eventTime ?? ''))}" title="${escapeHtml(formatDateTime(eventTime))}" aria-live="off">${escapeHtml(formatMonitorAge(eventTime))}</time>
         <div class="monitor-event-main">
           <div class="monitor-event-title">
@@ -2413,6 +2439,7 @@ function renderMonitorEvents() {
             ${target}
           </div>
           <div class="monitor-event-meta">
+            ${isProfitTopTen ? `<span class="monitor-profit-rank-badge" title="${escapeHtml(profitRankTitle)}" aria-label="${escapeHtml(profitRankTitle)}"><i data-lucide="trophy" aria-hidden="true"></i>${escapeHtml(profitTokenSymbol)} #${profitRank}</span>` : ''}
             <span>${escapeHtml(event.tokenName || (event.tokenAddress ? shortAddress(event.tokenAddress) : symbol))}</span>
             ${event.recipient ? `<span title="${escapeHtml(event.recipient)}">接收方 ${escapeHtml(recipientLabel)}</span>` : ''}
             ${event.platform ? `<span title="${escapeHtml(event.platform)}">平台 ${escapeHtml(monitorPlatformLabel(event.platform))}</span>` : ''}
@@ -2471,13 +2498,21 @@ function updateMonitorWalletAnnotation(address, annotation = {}) {
   const normalized = normalizeAddress(address);
   if (!normalized) return;
   const hasAlias = Object.hasOwn(annotation, 'alias');
+  const hasAliasSource = Object.hasOwn(annotation, 'aliasSource') || Object.hasOwn(annotation, 'alias_source');
   const hasNote = Object.hasOwn(annotation, 'note');
-  if (!hasAlias && !hasNote) return;
+  if (!hasAlias && !hasAliasSource && !hasNote) return;
   const alias = hasAlias ? String(annotation.alias || '') : null;
+  const aliasSource = hasAliasSource
+    ? String(annotation.aliasSource || annotation.alias_source || '').trim().toLowerCase()
+    : null;
   const note = hasNote ? String(annotation.note || '') : null;
   state.monitorEvents = state.monitorEvents.map((event) => event.walletAddress === normalized ? {
     ...event,
     ...(hasAlias ? { walletAlias: alias } : {}),
+    ...(hasAliasSource ? {
+      walletAliasSource: aliasSource,
+      walletCustomAlias: Boolean(hasAlias ? alias : event.walletAlias) && aliasSource === 'manual'
+    } : {}),
     ...(hasNote ? { walletNote: note, walletNoteKnown: true } : {})
   } : event);
   const updateWallets = (wallets) => Array.isArray(wallets) ? wallets.map((wallet) => (
@@ -2485,6 +2520,7 @@ function updateMonitorWalletAnnotation(address, annotation = {}) {
       ? {
           ...wallet,
           ...(hasAlias ? { alias } : {}),
+          ...(hasAliasSource ? { aliasSource } : {}),
           ...(hasNote ? { note } : {})
         }
       : wallet
@@ -6046,7 +6082,8 @@ async function requestCandidateConfirmation(context, wallet) {
     method: 'PATCH',
     body: JSON.stringify({
       status: 'active',
-      alias: walletSuggestedAlias(wallet)
+      alias: walletSuggestedAlias(wallet),
+      aliasSource: 'generated'
     })
   });
 }
@@ -6275,6 +6312,10 @@ async function saveWalletEditor(event) {
       })
     });
     requireCurrentChainRequest(context);
+    const record = unwrapRecord(payload);
+    const savedWallet = record.wallet && typeof record.wallet === 'object' ? record.wallet : record;
+    updateMonitorWalletAnnotation(address, savedWallet);
+    renderMonitorEvents();
     state.detailCache.set(address, payload);
     elements.walletEditor.close();
     showToast('地址库已更新');

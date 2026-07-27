@@ -317,6 +317,12 @@ function validatedWalletPatch(body) {
     patch.alias = body.alias ?? '';
     if (patch.alias.length > 120) throw new HttpError(400, 'alias is too long', 'INVALID_WALLET_UPDATE');
   }
+  if (Object.hasOwn(body, 'aliasSource')) {
+    if (!['none', 'generated', 'manual'].includes(body.aliasSource)) {
+      throw new HttpError(400, 'aliasSource is not supported', 'INVALID_WALLET_UPDATE');
+    }
+    patch.aliasSource = body.aliasSource;
+  }
   if (Object.hasOwn(body, 'note')) {
     if (body.note !== null && typeof body.note !== 'string') {
       throw new HttpError(400, 'note must be a string', 'INVALID_WALLET_UPDATE');

@@ -271,11 +271,20 @@ test('standalone wallet routes merge filters and expose validated PATCH and DELE
     assert.equal(invalidRules.status, 400);
     assert.equal((await invalidRules.json()).code, 'INVALID_WALLET_UPDATE');
 
+    const invalidAliasSource = await fetch(`${baseUrl}/api/robinhood/wallets/${wallet}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ aliasSource: 'guessed' })
+    });
+    assert.equal(invalidAliasSource.status, 400);
+    assert.equal((await invalidAliasSource.json()).code, 'INVALID_WALLET_UPDATE');
+
     const updated = await fetch(`${baseUrl}/api/robinhood/wallets/${wallet}`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         alias: 'Desk alpha',
+        aliasSource: 'manual',
         tags: ['repeat-hit'],
         status: 'watch',
         classificationOverride: 'realized',
@@ -288,6 +297,7 @@ test('standalone wallet routes merge filters and expose validated PATCH and DELE
       address: wallet,
       patch: {
         alias: 'Desk alpha',
+        aliasSource: 'manual',
         tags: ['repeat-hit'],
         status: 'watch',
         classificationOverride: 'realized',

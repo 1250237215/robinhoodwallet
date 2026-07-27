@@ -240,6 +240,8 @@ test('Solana API stays isolated and ingests authenticated Helius events idempote
   });
   assert.equal(emittedEvents.length, 1);
   assert.equal(emittedEvents[0].walletAlias, 'Sol Core');
+  assert.equal(emittedEvents[0].walletAliasSource, 'manual');
+  assert.equal(emittedEvents[0].walletCustomAlias, true);
   assert.equal(emittedEvents[0].walletNote, 'Initial Solana note');
 
   const duplicate = await fetch(`${root}/api/solana/monitor/webhook`, {
