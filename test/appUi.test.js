@@ -41,6 +41,18 @@ function executableVisibleSocialPosts({ posts, query, notesByPostId }) {
   );
 }
 
+function executableSocialLatencyMarkup() {
+  const source = appSourceBetween('function formatSocialLatencyMs(start, end)', 'function socialActivityMarkup(post)');
+  return Function(
+    'monitorTimestampMs',
+    'escapeHtml',
+    `${source}\nreturn socialLatencyMarkup;`
+  )(
+    (value) => Number.isFinite(Number(value)) ? Number(value) : null,
+    (value) => String(value)
+  );
+}
+
 test('home is the manual Robinhood smart-money workspace', () => {
   assert.match(indexHtml, /<title>Robinhood 聪明钱雷达<\/title>/);
   assert.match(indexHtml, /<h1 id="brand-title">Robinhood 聪明钱雷达<\/h1>/);
@@ -1269,27 +1281,30 @@ test('social feed validates and accurately renders relationship and profile acti
   assert.match(appJs, /if \(id !== null && id <= state\.socialLatestChangeId\) return/);
 });
 
-test('social cards show DeBot discovery, VPS ingestion and browser receipt latency in milliseconds', () => {
-  assert.match(appJs, /fractionalSecondDigits: 3/);
+test('social cards show only the final browser receipt latency in milliseconds', () => {
   assert.match(appJs, /function formatSocialLatencyMs\(start, end\)/);
   assert.match(appJs, /return `\$\{sign\}\$\{Math\.abs\(difference\)\.toLocaleString\('en-US'\)\}ms`/);
-  assert.match(appJs, /post\.debotDiscoveredAt \?\? post\.discoveredAt \?\? post\.receivedAt/);
   assert.match(appJs, /post\.vpsIngestedAt \?\? post\.ingestedAt \?\? post\.storedAt/);
   assert.match(appJs, /function socialChangeLatencyBaseAt\(change\)[\s\S]*monitorTimestampMs\(change\?\.createdAt\)[\s\S]*monitorTimestampMs\(post\?\.updatedAt\)[\s\S]*socialInitialLatencyBaseAt\(post\)/);
   assert.match(appJs, /firstWebReceivedAt/);
   assert.match(appJs, /latestWebReceivedAt/);
   assert.match(appJs, /webReceiptMode: 'snapshot'/);
   assert.match(appJs, /webReceiptMode: mode/);
-  assert.match(appJs, /<div class="social-latency-trace" aria-label="消息传输时间">/);
-  assert.match(appJs, /const firstTraceLabel = isInitialReceipt \? '首次发现' : '网页首次接收'/);
+  assert.match(appJs, /<div class="social-latency-value" aria-label="延迟">\$\{escapeHtml\(latency\)\}<\/div>/);
+  assert.doesNotMatch(appJs, /首次发现|网页首次接收|本次 VPS 变更|网页载入/);
   assert.match(appJs, /function socialReplyMarkup\(post\)/);
   assert.match(appJs, /被回复原文/);
   assert.match(appJs, /原文翻译/);
   assert.match(stylesCss, /\.social-reply-context \{/);
-  assert.match(appJs, /const vpsLabel = isInitialReceipt \? 'VPS 入库' : '本次 VPS 变更'/);
-  assert.match(appJs, /\? '网页首次接收'/);
-  assert.match(stylesCss, /\.social-latency-trace \{[\s\S]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
-  assert.match(stylesCss, /\.social-latency-trace em \{[\s\S]*font-variant-numeric|\.social-latency-trace \{[\s\S]*font-variant-numeric: tabular-nums/);
+  assert.match(stylesCss, /\.social-latency-value \{[\s\S]*font-variant-numeric: tabular-nums/);
+
+  const markup = executableSocialLatencyMarkup()({
+    webReceiptMode: 'updated',
+    latestWebLatencyBaseAt: Date.parse('2026-07-27T13:02:36.534Z'),
+    latestWebReceivedAt: Date.parse('2026-07-27T13:02:36.444Z')
+  });
+  assert.equal(markup, '<div class="social-latency-value" aria-label="延迟">-90ms</div>');
+  assert.doesNotMatch(markup, /<time|<span|21:02|网页接收|VPS/);
 });
 
 test('reply cards keep the displayed parent, profile link and post link on one identity', () => {

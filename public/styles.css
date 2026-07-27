@@ -3435,60 +3435,20 @@ select:hover {
   -webkit-line-clamp: 2;
 }
 
-.social-latency-trace {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 4px;
+.social-latency-value {
+  width: fit-content;
   margin: 7px 0 2px;
-  font-variant-numeric: tabular-nums;
-}
-
-.social-latency-trace span {
-  display: grid;
-  min-width: 0;
-  padding: 4px 5px;
+  padding: 3px 6px;
   border: 1px solid #dce4e8;
   border-radius: 4px;
   background: #f7fafb;
-  color: #53636b;
-  font-size: 8px;
-  line-height: 1.35;
-}
-
-.social-latency-trace b,
-.social-latency-trace time,
-.social-latency-trace em {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.social-latency-trace b {
-  color: #6f7d84;
-  font-size: 7px;
-  font-weight: 700;
-}
-
-.social-latency-trace time {
-  color: #263940;
-  font-size: 9px;
-}
-
-.social-latency-trace em {
   color: #16734a;
-  font-size: 8px;
+  font-size: 9px;
   font-style: normal;
+  font-variant-numeric: tabular-nums;
   font-weight: 700;
-}
-
-.social-latency-trace span[data-receipt-mode="snapshot"] em {
-  color: #7a6388;
-}
-
-@media (max-width: 520px) {
-  .social-latency-trace {
-    grid-template-columns: minmax(0, 1fr);
-  }
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .social-post-kind {

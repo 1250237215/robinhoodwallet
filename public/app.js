@@ -451,14 +451,6 @@ const compactNumberFormatter = new Intl.NumberFormat('en-US', {
   notation: 'compact',
   maximumFractionDigits: 2
 });
-const socialClockFormatter = new Intl.DateTimeFormat('zh-CN', {
-  hour12: false,
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit',
-  fractionalSecondDigits: 3
-});
-
 class ApiError extends Error {
   constructor(message, status, payload = null) {
     super(message);
@@ -1789,11 +1781,6 @@ function socialInitials(post) {
   return value.slice(0, 2).toUpperCase() || 'S';
 }
 
-function formatSocialClock(value) {
-  const timestamp = monitorTimestampMs(value);
-  return timestamp === null ? '--:--:--.---' : socialClockFormatter.format(new Date(timestamp));
-}
-
 function formatSocialLatencyMs(start, end) {
   const from = monitorTimestampMs(start);
   const to = monitorTimestampMs(end);
@@ -1804,7 +1791,6 @@ function formatSocialLatencyMs(start, end) {
 }
 
 function socialLatencyMarkup(post) {
-  const discoveredAt = post.debotDiscoveredAt ?? post.discoveredAt ?? post.receivedAt;
   const ingestedAt = post.vpsIngestedAt ?? post.ingestedAt ?? post.storedAt;
   const receiptMode = String(post.webReceiptMode || post.firstWebReceiptMode || 'unknown');
   const isInitialReceipt = receiptMode === 'created' || receiptMode === 'snapshot';
@@ -1814,22 +1800,8 @@ function socialLatencyMarkup(post) {
   const latencyBaseAt = isInitialReceipt
     ? post.firstWebLatencyBaseAt ?? ingestedAt
     : post.latestWebLatencyBaseAt ?? post.webLatencyBaseAt ?? post.updatedAt ?? ingestedAt;
-  const firstTraceAt = isInitialReceipt
-    ? discoveredAt
-    : post.firstWebReceivedAt ?? post.webReceivedAt;
-  const firstTraceLabel = isInitialReceipt ? '首次发现' : '网页首次接收';
-  const vpsLabel = isInitialReceipt ? 'VPS 入库' : '本次 VPS 变更';
-  const vpsAt = isInitialReceipt ? ingestedAt : latencyBaseAt;
-  const webLabel = receiptMode === 'created'
-    ? '网页首次接收'
-    : receiptMode === 'snapshot' ? '网页载入' : '网页接收';
-  return `
-    <div class="social-latency-trace" aria-label="消息传输时间">
-      <span><b>${firstTraceLabel}</b><time datetime="${escapeHtml(String(firstTraceAt ?? ''))}">${escapeHtml(formatSocialClock(firstTraceAt))}</time></span>
-      <span><b>${vpsLabel}</b><time datetime="${escapeHtml(String(vpsAt ?? ''))}">${escapeHtml(formatSocialClock(vpsAt))}</time>${isInitialReceipt ? `<em>${escapeHtml(formatSocialLatencyMs(discoveredAt, vpsAt))}</em>` : ''}</span>
-      <span data-receipt-mode="${escapeHtml(receiptMode)}"><b>${webLabel}</b><time datetime="${escapeHtml(String(webReceivedAt ?? ''))}">${escapeHtml(formatSocialClock(webReceivedAt))}</time><em>${escapeHtml(formatSocialLatencyMs(vpsAt, webReceivedAt))}</em></span>
-    </div>
-  `;
+  const latency = formatSocialLatencyMs(latencyBaseAt, webReceivedAt);
+  return `<div class="social-latency-value" aria-label="延迟">${escapeHtml(latency)}</div>`;
 }
 
 function socialActivityMarkup(post) {
