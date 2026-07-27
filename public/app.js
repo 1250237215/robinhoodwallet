@@ -1569,6 +1569,27 @@ function mergeSocialPosts(posts) {
         merged.target[name] = value;
       }
     }
+    for (const field of ['replyContext', 'quoteContext']) {
+      const olderContext = older[field] && typeof older[field] === 'object' ? older[field] : {};
+      const newerContext = newer[field] && typeof newer[field] === 'object' ? newer[field] : {};
+      const olderId = String(olderContext.externalId || '').trim();
+      const newerId = String(newerContext.externalId || '').trim();
+      if (olderId && newerId && olderId !== newerId) {
+        merged[field] = newerContext;
+        continue;
+      }
+      const mergedContext = { ...olderContext };
+      for (const [name, value] of Object.entries(newerContext)) {
+        if (name !== 'author' && value !== '' && value !== null && value !== undefined && value !== 0) {
+          mergedContext[name] = value;
+        }
+      }
+      mergedContext.author = { ...(olderContext.author || {}) };
+      for (const [name, value] of Object.entries(newerContext.author || {})) {
+        if (value !== '' && value !== null && value !== undefined) mergedContext.author[name] = value;
+      }
+      if (Object.keys(mergedContext).length) merged[field] = mergedContext;
+    }
     const feedSources = [...new Set([...socialFeedSources(older), ...socialFeedSources(newer)])];
     if (feedSources.length) merged.feedSources = feedSources;
     const receiptPosts = [current, incoming];
@@ -1925,6 +1946,34 @@ function socialReplyIdentity(post) {
   };
 }
 
+function socialQuoteIdentity(post) {
+  const context = post?.quoteContext && typeof post.quoteContext === 'object'
+    ? post.quoteContext
+    : {};
+  const contextAuthor = context.author && typeof context.author === 'object' ? context.author : {};
+  const contextHandleCandidate = normalizeSocialHandle(contextAuthor.handle);
+  const contextHandle = SOCIAL_HANDLE_PATTERN.test(contextHandleCandidate) ? contextHandleCandidate : '';
+  const contextIdCandidate = String(context.externalId || '').trim();
+  const postIdCandidate = String(post?.quotedExternalId || '').trim();
+  const contextExternalId = /^\d{5,25}$/.test(contextIdCandidate)
+    ? contextIdCandidate
+    : /^\d{5,25}$/.test(postIdCandidate) ? postIdCandidate : '';
+  const statusIdentity = socialXStatusIdentity(context.url);
+  const matchingStatus = contextHandle && statusIdentity?.handle.toLowerCase() === contextHandle.toLowerCase()
+    && (!contextExternalId || statusIdentity.externalId === contextExternalId)
+    ? statusIdentity
+    : null;
+  const quotedExternalId = contextExternalId || matchingStatus?.externalId || '';
+  return {
+    handle: contextHandle,
+    name: String(contextAuthor.name || '').trim(),
+    profileUrl: contextHandle ? `https://x.com/${encodeURIComponent(contextHandle)}` : '',
+    parentUrl: contextHandle && quotedExternalId
+      ? `https://x.com/${encodeURIComponent(contextHandle)}/status/${quotedExternalId}`
+      : ''
+  };
+}
+
 function socialReplyMarkup(post) {
   if (String(post?.kind || '').toLowerCase() !== 'reply') return '';
   const context = post.replyContext && typeof post.replyContext === 'object' ? post.replyContext : {};
@@ -1943,7 +1992,32 @@ function socialReplyMarkup(post) {
       </div>
       ${content ? `<div class="social-reply-original"><b>被回复原文</b><p>${escapeHtml(content)}</p></div>` : ''}
       ${translatedContent && translatedContent !== content ? `<div class="social-reply-translation"><b>原文翻译</b><p>${escapeHtml(translatedContent)}</p></div>` : ''}
-      ${identity.parentUrl ? `<a class="social-reply-source" href="${escapeHtml(identity.parentUrl)}" target="_blank" rel="noopener noreferrer" title="查看被回复原文"><i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a>` : ''}
+      ${identity.parentUrl ? `<a class="social-reply-source" href="${escapeHtml(identity.parentUrl)}" target="_blank" rel="noopener noreferrer" title="查看被回复原文" aria-label="查看被回复原文"><i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a>` : ''}
+    </aside>
+  `;
+}
+
+function socialReferenceMarkup(post) {
+  const kind = String(post?.kind || '').toLowerCase();
+  if (kind === 'reply') return socialReplyMarkup(post);
+  if (kind !== 'quote') return '';
+  const context = post.quoteContext && typeof post.quoteContext === 'object' ? post.quoteContext : {};
+  const identity = socialQuoteIdentity(post);
+  const content = String(context.content || '').trim();
+  const translatedContent = String(context.translatedContent || '').trim();
+  if (!identity.handle && !identity.name && !content && !translatedContent) return '';
+  const targetLabel = identity.name || (identity.handle ? `@${identity.handle}` : '原帖作者');
+  return `
+    <aside class="social-reply-context" data-reference-kind="quote">
+      <div class="social-reply-target">
+        <i data-lucide="quote" aria-hidden="true"></i>
+        <span>引用</span>
+        ${identity.profileUrl ? `<a href="${escapeHtml(identity.profileUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(targetLabel)}</a>` : `<strong>${escapeHtml(targetLabel)}</strong>`}
+        ${identity.name && identity.handle ? `<span>@${escapeHtml(identity.handle)}</span>` : ''}
+      </div>
+      ${content ? `<div class="social-reply-original"><b>被引用原文</b><p>${escapeHtml(content)}</p></div>` : ''}
+      ${translatedContent && translatedContent !== content ? `<div class="social-reply-translation"><b>被引用原文翻译</b><p>${escapeHtml(translatedContent)}</p></div>` : ''}
+      ${identity.parentUrl ? `<a class="social-reference-source" href="${escapeHtml(identity.parentUrl)}" target="_blank" rel="noopener noreferrer" aria-label="查看被引用原文"><span>查看被引用原文</span><i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a>` : ''}
     </aside>
   `;
 }
@@ -1966,6 +2040,10 @@ function visibleSocialPosts() {
       post.replyContext?.translatedContent,
       post.replyContext?.author?.name,
       post.replyContext?.author?.handle,
+      post.quoteContext?.content,
+      post.quoteContext?.translatedContent,
+      post.quoteContext?.author?.name,
+      post.quoteContext?.author?.handle,
       activity?.targetHandle,
       watchEntry?.note
     ]
@@ -2092,7 +2170,7 @@ function renderSocialFeed() {
     const kind = post.deleted ? 'delete' : activity?.kind || String(post.kind || 'post').toLowerCase();
     const activityMarkup = socialActivityMarkup(post);
     const profileActivityMarkup = socialProfileActivityMarkup(post, visibleProfileChanges);
-    const replyMarkup = socialReplyMarkup(post);
+    const referenceMarkup = socialReferenceMarkup(post);
     const nonPostActivity = Boolean(activity || profileActivityMarkup);
     const profileUrl = safeHttpUrl(socialProfileUrl(post));
     const postUrl = safeHttpUrl(post.url);
@@ -2132,9 +2210,10 @@ function renderSocialFeed() {
           </header>
           ${watchNote ? `<div class="social-post-note" title="${escapeHtml(watchNote)}"><i data-lucide="notebook-pen" aria-hidden="true"></i><span>${escapeHtml(watchNote)}</span></div>` : ''}
           ${socialLatencyMarkup(post)}
-          ${replyMarkup}
+          ${String(post.kind || '').toLowerCase() === 'reply' ? referenceMarkup : ''}
           ${activityMarkup || profileActivityMarkup || (post.content ? `<p class="social-post-content">${escapeHtml(post.content)}</p>` : '')}
           ${!nonPostActivity && post.translatedContent && post.translatedContent !== post.content ? `<p class="social-post-translation">${escapeHtml(post.translatedContent)}</p>` : ''}
+          ${String(post.kind || '').toLowerCase() === 'quote' ? referenceMarkup : ''}
           ${!nonPostActivity && contractMarkup ? `<div class="social-post-contracts">${contractMarkup}</div>` : ''}
           ${!nonPostActivity && mediaMarkup ? `<div class="social-post-media">${mediaMarkup}</div>` : ''}
           ${!nonPostActivity && postUrl ? `<footer class="social-post-footer"><a href="${escapeHtml(postUrl)}" target="_blank" rel="noopener noreferrer">查看原文<i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a></footer>` : ''}

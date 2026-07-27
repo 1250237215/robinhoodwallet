@@ -3571,6 +3571,32 @@ select:hover {
   height: 13px;
 }
 
+.social-reply-context[data-reference-kind="quote"] {
+  padding-right: 11px;
+}
+
+.social-reference-source {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  color: var(--social-accent);
+  font-size: 10px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.social-reference-source:hover {
+  text-decoration: underline;
+}
+
+.social-reference-source svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+}
+
 .social-activity-content,
 .social-profile-activity {
   min-height: 42px;
@@ -5045,6 +5071,21 @@ select:hover {
 
   .social-post-translation {
     font-size: 11px;
+  }
+
+  .social-reply-target {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .social-reply-target a,
+  .social-reply-target strong {
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  .social-reference-source {
+    min-height: 36px;
   }
 
   .social-event-options {

@@ -1,7 +1,7 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const BRIDGE_VERSION = '1.6.0';
+  const BRIDGE_VERSION = '1.7.0';
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
   // The WebSocket is the primary lane. This short, coalesced REST poll only
@@ -666,6 +666,52 @@
     }) || null;
   }
 
+  function normalizeQuoteContext(tweet, payload = {}) {
+    const currentTweetId = numericTweetId(tweet?.tweet_id || tweet?.id);
+    const explicitId = [
+      tweet?.quoted_tweet_id,
+      tweet?.quotedTweetId,
+      tweet?.quoted_status_id,
+      tweet?.quoted_status_id_str,
+      payload?.quoted_tweet_id,
+      payload?.quotedTweetId,
+      payload?.quoted_status_id,
+      payload?.quoted_status_id_str
+    ].map(numericTweetId).find(Boolean) || '';
+    const candidates = [
+      tweet?.quoted_post,
+      tweet?.quoted_tweet,
+      tweet?.quote_post,
+      tweet?.quote_tweet,
+      payload?.quoted_post,
+      payload?.quoted_tweet,
+      payload?.quote_post,
+      payload?.quote_tweet,
+      // Some DeBot quote events expose the quoted post as the original tweet.
+      tweet?.ori_tweet,
+      payload?.ori_tweet
+    ]
+      .map(replyContextCandidate)
+      .filter((candidate) => candidate && (!currentTweetId || candidate.externalId !== currentTweetId));
+    const matching = explicitId
+      ? candidates.find((candidate) => !candidate.externalId || candidate.externalId === explicitId)
+      : candidates[0];
+    if (matching) {
+      return {
+        ...matching,
+        externalId: matching.externalId || explicitId
+      };
+    }
+    return explicitId ? {
+      externalId: explicitId,
+      author: { id: '', handle: '', name: '', avatarUrl: '' },
+      content: '',
+      translatedContent: '',
+      url: '',
+      publishedAt: 0
+    } : null;
+  }
+
   function normalizePost(payload, feedSource = 'my') {
     if (!payload || typeof payload !== 'object') return null;
     const tweet = payload.tweet || {};
@@ -720,6 +766,7 @@
     if (kind === 'delete' && (!/^\d{5,25}$/.test(tweetId) || stableEventAt === null)) return null;
     if (['follow', 'unfollow', 'profile'].includes(kind) && stableEventAt === null) return null;
     const replyContext = kind === 'reply' ? normalizeReplyContext(tweet) : null;
+    const quoteContext = kind === 'quote' ? normalizeQuoteContext(tweet, payload) : null;
     const replyTargetHandle = kind === 'reply'
       ? replyHandleFromValue(tweet.reply_to) || replyHandleFromValue(replyContext?.author?.handle)
       : '';
@@ -781,6 +828,7 @@
       },
       ...(target ? { target } : {}),
       ...(replyContext ? { replyContext } : {}),
+      ...(quoteContext ? { quoteContext } : {}),
       ...(kind === 'profile' ? { profileChanges: profile.changes, profileDetail: profile.detail } : {}),
       content,
       translatedContent: isAccountActivity ? '' : limitedText(translation(tweet) || payload.translated_text || '', 100_000),
@@ -794,7 +842,14 @@
       replyToExternalId: kind === 'reply'
         ? numericTweetId(replyContext?.externalId) || explicitReplyParentId(tweet)
         : '',
-      quotedExternalId: isAccountActivity ? '' : limitedText(tweet.quoted_post?.tweet_id || '', 240),
+      quotedExternalId: isAccountActivity ? '' : limitedText(
+        quoteContext?.externalId
+          || tweet.quoted_post?.tweet_id
+          || tweet.quoted_tweet_id
+          || tweet.quoted_status_id_str
+          || '',
+        240
+      ),
       repostExternalId: isAccountActivity ? '' : limitedText(tweet.retweeted_post?.tweet_id || '', 240),
       publishedAt,
       discoveredAt,
@@ -847,6 +902,20 @@
     if (previousId && incomingId) return previousId !== incomingId;
     const previousHandle = replyHandleFromValue(previousPost?.replyContext?.author?.handle);
     const incomingHandle = replyHandleFromValue(incomingPost?.replyContext?.author?.handle);
+    return Boolean(previousHandle && incomingHandle
+      && previousHandle.toLowerCase() !== incomingHandle.toLowerCase());
+  }
+
+  function quoteParentId(post) {
+    return numericTweetId(post?.quoteContext?.externalId) || numericTweetId(post?.quotedExternalId);
+  }
+
+  function quoteContextsConflict(previousPost, incomingPost) {
+    const previousId = quoteParentId(previousPost);
+    const incomingId = quoteParentId(incomingPost);
+    if (previousId && incomingId) return previousId !== incomingId;
+    const previousHandle = replyHandleFromValue(previousPost?.quoteContext?.author?.handle);
+    const incomingHandle = replyHandleFromValue(incomingPost?.quoteContext?.author?.handle);
     return Boolean(previousHandle && incomingHandle
       && previousHandle.toLowerCase() !== incomingHandle.toLowerCase());
   }
@@ -904,6 +973,19 @@
         || replyParentId(older);
     } else if (older.kind === 'reply' || newer.kind === 'reply') {
       merged.replyToExternalId = replyParentId(newer) || replyParentId(older);
+    }
+    const quoteConflict = quoteContextsConflict(older, newer);
+    if (quoteConflict) {
+      if (newer.quoteContext) merged.quoteContext = newer.quoteContext;
+      else delete merged.quoteContext;
+      merged.quotedExternalId = quoteParentId(newer);
+    } else if (older.quoteContext || newer.quoteContext) {
+      merged.quoteContext = mergeReplyContext(older.quoteContext, newer.quoteContext);
+      merged.quotedExternalId = numericTweetId(merged.quoteContext?.externalId)
+        || quoteParentId(newer)
+        || quoteParentId(older);
+    } else if (older.kind === 'quote' || newer.kind === 'quote') {
+      merged.quotedExternalId = quoteParentId(newer) || quoteParentId(older);
     }
     if (older.target || newer.target) {
       const olderTargetHandle = replyHandleFromValue(older.target?.handle);

@@ -444,6 +444,65 @@ test('reply context never mixes different parent tweets and stale enrichment sti
   assert.equal(corrected.post.target.handle, 'real_parent');
 });
 
+test('quote context persists, merges partial observations and replaces conflicting quoted identities atomically', (t) => {
+  const { store, setNow } = fixture(t);
+  const quoteId = '2081749735858442749';
+  const firstQuotedId = '2081481106281390183';
+  const correctedQuotedId = '2081481106281390999';
+  const created = store.upsertPosts([{
+    source: 'twitter',
+    id: quoteId,
+    kind: 'quote',
+    authorHandle: '1874a3',
+    text: '他天天',
+    quoteContext: {
+      externalId: firstQuotedId,
+      author: { handle: 'theunipcs', name: 'Unipcs' },
+      content: 'Original quote text',
+      url: `https://x.com/theunipcs/status/${firstQuotedId}`
+    },
+    publishedAt: 1_785_162_788_000,
+    sourceUpdatedAt: 1_785_162_788_000
+  }])[0];
+  assert.equal(created.post.quotedExternalId, firstQuotedId);
+  assert.equal(created.post.quoteContext.content, 'Original quote text');
+
+  setNow(1_785_162_789_000);
+  const translated = store.upsertPosts([{
+    source: 'twitter',
+    id: quoteId,
+    kind: 'quote',
+    quoteContext: {
+      url: `https://x.com/theunipcs/status/${firstQuotedId}`,
+      translatedContent: '被引用原文翻译'
+    },
+    sourceUpdatedAt: 1_785_162_788_000
+  }])[0];
+  assert.equal(translated.post.quoteContext.content, 'Original quote text');
+  assert.equal(translated.post.quoteContext.translatedContent, '被引用原文翻译');
+
+  setNow(1_785_162_790_000);
+  const corrected = store.upsertPosts([{
+    source: 'twitter',
+    id: quoteId,
+    kind: 'quote',
+    quoteContext: {
+      externalId: correctedQuotedId,
+      author: { handle: 'correct_source' },
+      content: 'Correct quoted post',
+      url: `https://x.com/correct_source/status/${correctedQuotedId}`
+    },
+    sourceUpdatedAt: 1_785_162_787_000
+  }])[0];
+  assert.equal(corrected.action, 'updated');
+  assert.equal(corrected.post.content, '他天天');
+  assert.equal(corrected.post.quotedExternalId, correctedQuotedId);
+  assert.equal(corrected.post.quoteContext.externalId, correctedQuotedId);
+  assert.equal(corrected.post.quoteContext.content, 'Correct quoted post');
+  assert.equal(corrected.post.quoteContext.translatedContent, '');
+  assert.equal(corrected.post.quoteContext.author.handle, 'correct_source');
+});
+
 test('explicit contract metadata wins over duplicate addresses detected in post text', (t) => {
   const { store } = fixture(t);
   const address = '0x1111111111111111111111111111111111111111';

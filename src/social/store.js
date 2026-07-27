@@ -279,6 +279,7 @@ function postFromRow(row) {
     repostExternalId: row.repost_external_id,
     target: parseJson(row.target_json, {}),
     replyContext: parseJson(row.reply_context_json, {}),
+    quoteContext: parseJson(row.quote_context_json, {}),
     profileChanges: profile.changes,
     profileDetail: profile.detail,
     publishedAt: Number(row.published_at),
@@ -869,6 +870,7 @@ function postValues(post, raw, now) {
     post.repostExternalId,
     json(post.target),
     json(post.replyContext),
+    json(post.quoteContext),
     json({ changes: post.profileChanges, detail: post.profileDetail }),
     post.publishedAt,
     post.receivedAt,
@@ -913,6 +915,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       repost_external_id TEXT NOT NULL DEFAULT '',
       target_json TEXT NOT NULL DEFAULT '{}',
       reply_context_json TEXT NOT NULL DEFAULT '{}',
+      quote_context_json TEXT NOT NULL DEFAULT '{}',
       profile_json TEXT NOT NULL DEFAULT '{}',
       published_at INTEGER NOT NULL,
       received_at INTEGER NOT NULL,
@@ -1030,6 +1033,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
   if (!socialPostColumns.has('reply_context_json')) {
     db.exec("ALTER TABLE social_posts ADD COLUMN reply_context_json TEXT NOT NULL DEFAULT '{}'");
   }
+  if (!socialPostColumns.has('quote_context_json')) {
+    db.exec("ALTER TABLE social_posts ADD COLUMN quote_context_json TEXT NOT NULL DEFAULT '{}'");
+  }
   if (!socialPostColumns.has('profile_json')) {
     db.exec("ALTER TABLE social_posts ADD COLUMN profile_json TEXT NOT NULL DEFAULT '{}'");
   }
@@ -1076,16 +1082,16 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       source, external_id, kind, author_id, author_handle, author_name, author_avatar_url,
       author_followers, content, translated_content, url, media_json, contract_addresses_json,
       chain_tags_json, feed_sources_json, reply_to_external_id, quoted_external_id, repost_external_id,
-      target_json, reply_context_json, profile_json, published_at, received_at, discovered_at, ingested_at, source_updated_at,
+      target_json, reply_context_json, quote_context_json, profile_json, published_at, received_at, discovered_at, ingested_at, source_updated_at,
       deleted_at, raw_json, stored_at, updated_at
-    ) VALUES (${Array(30).fill('?').join(', ')})
+    ) VALUES (${Array(31).fill('?').join(', ')})
   `);
   const updatePost = db.prepare(`
     UPDATE social_posts SET
       kind = ?, author_id = ?, author_handle = ?, author_name = ?, author_avatar_url = ?,
       author_followers = ?, content = ?, translated_content = ?, url = ?, media_json = ?,
       contract_addresses_json = ?, chain_tags_json = ?, feed_sources_json = ?, reply_to_external_id = ?,
-      quoted_external_id = ?, repost_external_id = ?, target_json = ?, reply_context_json = ?, profile_json = ?, published_at = ?, received_at = ?,
+      quoted_external_id = ?, repost_external_id = ?, target_json = ?, reply_context_json = ?, quote_context_json = ?, profile_json = ?, published_at = ?, received_at = ?,
       discovered_at = ?, source_updated_at = ?, deleted_at = ?, raw_json = ?, updated_at = ?
     WHERE id = ?
   `);
@@ -1134,21 +1140,36 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       const mergedTarget = provided.has('target')
         ? mergeSocialTarget(existing.target, normalized.target)
         : existing.target;
+      const mergedQuoteContext = provided.has('quoteContext')
+        ? mergeReplyContext(existing.quoteContext, normalized.quoteContext)
+        : existing.quoteContext;
+      const contextQuoteId = /^\d{5,25}$/.test(String(mergedQuoteContext.externalId || ''))
+        ? String(mergedQuoteContext.externalId)
+        : '';
+      const incomingQuoteId = /^\d{5,25}$/.test(String(normalized.quotedExternalId || ''))
+        ? String(normalized.quotedExternalId)
+        : '';
+      const mergedQuoteId = contextQuoteId || incomingQuoteId || existing.quotedExternalId;
       const replySidecarChanged = json(mergedReplyContext) !== json(existing.replyContext)
         || mergedReplyId !== existing.replyToExternalId
         || json(mergedTarget) !== json(existing.target);
-      if (!feedSourcesChanged && !replySidecarChanged) {
+      const quoteSidecarChanged = json(mergedQuoteContext) !== json(existing.quoteContext)
+        || mergedQuoteId !== existing.quotedExternalId;
+      if (!feedSourcesChanged && !replySidecarChanged && !quoteSidecarChanged) {
         return { action: 'unchanged', post: existing, change: null };
       }
       db.prepare(`
         UPDATE social_posts SET
-          feed_sources_json = ?, reply_to_external_id = ?, target_json = ?, reply_context_json = ?, updated_at = ?
+          feed_sources_json = ?, reply_to_external_id = ?, quoted_external_id = ?, target_json = ?,
+          reply_context_json = ?, quote_context_json = ?, updated_at = ?
         WHERE id = ?
       `).run(
         json(mergedFeedSources),
         mergedReplyId,
+        mergedQuoteId,
         json(mergedTarget),
         json(mergedReplyContext),
+        json(mergedQuoteContext),
         timestamp,
         existing.id
       );
@@ -1197,6 +1218,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       replyContext: provided.has('replyContext')
         ? mergeReplyContext(existing.replyContext, normalized.replyContext)
         : existing.replyContext,
+      quoteContext: provided.has('quoteContext')
+        ? mergeReplyContext(existing.quoteContext, normalized.quoteContext)
+        : existing.quoteContext,
       profileChanges: mergedProfile.changes,
       profileDetail: mergedProfile.detail,
       publishedAt: choose('publishedAt', existing.publishedAt),
@@ -1207,6 +1231,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
     };
     if (/^\d{5,25}$/.test(String(merged.replyContext?.externalId || ''))) {
       merged.replyToExternalId = String(merged.replyContext.externalId);
+    }
+    if (/^\d{5,25}$/.test(String(merged.quoteContext?.externalId || ''))) {
+      merged.quotedExternalId = String(merged.quoteContext.externalId);
     }
     const visibleBefore = json(existing);
     const preview = {
@@ -1231,6 +1258,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       repostExternalId: merged.repostExternalId,
       target: merged.target,
       replyContext: merged.replyContext,
+      quoteContext: merged.quoteContext,
       profileChanges: merged.profileChanges,
       profileDetail: merged.profileDetail,
       publishedAt: merged.publishedAt,
@@ -1268,6 +1296,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       merged.repostExternalId,
       json(merged.target),
       json(merged.replyContext),
+      json(merged.quoteContext),
       json({ changes: merged.profileChanges, detail: merged.profileDetail }),
       merged.publishedAt,
       merged.receivedAt,

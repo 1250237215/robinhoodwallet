@@ -3,13 +3,17 @@ import assert from 'node:assert/strict';
 
 import {
   createXReplyEnricher,
+  fetchXQuoteContext,
   fetchXReplyContext,
+  quoteContextNeedsEnrichment,
   replyContextNeedsEnrichment,
   translateXReplyToChinese
 } from '../src/social/xReplyEnricher.js';
 
 const REPLY_ID = '2081700497174733126';
 const PARENT_ID = '2081696375595524505';
+const QUOTE_ID = '2081749735858442749';
+const QUOTED_ID = '2081481106281390183';
 
 function conversationHtml() {
   return `<!doctype html><html><body>
@@ -39,6 +43,40 @@ function replyPost() {
     replyToExternalId: 'iruletrenches',
     publishedAt: Date.parse('2026-07-27T11:17:29.000Z'),
     sourceUpdatedAt: Date.parse('2026-07-27T11:17:29.000Z')
+  };
+}
+
+function quotePost(overrides = {}) {
+  return {
+    source: 'twitter',
+    externalId: QUOTE_ID,
+    kind: 'quote',
+    author: { handle: '1874a3' },
+    content: '他天天',
+    url: `https://x.com/1874a3/status/${QUOTE_ID}`,
+    publishedAt: Date.parse('2026-07-27T14:33:08.000Z'),
+    sourceUpdatedAt: Date.parse('2026-07-27T14:33:08.000Z'),
+    ...overrides
+  };
+}
+
+function fxTwitterQuotePayload(quoteId = QUOTED_ID) {
+  return {
+    tweet: {
+      id: QUOTE_ID,
+      quote: {
+        id: quoteId,
+        text: 'at the beginning of every bull run',
+        url: `https://x.com/theunipcs/status/${quoteId}`,
+        created_timestamp: 1_785_098_742,
+        author: {
+          id: '1755899659040555009',
+          screen_name: 'theunipcs',
+          name: "Unipcs (aka 'Bonk Guy')",
+          avatar_url: 'https://pbs.twimg.com/profile_images/unipcs.jpg'
+        }
+      }
+    }
   };
 }
 
@@ -143,6 +181,54 @@ test('fetches the parent status separately when the reply page only identifies i
   assert.equal(urls.length, 2);
   assert.match(urls[1], new RegExp(`${PARENT_ID}$`));
   assert.equal(enriched.replyContext.content, "It's a dogs world");
+});
+
+test('fetches and translates the quoted original without delaying the outer quote event', async () => {
+  const requested = [];
+  const enriched = await fetchXQuoteContext(quotePost(), {
+    fetchImpl: async (url) => {
+      requested.push(String(url));
+      return new Response(JSON.stringify(fxTwitterQuotePayload()));
+    },
+    translateImpl: async () => '每轮牛市开始时'
+  });
+  assert.deepEqual(requested, [`https://api.fxtwitter.com/status/${QUOTE_ID}`]);
+  assert.equal(enriched.quotedExternalId, QUOTED_ID);
+  assert.deepEqual(enriched.quoteContext, {
+    externalId: QUOTED_ID,
+    author: {
+      id: '1755899659040555009',
+      handle: 'theunipcs',
+      name: "Unipcs (aka 'Bonk Guy')",
+      avatarUrl: 'https://pbs.twimg.com/profile_images/unipcs.jpg'
+    },
+    content: 'at the beginning of every bull run',
+    translatedContent: '每轮牛市开始时',
+    url: `https://x.com/theunipcs/status/${QUOTED_ID}`,
+    publishedAt: 1_785_098_742_000
+  });
+  assert.equal(quoteContextNeedsEnrichment(enriched), false);
+});
+
+test('quote enrichment rejects a third-party quote identity that conflicts with a known quoted id', async () => {
+  const enriched = await fetchXQuoteContext(quotePost({
+    quotedExternalId: QUOTED_ID,
+    quoteContext: { externalId: QUOTED_ID }
+  }), {
+    fetchImpl: async () => new Response(JSON.stringify(fxTwitterQuotePayload('2081481106281390999'))),
+    translateImpl: async () => '不应使用'
+  });
+  assert.equal(enriched, null);
+});
+
+test('quote enrichment rejects missing quotes and responses for a different outer post', async () => {
+  for (const tweet of [{ id: QUOTE_ID }, { id: '2081749735858442000', quote: fxTwitterQuotePayload().tweet.quote }]) {
+    const enriched = await fetchXQuoteContext(quotePost(), {
+      fetchImpl: async () => new Response(JSON.stringify({ tweet })),
+      translateImpl: async () => '不应使用'
+    });
+    assert.equal(enriched, null);
+  }
 });
 
 test('Google translation response is flattened and translation failures stay non-fatal', async () => {

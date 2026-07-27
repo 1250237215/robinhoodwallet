@@ -292,12 +292,12 @@ function normalizeSocialTarget(input, inferredTargetHandle = '') {
   };
 }
 
-function normalizeReplyContext(input) {
-  const specified = hasOwn(input, ['replyContext', 'reply_context']);
+function normalizePostContext(input, aliases, fieldName) {
+  const specified = hasOwn(input, aliases);
   if (!specified) return { specified, value: {} };
-  const context = firstValue(input, ['replyContext', 'reply_context']);
+  const context = firstValue(input, aliases);
   if (!context || typeof context !== 'object' || Array.isArray(context)) {
-    throw new TypeError('replyContext must be an object');
+    throw new TypeError(`${fieldName} must be an object`);
   }
   const authorInput = context.author && typeof context.author === 'object' && !Array.isArray(context.author)
     ? context.author
@@ -308,6 +308,7 @@ function normalizeReplyContext(input) {
   const urlIdentity = /^https:\/\/(?:www\.)?(?:x|twitter)\.com\/[a-z0-9_]{1,15}\/(?:status|statuses)\/(\d{5,25})(?:[/?#]|$)/i.exec(rawUrl);
   const urlStatusId = urlIdentity?.[1] || '';
   const url = urlIdentity && (!normalizedExternalId || urlStatusId === normalizedExternalId) ? rawUrl : '';
+  const canonicalExternalId = normalizedExternalId || (url ? urlStatusId : '');
   const rawAuthorHandle = text(
     firstValue(context, ['authorHandle', 'username', 'handle'], authorInput.handle || authorInput.username),
     240
@@ -315,7 +316,7 @@ function normalizeReplyContext(input) {
   return {
     specified,
     value: {
-      externalId: normalizedExternalId,
+      externalId: canonicalExternalId,
       author: {
         id: text(firstValue(context, ['authorId'], authorInput.id || authorInput.userId), 240),
         handle: /^[a-z0-9_]{1,15}$/i.test(rawAuthorHandle) ? rawAuthorHandle : '',
@@ -335,6 +336,14 @@ function normalizeReplyContext(input) {
       publishedAt: normalizeTimestamp(firstValue(context, ['publishedAt', 'createdAt', 'timestamp']), 0) || 0
     }
   };
+}
+
+function normalizeReplyContext(input) {
+  return normalizePostContext(input, ['replyContext', 'reply_context'], 'replyContext');
+}
+
+function normalizeQuoteContext(input) {
+  return normalizePostContext(input, ['quoteContext', 'quote_context'], 'quoteContext');
 }
 
 function normalizeMedia(media) {
@@ -499,6 +508,9 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
     SOCIAL_ACTIVITY_KINDS.has(kind) ? activityIdentity?.targetHandle : inferredReplyTarget
   );
   const replyContext = normalizeReplyContext(input);
+  const quoteContext = normalizeQuoteContext(input);
+  const quotedIdCandidate = text(firstValue(input, ['quotedExternalId', 'quotedId']), 240);
+  const quotedExternalId = /^\d{5,25}$/.test(quotedIdCandidate) ? quotedIdCandidate : '';
   if (activityIdentity && target.handle
     && target.handle.toLowerCase() !== activityIdentity.targetHandle.toLowerCase()) {
     throw new TypeError('Social activity target conflicts with its externalId');
@@ -557,6 +569,7 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
     ],
     replyToExternalId: ['replyToExternalId', 'replyToId'],
     replyContext: ['replyContext', 'reply_context'],
+    quoteContext: ['quoteContext', 'quote_context'],
     quotedExternalId: ['quotedExternalId', 'quotedId'],
     repostExternalId: ['repostExternalId', 'repostedId'],
     profileChanges: ['profileChanges', 'profile_changes'],
@@ -630,7 +643,8 @@ export function normalizeSocialPost(input, { now = Date.now() } = {}) {
     feedSources: postFeedSources(input),
     replyToExternalId,
     replyContext: replyContext.value,
-    quotedExternalId: text(firstValue(input, ['quotedExternalId', 'quotedId']), 240),
+    quoteContext: quoteContext.value,
+    quotedExternalId: quoteContext.value.externalId || quotedExternalId,
     repostExternalId: text(firstValue(input, ['repostExternalId', 'repostedId']), 240),
     target,
     profileChanges: kind === 'profile' ? profileData.profileChanges : [],

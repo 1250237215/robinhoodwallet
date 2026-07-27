@@ -147,6 +147,7 @@ function safePost(value) {
     ? safeSocialAccount(post.target, { includeUrl: true })
     : null;
   const replyContext = kind === 'reply' ? safeReplyContext(post.replyContext) : null;
+  const quoteContext = kind === 'quote' ? safeReplyContext(post.quoteContext) : null;
   const profileChanges = kind === 'profile' ? safeProfileChanges(post.profileChanges) : [];
   if (['follow', 'unfollow'].includes(kind)
     && (!SOCIAL_HANDLE_PATTERN.test(safeAuthor.handle) || !SOCIAL_HANDLE_PATTERN.test(target.handle))) return null;
@@ -158,6 +159,7 @@ function safePost(value) {
     author: safeAuthor,
     ...(target ? { target } : {}),
     ...(replyContext ? { replyContext } : {}),
+    ...(quoteContext ? { quoteContext } : {}),
     ...(kind === 'profile' ? {
       profileChanges,
       profileDetail: safeProfileDetail(post.profileDetail, profileChanges)

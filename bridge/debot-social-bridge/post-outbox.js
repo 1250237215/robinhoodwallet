@@ -78,6 +78,7 @@ function persistedPost(value) {
   const author = post.author && typeof post.author === 'object' ? post.author : {};
   const changes = post.kind === 'profile' ? profileChanges(post.profileChanges) : [];
   const parent = post.kind === 'reply' ? replyContext(post.replyContext) : null;
+  const quote = post.kind === 'quote' ? replyContext(post.quoteContext) : null;
   return {
     source: text(post.source, 40),
     externalId: text(post.externalId, 240),
@@ -87,6 +88,7 @@ function persistedPost(value) {
       ? { target: account(post.target, { includeUrl: true }) }
       : {}),
     ...(parent ? { replyContext: parent } : {}),
+    ...(quote ? { quoteContext: quote } : {}),
     ...(post.kind === 'profile'
       ? { profileChanges: changes, profileDetail: profileDetail(post.profileDetail, changes) }
       : {}),

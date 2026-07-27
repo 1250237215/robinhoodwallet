@@ -265,7 +265,7 @@ function createTimelineBridgeHarness(initialHandler, {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.6.0');
+  assert.equal(manifest.version, '1.7.0');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -724,7 +724,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.requestId === 'page-personal-probe'
       && message.payload.ok === true)));
   const personalHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.equal(personalHeartbeat.payload.version, '1.6.0');
+  assert.equal(personalHeartbeat.payload.version, '1.7.0');
   assert.deepEqual(Array.from(personalHeartbeat.payload.capabilities), [
     'posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1'
   ]);
@@ -972,6 +972,78 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   assert.equal(unrelatedQuotePost.replyToExternalId, '');
   assert.equal(Object.hasOwn(unrelatedQuotePost, 'replyContext'), false);
   acknowledge(unrelatedQuoteDelivery);
+
+  const quoteSocketId = '1900000000000000110';
+  const quotedPostId = '1900000000000000010';
+  sendPersonalActivity({
+    ...incoming,
+    doc_id: quoteSocketId,
+    tweet: {
+      ...incoming.tweet,
+      tweet_id: quoteSocketId,
+      is_quote: true,
+      quoted_post: {
+        tweet_id: quotedPostId,
+        text: 'Quoted post retained across observations',
+        link: `https://x.com/quoted_author/status/${quotedPostId}`,
+        date: 1_784_299_800,
+        user: {
+          id: 'quoted-author-1',
+          username: 'quoted_author',
+          name: 'Quoted Author'
+        }
+      }
+    }
+  });
+  const firstQuoteDelivery = deliveryFor(quoteSocketId);
+  assert.ok(firstQuoteDelivery);
+  const firstQuotePost = firstQuoteDelivery.payload.posts[0];
+  assert.equal(firstQuotePost.kind, 'quote');
+  assert.equal(firstQuotePost.quotedExternalId, quotedPostId);
+  assert.deepEqual(JSON.parse(JSON.stringify(firstQuotePost.quoteContext)), {
+    externalId: quotedPostId,
+    author: {
+      id: 'quoted-author-1',
+      handle: 'quoted_author',
+      name: 'Quoted Author',
+      avatarUrl: ''
+    },
+    content: 'Quoted post retained across observations',
+    translatedContent: '',
+    url: `https://x.com/quoted_author/status/${quotedPostId}`,
+    publishedAt: 1_784_299_800_000
+  });
+
+  sendPersonalActivity({
+    ...incoming,
+    doc_id: quoteSocketId,
+    tweet: {
+      ...incoming.tweet,
+      tweet_id: quoteSocketId,
+      is_quote: true,
+      quoted_post: {
+        tweet_id: quotedPostId,
+        text_translate: '第二次观察补齐的引用翻译',
+        user: {
+          username: 'quoted_author',
+          avatar: 'https://pbs.twimg.com/profile_images/quoted-author.jpg'
+        }
+      }
+    }
+  });
+  const mergedQuoteDelivery = deliveryFor(quoteSocketId);
+  assert.ok(mergedQuoteDelivery);
+  const mergedQuotePost = mergedQuoteDelivery.payload.posts[0];
+  assert.equal(mergedQuotePost.quotedExternalId, quotedPostId);
+  assert.equal(mergedQuotePost.quoteContext.content, 'Quoted post retained across observations');
+  assert.equal(mergedQuotePost.quoteContext.translatedContent, '第二次观察补齐的引用翻译');
+  assert.equal(mergedQuotePost.quoteContext.author.name, 'Quoted Author');
+  assert.equal(
+    mergedQuotePost.quoteContext.author.avatarUrl,
+    'https://pbs.twimg.com/profile_images/quoted-author.jpg'
+  );
+  assert.equal(mergedQuotePost.quoteContext.url, `https://x.com/quoted_author/status/${quotedPostId}`);
+  acknowledge(mergedQuoteDelivery);
 
   const mergedReplySocketId = '1900000000000000109';
   const mergedParentId = '1900000000000000009';
@@ -1555,7 +1627,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const recoveredHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
   assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
   assert.equal(Object.hasOwn(recoveredHeartbeat.payload, 'error'), false);
-  assert.equal(recoveredHeartbeat.payload.version, '1.6.0');
+  assert.equal(recoveredHeartbeat.payload.version, '1.7.0');
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.accountCount >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.rawRows >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.normalizedRows >= 0, true);

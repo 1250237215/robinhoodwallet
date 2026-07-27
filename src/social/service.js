@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 
 import { createSocialStore } from './store.js';
 import { createXProfileMonitor } from './xProfileMonitor.js';
-import { createXReplyEnricher, replyContextNeedsEnrichment } from './xReplyEnricher.js';
+import { createXReplyEnricher, referenceContextNeedsEnrichment } from './xReplyEnricher.js';
 
 const DEBOT_ANALYSIS_CAPABILITY = 'debot-analysis-v1';
 const DEBOT_TOKEN_DETAIL = 'debot.token_detail.v1';
@@ -165,6 +165,8 @@ export function createSocialService({
   const debotWaiters = new Map();
   let cleanupTimer = null;
   let xFastTimer = null;
+  let xReferenceBackfillTimer = null;
+  let xReferenceBackfillQueue = [];
   let xFastInFlight = 0;
   const xFastAbortController = new AbortController();
   const xFastStats = {
@@ -297,6 +299,26 @@ export function createSocialService({
       })
     : null);
   const allowedXFastHandles = new Set(xFastHandles.map((handle) => String(handle).toLowerCase()));
+
+  function scheduleReferenceBackfill(delayMs = 250) {
+    if (closed || !activeXReplyEnricher || !xReferenceBackfillQueue.length || xReferenceBackfillTimer) return;
+    xReferenceBackfillTimer = setTimeout(() => {
+      xReferenceBackfillTimer = null;
+      pumpReferenceBackfill();
+    }, Math.max(50, Number(delayMs) || 250));
+    xReferenceBackfillTimer.unref?.();
+  }
+
+  function pumpReferenceBackfill() {
+    if (closed || !activeXReplyEnricher || !xReferenceBackfillQueue.length) return;
+    if (Number(activeXReplyEnricher.active || 0) > 0 || Number(activeXReplyEnricher.queued || 0) > 0) {
+      scheduleReferenceBackfill(250);
+      return;
+    }
+    const post = xReferenceBackfillQueue.shift();
+    if (post) activeXReplyEnricher.enqueue(post);
+    scheduleReferenceBackfill(250);
+  }
 
   function confirmFastXPosts(handle, tweetIds) {
     if (!tweetIds.length) return;
@@ -452,7 +474,7 @@ export function createSocialService({
       const changes = publishAfter(latestBefore);
       if (!skipReplyEnrichment) {
         activeXReplyEnricher?.enqueue(
-          results.map((result) => result.post).filter(replyContextNeedsEnrichment)
+          results.map((result) => result.post).filter(referenceContextNeedsEnrichment)
         );
       }
       const summary = { created: 0, updated: 0, deleted: 0, restored: 0, unchanged: 0, filtered: 0 };
@@ -659,11 +681,13 @@ export function createSocialService({
       service.cleanup();
       cleanupTimer = setInterval(() => service.cleanup(), config.cleanupIntervalMs);
       cleanupTimer.unref?.();
-      activeXReplyEnricher?.enqueue(
-        activeStore.listPosts({ limit: 100, watchlistOnly: true })
-          .filter(replyContextNeedsEnrichment)
-          .slice(0, 20)
-      );
+      if (activeXReplyEnricher) {
+        xReferenceBackfillQueue = activeStore.listPosts({ limit: 500, watchlistOnly: true })
+          .filter(referenceContextNeedsEnrichment)
+          .sort((left, right) => Number(String(right.kind).toLowerCase() === 'quote')
+            - Number(String(left.kind).toLowerCase() === 'quote'));
+        pumpReferenceBackfill();
+      }
       if (activeXProfileMonitor && xFastHandles.length) {
         pollFastXProfiles();
         xFastTimer = setInterval(
@@ -680,6 +704,9 @@ export function createSocialService({
       cleanupTimer = null;
       if (xFastTimer) clearInterval(xFastTimer);
       xFastTimer = null;
+      if (xReferenceBackfillTimer) clearTimeout(xReferenceBackfillTimer);
+      xReferenceBackfillTimer = null;
+      xReferenceBackfillQueue = [];
       xFastAbortController.abort(abortError());
       activeXReplyEnricher?.close?.();
       for (const waiters of debotWaiters.values()) {

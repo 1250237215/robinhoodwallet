@@ -178,3 +178,79 @@ test('service retries an X post after persistence fails and confirms it only aft
   assert.equal(confirmations, 1);
   assert.equal(service.getFastXStatus().lastErrorCode, 'Error');
 });
+
+test('service backfills every watched quote one at a time while live quote enrichment stays immediate', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-social-quote-backfill-'));
+  const enqueued = [];
+  let active = 0;
+  const enricher = {
+    get active() {
+      return active;
+    },
+    get queued() {
+      return 0;
+    },
+    enqueue(posts) {
+      for (const post of Array.isArray(posts) ? posts : [posts]) {
+        enqueued.push(post.externalId);
+        if (post.content.startsWith('history')) {
+          active = 1;
+          setTimeout(() => { active = 0; }, 15).unref?.();
+        }
+      }
+    },
+    close() {}
+  };
+  const service = createSocialService({
+    config: {
+      dataFile: path.join(directory, 'social.sqlite'),
+      bridgeToken: '',
+      retentionDays: 7,
+      bridgeOfflineMs: 90_000,
+      cleanupIntervalMs: 60_000,
+      commandLeaseMs: 30_000,
+      xFastHandles: [],
+      xReplyEnrichmentEnabled: false
+    },
+    xReplyEnricher: enricher
+  });
+  t.after(() => {
+    service.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  service.addWatchAccounts([{ platform: 'twitter', handle: 'alice' }]);
+  const historyIds = [
+    '2081749735858442701',
+    '2081749735858442702',
+    '2081749735858442703'
+  ];
+  service.store.upsertPosts(historyIds.map((externalId, index) => ({
+    source: 'twitter',
+    externalId,
+    kind: 'quote',
+    author: { handle: 'alice' },
+    content: `history ${index}`,
+    url: `https://x.com/alice/status/${externalId}`,
+    publishedAt: 1_785_162_700_000 + index
+  })));
+
+  service.start();
+  assert.equal(enqueued.length, 1);
+  const liveId = '2081749735858442799';
+  service.ingestPosts([{
+    source: 'twitter',
+    externalId: liveId,
+    kind: 'quote',
+    author: { handle: 'alice' },
+    content: 'live quote',
+    url: `https://x.com/alice/status/${liveId}`,
+    publishedAt: 1_785_162_800_000
+  }]);
+  assert.equal(enqueued[1], liveId);
+
+  await eventually(() => {
+    assert.equal(enqueued.length, 4);
+    assert.deepEqual(new Set(enqueued.filter((id) => historyIds.includes(id))), new Set(historyIds));
+  }, 1_500);
+});

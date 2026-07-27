@@ -124,7 +124,7 @@ test('outbox persists only the post allowlist and never raw or credential fields
   assert.deepEqual(Object.keys(stored.media[0]).sort(), ['previewUrl', 'type', 'url']);
 });
 
-test('outbox persists complete relationship and profile activity through a strict allowlist', async () => {
+test('outbox persists complete relationship, reference and profile activity through a strict allowlist', async () => {
   const storage = new FakeStorage();
   const outbox = createPostOutbox({ storage });
   const result = await outbox.enqueue([
@@ -176,6 +176,28 @@ test('outbox persists complete relationship and profile activity through a stric
         raw: 'private-reply-raw'
       }
     }),
+    post('quote-1', {
+      kind: 'quote',
+      quotedExternalId: 'quoted-1',
+      quoteContext: {
+        externalId: 'quoted-1',
+        author: {
+          id: 'quoted-author-1',
+          handle: 'quoted_author',
+          name: 'Quoted Author',
+          avatarUrl: 'https://example.test/quoted-author.png',
+          followersCount: 81,
+          cookie: 'private-quote-author-cookie',
+          raw: { credential: 'private-quote-author-raw' }
+        },
+        content: 'Quoted text',
+        translatedContent: '引用翻译',
+        url: 'https://x.com/quoted_author/status/quoted-1',
+        publishedAt: 80,
+        cookie: 'private-quote-cookie',
+        raw: { response: 'private-quote-raw' }
+      }
+    }),
     post('ordinary-tweet', {
       target: { handle: 'must-not-be-persisted' }
     })
@@ -183,12 +205,13 @@ test('outbox persists complete relationship and profile activity through a stric
 
   const records = (await outbox.readBatch()).records.map((record) => record.post);
   assert.equal(result.rejected, 0);
-  assert.equal(result.added, 5);
+  assert.equal(result.added, 6);
   assert.deepEqual(records.map((record) => record.externalId), [
     'follow:alice:bob',
     'unfollow:alice:carol',
     'profile:alice:100',
     'reply-1',
+    'quote-1',
     'ordinary-tweet'
   ]);
   assert.deepEqual(Object.keys(records[0].target).sort(), [
@@ -204,7 +227,15 @@ test('outbox persists complete relationship and profile activity through a stric
   assert.equal(records[3].replyContext.content, 'Parent text');
   assert.equal(records[3].replyContext.translatedContent, '父帖翻译');
   assert.equal(Object.hasOwn(records[3].replyContext, 'raw'), false);
-  assert.equal(Object.hasOwn(records[4], 'target'), false);
+  assert.deepEqual(Object.keys(records[4].quoteContext).sort(), [
+    'author', 'content', 'externalId', 'publishedAt', 'translatedContent', 'url'
+  ]);
+  assert.deepEqual(Object.keys(records[4].quoteContext.author).sort(), [
+    'avatarUrl', 'followersCount', 'handle', 'id', 'name'
+  ]);
+  assert.equal(records[4].quoteContext.content, 'Quoted text');
+  assert.equal(records[4].quoteContext.translatedContent, '引用翻译');
+  assert.equal(Object.hasOwn(records[5], 'target'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-target-cookie'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-target-authorization'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-profile-cookie'), false);
@@ -212,6 +243,10 @@ test('outbox persists complete relationship and profile activity through a stric
   assert.equal(JSON.stringify(storage.value).includes('private-reply-target'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-parent-cookie'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-reply-raw'), false);
+  assert.equal(JSON.stringify(storage.value).includes('private-quote-cookie'), false);
+  assert.equal(JSON.stringify(storage.value).includes('private-quote-raw'), false);
+  assert.equal(JSON.stringify(storage.value).includes('private-quote-author-cookie'), false);
+  assert.equal(JSON.stringify(storage.value).includes('private-quote-author-raw'), false);
   assert.equal(storage.value.debotSocialPostOutboxV1.schemaVersion, 2);
 });
 

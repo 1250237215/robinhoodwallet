@@ -14,13 +14,13 @@ function appSourceBetween(start, end) {
   return appJs.slice(startIndex, endIndex);
 }
 
-function executableSocialReplyMarkup() {
+function executableSocialReferenceMarkup() {
   const source = `
     ${appSourceBetween('function escapeHtml(value)', 'function finiteNumber(')}
     const SOCIAL_HANDLE_PATTERN = /^[a-z0-9_]{1,15}$/i;
     ${appSourceBetween('function normalizeSocialHandle(value)', 'function decodeSocialActivityExternalId(')}
     ${appSourceBetween('function socialXStatusIdentity(value)', 'function visibleSocialPosts(')}
-    return socialReplyMarkup;
+    return socialReferenceMarkup;
   `;
   return Function(source)();
 }
@@ -1298,7 +1298,7 @@ test('social cards show only the final browser receipt latency in milliseconds',
   assert.match(appJs, /webReceiptMode: mode/);
   assert.match(appJs, /<div class="social-latency-value" aria-label="延迟">\$\{escapeHtml\(latency\)\}<\/div>/);
   assert.doesNotMatch(appJs, /首次发现|网页首次接收|本次 VPS 变更|网页载入/);
-  assert.match(appJs, /function socialReplyMarkup\(post\)/);
+  assert.match(appJs, /function socialReferenceMarkup\(post\)/);
   assert.match(appJs, /被回复原文/);
   assert.match(appJs, /原文翻译/);
   assert.match(stylesCss, /\.social-reply-context \{/);
@@ -1314,7 +1314,7 @@ test('social cards show only the final browser receipt latency in milliseconds',
 });
 
 test('reply cards keep the displayed parent, profile link and post link on one identity', () => {
-  const renderReply = executableSocialReplyMarkup();
+  const renderReply = executableSocialReferenceMarkup();
   const matching = renderReply({
     kind: 'reply',
     target: {
@@ -1367,7 +1367,7 @@ test('reply cards keep the displayed parent, profile link and post link on one i
 });
 
 test('reply card executable markup escapes parent-controlled names and text', () => {
-  const renderReply = executableSocialReplyMarkup();
+  const renderReply = executableSocialReferenceMarkup();
   const markup = renderReply({
     kind: 'reply',
     target: {
@@ -1390,6 +1390,62 @@ test('reply card executable markup escapes parent-controlled names and text', ()
   assert.match(markup, /&lt;script&gt;alert\(&quot;original&quot;\)&lt;\/script&gt; &amp; text/);
   assert.match(markup, /&lt;img src=x onerror=&quot;translation\(\)&quot;&gt;/);
   assert.doesNotMatch(markup, /<script|<img|wrong_parent|target\(\)/i);
+});
+
+test('quote cards show and search the quoted account, original, translation and safe source link', () => {
+  const renderReference = executableSocialReferenceMarkup();
+  const quotedPost = {
+    id: 77,
+    kind: 'quote',
+    content: 'Commentary on the quoted post',
+    author: { handle: 'monitoring_user', name: 'Monitoring User' },
+    quoteContext: {
+      externalId: '67890',
+      author: {
+        handle: 'quote_search',
+        name: 'Quoted <script>"name" & \'single\'</script>'
+      },
+      content: '<script>alert("quoted original needle")</script> & body',
+      translatedContent: '<img src=x onerror="quoteTranslation()"> 引用翻译关键词',
+      url: 'javascript:quoteContext()',
+      publishedAt: 123
+    }
+  };
+  const markup = renderReference(quotedPost);
+  assert.match(markup, />引用<\/span>/);
+  assert.match(markup, /href="https:\/\/x\.com\/quote_search"/);
+  assert.match(markup, /href="https:\/\/x\.com\/quote_search\/status\/67890"/);
+  assert.match(markup, /Quoted &lt;script&gt;&quot;name&quot; &amp; &#39;single&#39;&lt;\/script&gt;/);
+  assert.match(markup, />@quote_search<\/span>/);
+  assert.match(markup, /被引用原文/);
+  assert.match(markup, /&lt;script&gt;alert\(&quot;quoted original needle&quot;\)&lt;\/script&gt; &amp; body/);
+  assert.match(markup, /原文翻译/);
+  assert.match(markup, /&lt;img src=x onerror=&quot;quoteTranslation\(\)&quot;&gt; 引用翻译关键词/);
+  assert.doesNotMatch(markup, /<script|<img|javascript:/i);
+
+  const searchablePost = {
+    ...quotedPost,
+    quoteContext: {
+      ...quotedPost.quoteContext,
+      author: { handle: 'quote_search', name: 'Quoted Search Account' },
+      content: 'Quoted original needle',
+      translatedContent: '引用翻译关键词'
+    }
+  };
+  const unrelatedPost = {
+    id: 78,
+    kind: 'post',
+    content: 'Unrelated post',
+    author: { handle: 'someone_else', name: 'Someone Else' }
+  };
+  for (const query of ['quote_search', 'quoted search account', 'original needle', '引用翻译']) {
+    const visible = executableVisibleSocialPosts({
+      posts: [searchablePost, unrelatedPost],
+      query,
+      notesByPostId: {}
+    });
+    assert.deepEqual(visible.map((post) => post.id), [77]);
+  }
 });
 
 test('chain and social elapsed times advance every second without rerendering either feed', () => {
