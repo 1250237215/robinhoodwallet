@@ -9,11 +9,11 @@ if (IS_LEGACY_RADAR_PAGE) {
 }
 
 const APP_BASE = /^\/robinhood-radar(?:\/|$)/.test(window.location.pathname) ? '/robinhood-radar' : '';
+const SITE_NAME = '1874catch';
 const CHAIN_CONFIGS = Object.freeze({
   robinhood: Object.freeze({
     id: 'robinhood',
     label: 'Robinhood',
-    mark: 'R',
     family: 'evm',
     nativeSymbol: 'ETH',
     apiPath: 'robinhood',
@@ -32,7 +32,6 @@ const CHAIN_CONFIGS = Object.freeze({
   base: Object.freeze({
     id: 'base',
     label: 'Base',
-    mark: 'B',
     family: 'evm',
     nativeSymbol: 'ETH',
     apiPath: 'base',
@@ -51,7 +50,6 @@ const CHAIN_CONFIGS = Object.freeze({
   solana: Object.freeze({
     id: 'solana',
     label: 'Solana',
-    mark: 'S',
     family: 'solana',
     nativeSymbol: 'SOL',
     apiPath: 'solana',
@@ -226,7 +224,6 @@ const SORT_LABELS = Object.freeze({
 
 const elements = {
   chainSwitcher: document.querySelector('#chain-switcher'),
-  chainMark: document.querySelector('#chain-mark'),
   brandTitle: document.querySelector('#brand-title'),
   brandSubtitle: document.querySelector('#brand-subtitle'),
   candidateCount: document.querySelector('#candidate-count'),
@@ -6100,11 +6097,10 @@ function showToast(message, tone = 'success') {
 
 function syncChainUi() {
   const chain = activeChain();
-  document.title = `${chain.label} 聪明钱雷达`;
+  document.title = SITE_NAME;
   document.body.dataset.chain = chain.id;
-  elements.chainMark.textContent = chain.mark;
-  elements.brandTitle.textContent = `${chain.label} 聪明钱雷达`;
-  elements.brandSubtitle.textContent = `${chain.label} 手工金狗、最近重扫候选与已确认地址库`;
+  elements.brandTitle.textContent = SITE_NAME;
+  elements.brandSubtitle.textContent = `${chain.label} · 手工金狗、最近重扫候选与已确认地址库`;
   elements.manualInput.placeholder = chain.tokenPlaceholder;
   elements.manualWalletLines.placeholder = chain.walletPlaceholder;
   elements.chainSwitcher.querySelectorAll('[data-chain]').forEach((button) => {

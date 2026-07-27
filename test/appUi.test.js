@@ -54,9 +54,15 @@ function executableSocialLatencyMarkup() {
 }
 
 test('home is the manual Robinhood smart-money workspace', () => {
-  assert.match(indexHtml, /<title>Robinhood 聪明钱雷达<\/title>/);
-  assert.match(indexHtml, /<h1 id="brand-title">Robinhood 聪明钱雷达<\/h1>/);
-  assert.match(indexHtml, /手工金狗、最近重扫候选与已确认地址库/);
+  assert.match(indexHtml, /<title>1874catch<\/title>/);
+  assert.match(indexHtml, /<link rel="icon" href="assets\/ikun-chick\.svg" type="image\/svg\+xml" \/>/);
+  assert.match(indexHtml, /<h1 id="brand-title">1874catch<\/h1>/);
+  assert.match(indexHtml, /<img src="assets\/ikun-chick\.svg" width="44" height="44" alt="" \/>/);
+  assert.match(indexHtml, /Robinhood · 手工金狗、最近重扫候选与已确认地址库/);
+  assert.match(appJs, /const SITE_NAME = '1874catch'/);
+  assert.match(appJs, /document\.title = SITE_NAME/);
+  assert.match(appJs, /elements\.brandTitle\.textContent = SITE_NAME/);
+  assert.doesNotMatch(appJs, /elements\.chainMark|chain\.mark/);
   assert.match(indexHtml, /<dt>手工金狗<\/dt>/);
   assert.match(indexHtml, /id="results-container"/);
   assert.match(indexHtml, /id="detail-panel"/);

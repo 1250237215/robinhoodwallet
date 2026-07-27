@@ -167,18 +167,23 @@ svg {
   min-width: 0;
 }
 
-.chain-mark {
-  width: 38px;
-  height: 38px;
-  flex: 0 0 38px;
+.brand-logo {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
   display: grid;
   place-items: center;
-  border: 1px solid #1b2520;
+  overflow: hidden;
+  border: 1px solid #c5cabe;
   border-radius: 50%;
-  background: #202824;
-  color: #ffffff;
-  font-size: 17px;
-  font-weight: 800;
+  background: #fff8d9;
+  box-shadow: 0 2px 7px rgba(21, 31, 26, 0.13);
+}
+
+.brand-logo img {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .brand-copy {
@@ -4492,43 +4497,6 @@ select:hover {
   padding-top: 13px;
 }
 
-.chain-mark {
-  position: relative;
-  box-shadow: inset 0 0 0 4px #26352e;
-}
-
-.chain-mark::after {
-  content: "";
-  position: absolute;
-  right: -2px;
-  bottom: -2px;
-  width: 9px;
-  height: 9px;
-  border: 2px solid var(--page);
-  border-radius: 50%;
-  background: #18a05e;
-}
-
-body[data-chain="base"] .chain-mark {
-  border-color: #174ea6;
-  background: #175cd3;
-  box-shadow: inset 0 0 0 4px #2f6fd1;
-}
-
-body[data-chain="base"] .chain-mark::after {
-  background: #ffffff;
-}
-
-body[data-chain="solana"] .chain-mark {
-  border-color: #3f214d;
-  background: #6c2b86;
-  box-shadow: inset 0 0 0 4px #7d3998;
-}
-
-body[data-chain="solana"] .chain-mark::after {
-  background: #20a76f;
-}
-
 .research-table tbody tr.is-selected {
   background: #edf4f0;
   box-shadow: inset 3px 0 #0b7a43;
@@ -4763,10 +4731,10 @@ body[data-chain="solana"] .chain-mark::after {
     padding: 0 6px;
   }
 
-  .chain-mark {
-    width: 34px;
-    height: 34px;
-    flex-basis: 34px;
+  .brand-logo {
+    width: 40px;
+    height: 40px;
+    flex-basis: 40px;
   }
 
   .brand-copy h1 {
