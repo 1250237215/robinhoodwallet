@@ -1351,22 +1351,32 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
   function addWatchAccount(input, timestamp, {
     origin = 'local',
     synced = false,
-    preserveEventTypes = false
+    preserveLocalPreferences = false
   } = {}) {
     const account = normalizeWatchAccount(input);
+    const suppliedNote = !preserveLocalPreferences && account._noteProvided
+      ? normalizeWatchNote(account.note)
+      : '';
     const existing = db.prepare('SELECT * FROM social_watchlist WHERE platform = ? AND account_key = ?')
       .get(account.platform, account.accountKey);
+    const nextCreatedAt = !existing || existing.desired_state === 'removed'
+      ? Math.max(
+        timestamp,
+        Number(db.prepare('SELECT COALESCE(MAX(created_at), 0) AS latest FROM social_watchlist').get().latest) + 1
+      )
+      : existing.created_at;
     let id;
     let changed = false;
     if (!existing) {
-      const initialEventTypes = preserveEventTypes
+      const initialEventTypes = preserveLocalPreferences
         ? SOCIAL_WATCH_EVENT_TYPES
         : account.eventTypes;
+      const initialNote = preserveLocalPreferences ? '' : suppliedNote;
       const result = db.prepare(`
         INSERT INTO social_watchlist(
-          platform, account_key, handle, name, url, remote_id, metadata_json, event_types_json, desired_state,
+          platform, account_key, handle, name, url, remote_id, metadata_json, event_types_json, local_note, desired_state,
           sync_status, origin, last_synced_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
       `).run(
         account.platform,
         account.accountKey,
@@ -1376,10 +1386,11 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         account.remoteId,
         json(account.metadata),
         json(initialEventTypes),
+        initialNote,
         synced ? 'synced' : 'pending',
         origin,
         synced ? timestamp : null,
-        timestamp,
+        nextCreatedAt,
         timestamp
       );
       id = Number(result.lastInsertRowid);
@@ -1390,9 +1401,12 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       const nextUrl = account.url || existing.url;
       const nextRemoteId = account.remoteId || existing.remote_id;
       const nextMetadata = Object.keys(account.metadata).length ? account.metadata : parseJson(existing.metadata_json, {});
-      const nextEventTypes = preserveEventTypes || !account._eventTypesProvided
+      const nextEventTypes = preserveLocalPreferences || !account._eventTypesProvided
         ? watchEventTypesFromJson(existing.event_types_json)
         : account.eventTypes;
+      const nextNote = preserveLocalPreferences || !account._noteProvided
+        ? existing.local_note
+        : suppliedNote;
       const nextStatus = synced ? 'synced' : existing.desired_state === 'active' && existing.sync_status === 'synced'
         ? 'synced'
         : 'pending';
@@ -1400,12 +1414,13 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         existing.name !== nextName || existing.url !== nextUrl || existing.remote_id !== nextRemoteId ||
         existing.metadata_json !== json(nextMetadata) ||
         existing.event_types_json !== json(nextEventTypes) ||
+        existing.local_note !== nextNote ||
         existing.sync_status !== nextStatus;
       if (changed) {
         db.prepare(`
           UPDATE social_watchlist SET
-            handle = ?, name = ?, url = ?, remote_id = ?, metadata_json = ?, event_types_json = ?, desired_state = 'active',
-            sync_status = ?, origin = ?, last_synced_at = ?, last_error = '', updated_at = ?
+            handle = ?, name = ?, url = ?, remote_id = ?, metadata_json = ?, event_types_json = ?, local_note = ?, desired_state = 'active',
+            sync_status = ?, origin = ?, last_synced_at = ?, last_error = '', created_at = ?, updated_at = ?
           WHERE id = ?
         `).run(
           account.handle,
@@ -1414,9 +1429,11 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
           nextRemoteId,
           json(nextMetadata),
           json(nextEventTypes),
+          nextNote,
           nextStatus,
           origin === 'remote' ? 'remote' : existing.origin,
           synced ? timestamp : existing.last_synced_at,
+          nextCreatedAt,
           timestamp,
           id
         );
@@ -1654,7 +1671,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       return db.prepare(`
         SELECT * FROM social_watchlist
         ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-        ORDER BY desired_state, lower(handle), id
+        ORDER BY desired_state, created_at, id
       `).all(...params).map(watchlistFromRow);
     },
     claimCommands({ limit = 50, leaseMs = 30_000 } = {}) {
@@ -1934,7 +1951,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         const currentRevision = Number(currentBridgeState?.snapshot_revision || 0);
         if (!snapshotVersion && currentSessionId && currentSessionStartedAt > 0 && currentRevision > 0) {
           return {
-            entries: db.prepare('SELECT * FROM social_watchlist ORDER BY desired_state, lower(handle), id')
+            entries: db.prepare('SELECT * FROM social_watchlist ORDER BY desired_state, created_at, id')
               .all()
               .map(watchlistFromRow),
             changes: [],
@@ -1955,7 +1972,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
           }
           if (rejectionReason) {
             return {
-              entries: db.prepare('SELECT * FROM social_watchlist ORDER BY desired_state, lower(handle), id')
+              entries: db.prepare('SELECT * FROM social_watchlist ORDER BY desired_state, created_at, id')
                 .all()
                 .map(watchlistFromRow),
               changes: [],
@@ -2002,7 +2019,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
           const result = addWatchAccount(account, timestamp, {
             origin: 'remote',
             synced: true,
-            preserveEventTypes: true
+            preserveLocalPreferences: true
           });
           if (result.change) changes.push(result.change);
         }
@@ -2043,7 +2060,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
           changes.push(recordChange('watchlist.updated', 'watchlist', row.id, entry, timestamp));
         }
         return {
-          entries: db.prepare('SELECT * FROM social_watchlist ORDER BY desired_state, lower(handle), id')
+          entries: db.prepare('SELECT * FROM social_watchlist ORDER BY desired_state, created_at, id')
             .all()
             .map(watchlistFromRow),
           changes,

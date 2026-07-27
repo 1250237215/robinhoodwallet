@@ -3359,6 +3359,27 @@ select:hover {
   gap: 10px;
 }
 
+.social-post-head-tools {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+
+.social-post-note-edit {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  color: #49725b;
+}
+
+.social-post-note-edit svg {
+  width: 13px;
+  height: 13px;
+}
+
 .social-post-author-line {
   min-width: 0;
   gap: 6px;
@@ -3741,6 +3762,7 @@ select:hover {
 .social-event-editor {
   width: min(620px, calc(100vw - 24px));
   max-height: min(760px, calc(100vh - 24px));
+  max-height: min(760px, calc(100dvh - 24px));
   padding: 0;
   overflow: auto;
   border: 1px solid #aeb8b3;
@@ -3834,6 +3856,11 @@ select:hover {
   background: #f8faf9;
 }
 
+.social-event-options[hidden],
+#social-event-selection-actions[hidden] {
+  display: none;
+}
+
 .social-event-options legend {
   margin-left: 3px;
   padding: 0 5px;
@@ -3886,8 +3913,15 @@ select:hover {
 }
 
 .social-event-editor-actions {
+  position: sticky;
+  z-index: 2;
+  bottom: -18px;
   justify-content: space-between;
   gap: 10px;
+  margin: 0 -18px -18px;
+  padding: 12px 18px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
 }
 
 .social-event-editor-actions > div {

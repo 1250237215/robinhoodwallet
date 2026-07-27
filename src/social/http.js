@@ -450,10 +450,16 @@ export function createSocialApiHandler({
         method(req, ['POST']);
         requireDevice(req, token);
         const body = await readJson(req);
+        const { account: accountValue, accounts: ignoredAccounts, ...accountOptions } = body;
+        const wrappedAccount = Object.hasOwn(body, 'account')
+          ? typeof accountValue === 'object' && accountValue !== null && !Array.isArray(accountValue)
+            ? { ...accountOptions, ...accountValue }
+            : { ...accountOptions, handle: accountValue }
+          : null;
         const accounts = Array.isArray(body.accounts)
           ? body.accounts
-          : Object.hasOwn(body, 'account')
-            ? [body.account]
+          : wrappedAccount
+            ? [wrappedAccount]
             : [body];
         if (!accounts.length || accounts.length > 500) {
           throw new SocialHttpError(400, 'accounts must contain 1 to 500 entries', 'INVALID_WATCHLIST');

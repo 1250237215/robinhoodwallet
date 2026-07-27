@@ -439,7 +439,7 @@
                 </label>
                 <button class="social-primary-button" id="social-watchlist-add" type="submit">
                   <i data-lucide="user-plus" aria-hidden="true"></i>
-                  加入监控
+                  设置并加入
                 </button>
               </form>
               <div class="social-pairing-row" id="social-pairing-row">
@@ -576,7 +576,7 @@
       <form class="social-event-editor-form" id="social-event-editor-form">
         <div class="social-event-editor-head">
           <div>
-            <span>账号行为监控</span>
+            <span id="social-event-editor-eyebrow">账号行为监控</span>
             <h2 id="social-event-editor-title">--</h2>
           </div>
           <button class="icon-button" id="social-event-editor-close" type="button" title="关闭" aria-label="关闭账号行为编辑">
@@ -585,7 +585,7 @@
         </div>
         <input id="social-event-editor-id" type="hidden" />
         <label class="social-event-note-field" for="social-event-note">
-          <span>自定义备注</span>
+          <span id="social-event-note-label">自定义备注</span>
           <textarea id="social-event-note" rows="3" maxlength="500" placeholder="输入该账号的备注"></textarea>
         </label>
         <fieldset class="social-event-options" id="social-event-options">
@@ -602,13 +602,13 @@
           <label><input type="checkbox" name="socialEventType" value="profile_bio" /><span><i data-lucide="notebook-pen" aria-hidden="true"></i>改简介</span></label>
         </fieldset>
         <div class="social-event-editor-actions">
-          <div>
+          <div id="social-event-selection-actions">
             <button class="social-secondary-button" id="social-event-select-all" type="button">全部选择</button>
             <button class="social-secondary-button" id="social-event-clear-all" type="button">全部关闭</button>
           </div>
           <button class="social-primary-button" id="social-event-editor-save" type="submit">
             <i data-lucide="save" aria-hidden="true"></i>
-            保存设置
+            <span id="social-event-editor-save-label">保存设置</span>
           </button>
         </div>
       </form>

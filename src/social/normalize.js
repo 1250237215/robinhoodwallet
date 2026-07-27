@@ -684,6 +684,7 @@ export function normalizeWatchAccount(input, { defaultPlatform = 'twitter' } = {
   const accountKey = text(firstValue(value, ['accountKey'], handle), 240).toLowerCase();
   if (!accountKey) throw new TypeError('Watchlist account key is required');
   const eventTypesProvided = Object.hasOwn(value, 'eventTypes');
+  const noteProvided = Object.hasOwn(value, 'note');
   return {
     platform,
     accountKey,
@@ -693,6 +694,8 @@ export function normalizeWatchAccount(input, { defaultPlatform = 'twitter' } = {
     remoteId: text(firstValue(value, ['remoteId', 'authorId']), 240),
     metadata: value.metadata && typeof value.metadata === 'object' ? value.metadata : {},
     eventTypes: normalizeWatchEventTypes(eventTypesProvided ? value.eventTypes : undefined, { defaultAll: true }),
-    _eventTypesProvided: eventTypesProvided
+    note: noteProvided ? value.note : '',
+    _eventTypesProvided: eventTypesProvided,
+    _noteProvided: noteProvided
   };
 }

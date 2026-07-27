@@ -867,6 +867,60 @@ test('watchlist intents create authenticated bridge commands and acknowledgement
   assert.equal(store.listWatchlist({ includeRemoved: true }).some((entry) => entry.id === alice.id), true);
 });
 
+test('watchlist additions persist initial preferences and keep their insertion order', (t) => {
+  const { store, setNow } = fixture(t);
+  const added = store.addWatchAccounts([
+    {
+      handle: 'zulu',
+      note: '  第一批重点账号  ',
+      eventTypes: ['quote', 'post', 'quote']
+    },
+    {
+      handle: 'alpha',
+      note: '第二个账号',
+      eventTypes: ['reply']
+    },
+    {
+      handle: 'middle',
+      note: '',
+      eventTypes: []
+    }
+  ]);
+
+  assert.deepEqual(added.map((result) => result.entry.handle), ['zulu', 'alpha', 'middle']);
+  assert.deepEqual(store.listWatchlist().map((entry) => entry.handle), ['zulu', 'alpha', 'middle']);
+  assert.equal(added[0].entry.note, '第一批重点账号');
+  assert.deepEqual(added[0].entry.eventTypes, ['post', 'quote']);
+  assert.equal(added[1].entry.note, '第二个账号');
+  assert.deepEqual(added[1].entry.eventTypes, ['reply']);
+  assert.deepEqual(added[2].entry.eventTypes, []);
+
+  const commands = store.claimCommands({ limit: 10 });
+  assert.deepEqual(commands.map((command) => command.payload.handle), ['zulu', 'alpha', 'middle']);
+  assert.equal(commands.every((command) => !Object.hasOwn(command.payload, 'note')), true);
+  assert.throws(
+    () => store.addWatchAccounts([{ handle: 'oversized', note: '猫'.repeat(501) }]),
+    /must not exceed 500 characters/
+  );
+  assert.throws(
+    () => store.addWatchAccounts([{ handle: 'invalid-note', note: null }]),
+    /note must be a string/
+  );
+
+  setNow(1_900_000_001_000);
+  store.removeWatchAccount(added[0].entry.id);
+  setNow(1_900_000_002_000);
+  const mixedBatch = store.addWatchAccounts([
+    { handle: 'new-first', note: '本批第一个' },
+    { handle: 'zulu', note: '本批第二个，重新加入' }
+  ]).map((result) => result.entry);
+  assert.equal(mixedBatch[1].createdAt, mixedBatch[0].createdAt + 1);
+  assert.deepEqual(
+    store.listWatchlist().map((entry) => entry.handle),
+    ['alpha', 'middle', 'new-first', 'zulu']
+  );
+});
+
 test('watchlist notes are local atomic preferences with Unicode limits and idempotent changes', (t) => {
   const { store, setNow } = fixture(t);
   const added = store.addWatchAccounts(['alice'])[0];
@@ -1042,7 +1096,7 @@ test('complete remote watchlist snapshots reconcile direct DeBot additions and r
     remoteId: 'debot-bob',
     metadata: { monitorLevel: 'important' },
     eventTypes: ['post'],
-    note: '远端不得覆盖'
+    note: { invalid: '远端备注字段也不得影响本地偏好' }
   }]);
   const repeatedBob = repeated.entries.find((entry) => entry.handle === 'bob');
   assert.deepEqual(repeatedBob.eventTypes, ['follow', 'profile_avatar']);

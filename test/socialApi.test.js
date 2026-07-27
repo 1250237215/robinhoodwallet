@@ -223,14 +223,34 @@ test('paired bridge authenticates heartbeat, ingestion, watchlist commands and a
   const watchlist = await fetch(`${baseUrl}/api/social/watchlist/batch`, {
     method: 'POST',
     headers: auth(token),
-    body: JSON.stringify({ accounts: ['alice', { platform: 'binance', handle: 'bob' }] })
+    body: JSON.stringify({
+      accounts: [
+        { handle: 'zulu', eventTypes: ['quote', 'post'], note: '第一位' },
+        { handle: 'alpha', eventTypes: ['reply'], note: '第二位' }
+      ]
+    })
   });
   assert.equal(watchlist.status, 202);
-  assert.equal((await watchlist.json()).commands.length, 2);
+  const watchlistPayload = await watchlist.json();
+  assert.equal(watchlistPayload.commands.length, 2);
+  assert.deepEqual(watchlistPayload.entries.map((entry) => entry.handle), ['zulu', 'alpha']);
+  assert.deepEqual(watchlistPayload.entries.map((entry) => entry.note), ['第一位', '第二位']);
+  assert.deepEqual(watchlistPayload.entries[0].eventTypes, ['post', 'quote']);
+  const wrappedWatch = await fetch(`${baseUrl}/api/social/watchlist`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({ account: 'middle', eventTypes: ['follow'], note: '第三位' })
+  });
+  assert.equal(wrappedWatch.status, 202);
+  const wrappedPayload = await wrappedWatch.json();
+  assert.equal(wrappedPayload.entries[0].note, '第三位');
+  assert.deepEqual(wrappedPayload.entries[0].eventTypes, ['follow']);
+  const listedWatchlist = await (await fetch(`${baseUrl}/api/social/watchlist`)).json();
+  assert.deepEqual(listedWatchlist.entries.map((entry) => entry.handle), ['zulu', 'alpha', 'middle']);
   const commands = await (await fetch(`${baseUrl}/api/social/bridge/commands`, {
     headers: { authorization: `Bearer ${token}` }
   })).json();
-  assert.equal(commands.commands.length, 2);
+  assert.equal(commands.commands.length, 3);
 
   const acknowledgement = await fetch(
     `${baseUrl}/api/social/bridge/commands/${commands.commands[0].id}/ack`,

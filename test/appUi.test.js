@@ -53,6 +53,11 @@ function executableSocialLatencyMarkup() {
   );
 }
 
+function executableSortSocialWatchlistByAdded() {
+  const source = appSourceBetween('function sortSocialWatchlistByAdded(entries)', 'function applySocialBridgeStatus(bridge)');
+  return Function(`${source}\nreturn sortSocialWatchlistByAdded;`)();
+}
+
 test('home is the manual Robinhood smart-money workspace', () => {
   assert.match(indexHtml, /<title>1874catch<\/title>/);
   assert.match(indexHtml, /<link rel="icon" href="assets\/ikun-chick\.svg" type="image\/svg\+xml" \/>/);
@@ -1171,7 +1176,8 @@ test('social monitoring is a personal-watchlist feed without global feed, source
   }
   assert.match(socialPanelHtml, /id="social-search"[^>]*placeholder="搜索账号、备注或内容"[^>]*aria-label="搜索个人社媒监控"/);
   assert.doesNotMatch(socialPanelHtml, /id="social-watchlist-platform"|<span>平台<\/span>|value="binance"/);
-  assert.match(appJs, /accounts: lines\.map\(\(handle\) => \(\{ handle, platform: 'twitter' \}\)\)/);
+  assert.match(indexHtml, /id="social-watchlist-add"[^>]*>[\s\S]*设置并加入/);
+  assert.match(appJs, /accounts: pendingAccounts\.map\(\(handle\) => \(\{[\s\S]*handle,[\s\S]*platform: 'twitter',[\s\S]*eventTypes,[\s\S]*note/);
   assert.doesNotMatch(socialPanelHtml, /value="(?:robinhood|base|solana)"/);
   assert.doesNotMatch(indexHtml, /id="monitor-cluster-(?:title|summary|list)"|(?:2 分钟|60 秒)同币聚合/);
   assert.match(appJs, /socialMonitorPanel: document\.querySelector\('#social-monitor-panel'\)/);
@@ -1206,7 +1212,9 @@ test('each watched account exposes behavior controls and a searchable custom not
   ];
   assert.match(indexHtml, /id="social-event-editor"[^>]*aria-labelledby="social-event-editor-title"/);
   assert.match(indexHtml, /id="social-event-editor-form"/);
+  assert.match(indexHtml, /id="social-event-editor-eyebrow"/);
   assert.match(indexHtml, /id="social-event-note"[^>]*maxlength="500"[^>]*placeholder="输入该账号的备注"/);
+  assert.match(indexHtml, /id="social-event-note-label"/);
   assert.match(indexHtml, /id="social-event-options"/);
   for (const eventType of eventTypes) {
     assert.match(indexHtml, new RegExp(`name="socialEventType" value="${eventType}"`));
@@ -1214,6 +1222,7 @@ test('each watched account exposes behavior controls and a searchable custom not
   assert.match(indexHtml, /id="social-event-select-all"[^>]*>全部选择</);
   assert.match(indexHtml, /id="social-event-clear-all"[^>]*>全部关闭</);
   assert.match(indexHtml, /id="social-event-editor-save"/);
+  assert.match(indexHtml, /id="social-event-editor-save-label"/);
   assert.match(appJs, /const SOCIAL_EVENT_TYPES = Object\.freeze\(\[[\s\S]*'profile_bio'[\s\S]*\]\)/);
   assert.match(appJs, /if \(!Array\.isArray\(value\)\) return \[\.\.\.SOCIAL_EVENT_TYPES\]/);
   assert.match(appJs, /return SOCIAL_EVENT_TYPES\.filter\(\(item\) => requested\.has\(item\)\)/);
@@ -1225,7 +1234,17 @@ test('each watched account exposes behavior controls and a searchable custom not
   assert.match(appJs, /setSocialEventEditorSelection\(\[\]\)/);
   assert.match(appJs, /elements\.socialEventNote\.value = String\(entry\.note \|\| ''\)/);
   assert.match(appJs, /const note = elements\.socialEventNote\.value\.trim\(\)/);
-  assert.match(appJs, /runSocialWrite\('PATCH', `\/watchlist\/\$\{id\}`, \{ eventTypes, note \}\)/);
+  assert.match(appJs, /state\.socialEventEditorMode = 'create'/);
+  assert.match(appJs, /setSocialEventEditorSelection\(SOCIAL_EVENT_TYPES\)/);
+  assert.match(appJs, /const patch = mode === 'note' \? \{ note \} : \{ eventTypes, note \}/);
+  assert.match(appJs, /runSocialWrite\('PATCH', `\/watchlist\/\$\{id\}`, patch\)/);
+  assert.match(appJs, /data-social-feed-note-edit="\$\{watchEntryId\}"/);
+  assert.match(appJs, /openSocialEventEditor\(editButton\.dataset\.socialFeedNoteEdit, \{ noteOnly: true \}\)/);
+  assert.match(appJs, /elements\.socialEventOptions\.hidden = noteOnly/);
+  assert.match(appJs, /function closeSocialEventEditor\(\{ force = false \} = \{\}\)[\s\S]*state\.socialMutationBusy && !force/);
+  assert.match(appJs, /closeSocialEventEditor\(\{ force: true \}\)/);
+  assert.match(appJs, /elements\.socialEventEditor\.addEventListener\('cancel',[\s\S]*event\.preventDefault\(\)/);
+  assert.match(appJs, /finally \{[\s\S]*state\.socialMutationBusy = false;[\s\S]*renderSocialMonitor\(\);/);
   assert.match(appJs, /watchEntry\?\.note/);
   assert.match(appJs, /class="social-watchlist-note"[^>]*>\$\{escapeHtml\(note\)\}/);
   assert.match(appJs, /class="social-post-note"[^>]*[\s\S]*\$\{escapeHtml\(watchNote\)\}/);
@@ -1234,6 +1253,7 @@ test('each watched account exposes behavior controls and a searchable custom not
   assert.match(stylesCss, /\.social-post-note span \{[\s\S]*overflow-wrap: anywhere;[\s\S]*-webkit-line-clamp: 2/);
   assert.match(stylesCss, /\.social-event-note-field textarea \{[\s\S]*width: 100%;[\s\S]*max-height: 180px/);
   assert.match(stylesCss, /\.social-event-options \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(stylesCss, /\.social-post-note-edit \{[\s\S]*width: 28px;[\s\S]*height: 28px/);
   assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.social-event-options \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.social-event-editor-actions \{[\s\S]*flex-direction: column/);
 
@@ -1246,6 +1266,13 @@ test('each watched account exposes behavior controls and a searchable custom not
     }
   });
   assert.deepEqual(matchingPosts.map((post) => post.id), ['priority']);
+
+  const sortByAdded = executableSortSocialWatchlistByAdded();
+  assert.deepEqual(sortByAdded([
+    { id: 9, handle: 'alpha', createdAt: 200 },
+    { id: 4, handle: 'zulu', createdAt: 100 },
+    { id: 5, handle: 'middle', createdAt: 100 }
+  ]).map((entry) => entry.handle), ['zulu', 'middle', 'alpha']);
 });
 
 test('social feed validates and accurately renders relationship and profile activity from snapshots and SSE', () => {
@@ -1278,7 +1305,7 @@ test('social feed validates and accurately renders relationship and profile acti
     appJs.indexOf('function scheduleSocialWatchlistSnapshotRefresh')
   );
   assert.ok(snapshotCoordinator.indexOf('if (resetCursor) state.socialPosts = [];')
-    < snapshotCoordinator.indexOf('state.socialWatchlist = record.watchlist'));
+    < snapshotCoordinator.indexOf('state.socialWatchlist = sortSocialWatchlistByAdded'));
   assert.ok(snapshotCoordinator.indexOf('mergeSocialPosts(record.posts.map')
     < snapshotCoordinator.indexOf('flushDeferredSocialPosts();'));
   assert.match(appJs, /function scheduleSocialWatchlistSnapshotRefresh\(attempt = 0\)[\s\S]*loadSocialSnapshot\(\{ quiet: true, expectedSequence: sequence \}\)\.then\(\(loaded\)[\s\S]*scheduleSocialWatchlistSnapshotRefresh\(retryIndex \+ 1\)/);

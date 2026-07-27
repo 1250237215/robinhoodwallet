@@ -337,14 +337,18 @@ const elements = {
   socialWatchlist: document.querySelector('#social-watchlist'),
   socialEventEditor: document.querySelector('#social-event-editor'),
   socialEventEditorForm: document.querySelector('#social-event-editor-form'),
+  socialEventEditorEyebrow: document.querySelector('#social-event-editor-eyebrow'),
   socialEventEditorTitle: document.querySelector('#social-event-editor-title'),
   socialEventEditorClose: document.querySelector('#social-event-editor-close'),
   socialEventEditorId: document.querySelector('#social-event-editor-id'),
+  socialEventNoteLabel: document.querySelector('#social-event-note-label'),
   socialEventNote: document.querySelector('#social-event-note'),
   socialEventOptions: document.querySelector('#social-event-options'),
+  socialEventSelectionActions: document.querySelector('#social-event-selection-actions'),
   socialEventSelectAll: document.querySelector('#social-event-select-all'),
   socialEventClearAll: document.querySelector('#social-event-clear-all'),
   socialEventEditorSave: document.querySelector('#social-event-editor-save'),
+  socialEventEditorSaveLabel: document.querySelector('#social-event-editor-save-label'),
   socialFeed: document.querySelector('#social-feed'),
   monitorFeedSummary: document.querySelector('#monitor-feed-summary'),
   monitorEventFeed: document.querySelector('#monitor-event-feed'),
@@ -443,7 +447,9 @@ const state = {
   socialSearchTimer: null,
   socialSelectedWatchlist: new Set(),
   socialMutationBusy: false,
+  socialEventEditorMode: 'edit',
   socialEditingWatchlistId: null,
+  socialPendingWatchAccounts: [],
   socialExtensionReady: false,
   socialExtensionWritable: false,
   socialExtensionRequestSequence: 0,
@@ -1667,8 +1673,17 @@ function applySocialWatchlistEntry(entry) {
   const byId = new Map(state.socialWatchlist.map((item) => [Number(item.id), item]));
   if (entry.desiredState === 'removed') byId.delete(id);
   else byId.set(id, { ...(byId.get(id) || {}), ...entry, id });
-  state.socialWatchlist = [...byId.values()].sort((left, right) => String(left.handle || '').localeCompare(String(right.handle || '')));
+  state.socialWatchlist = sortSocialWatchlistByAdded([...byId.values()]);
   return true;
+}
+
+function sortSocialWatchlistByAdded(entries) {
+  return [...entries].sort((left, right) => {
+    const leftCreatedAt = Number(left?.createdAt || 0);
+    const rightCreatedAt = Number(right?.createdAt || 0);
+    if (leftCreatedAt !== rightCreatedAt) return leftCreatedAt - rightCreatedAt;
+    return Number(left?.id || 0) - Number(right?.id || 0);
+  });
 }
 
 function applySocialBridgeStatus(bridge) {
@@ -1706,9 +1721,9 @@ function applySocialSnapshot(payload, { resetCursor = false } = {}) {
   }
   if (resetCursor) state.socialPosts = [];
   if (Array.isArray(record.watchlist)) {
-    state.socialWatchlist = record.watchlist
-      .filter((entry) => entry?.desiredState !== 'removed')
-      .sort((left, right) => String(left.handle || '').localeCompare(String(right.handle || '')));
+    state.socialWatchlist = sortSocialWatchlistByAdded(
+      record.watchlist.filter((entry) => entry?.desiredState !== 'removed')
+    );
     mergeSocialPosts([]);
   }
   if (Array.isArray(record.posts)) {
@@ -2164,6 +2179,8 @@ function renderSocialFeed() {
   elements.socialFeed.innerHTML = posts.map((post) => {
     const author = post.author || {};
     const watchEntry = socialWatchEntryForPost(post);
+    const watchEntryId = Number(watchEntry?.id);
+    const editableWatchEntry = Number.isSafeInteger(watchEntryId);
     const watchNote = String(watchEntry?.note || '').trim();
     const visibleProfileChanges = enabledSocialProfileChanges(post, watchEntry);
     const activity = socialActivityIdentity(post);
@@ -2206,7 +2223,10 @@ function renderSocialFeed() {
                 ${followers !== null ? `<span>${escapeHtml(compactNumberFormatter.format(followers))} 粉丝</span>` : ''}
               </div>
             </div>
-            <time class="social-post-time" datetime="${escapeHtml(String(post.publishedAt ?? ''))}" data-live-timestamp="${escapeHtml(String(post.publishedAt ?? ''))}" title="${escapeHtml(formatDateTime(post.publishedAt))}" aria-live="off">${escapeHtml(formatMonitorAge(post.publishedAt))}</time>
+            <div class="social-post-head-tools">
+              ${editableWatchEntry ? `<button class="inline-icon-button social-post-note-edit" type="button" data-social-feed-note-edit="${watchEntryId}" title="编辑 @${escapeHtml(author.handle || '')} 的备注" aria-label="编辑 @${escapeHtml(author.handle || '')} 的备注"${state.socialMutationBusy ? ' disabled' : ''}><i data-lucide="notebook-pen" aria-hidden="true"></i></button>` : ''}
+              <time class="social-post-time" datetime="${escapeHtml(String(post.publishedAt ?? ''))}" data-live-timestamp="${escapeHtml(String(post.publishedAt ?? ''))}" title="${escapeHtml(formatDateTime(post.publishedAt))}" aria-live="off">${escapeHtml(formatMonitorAge(post.publishedAt))}</time>
+            </div>
           </header>
           ${watchNote ? `<div class="social-post-note" title="${escapeHtml(watchNote)}"><i data-lucide="notebook-pen" aria-hidden="true"></i><span>${escapeHtml(watchNote)}</span></div>` : ''}
           ${socialLatencyMarkup(post)}
@@ -3118,31 +3138,64 @@ function stopSocialMonitor() {
   state.socialEventSource = null;
 }
 
-async function addSocialWatchAccounts(event) {
+function socialWatchInputKey(value) {
+  let candidate = String(value || '').trim();
+  if (/^https?:\/\//i.test(candidate)) {
+    try {
+      candidate = new URL(candidate).pathname.split('/').filter(Boolean)[0] || candidate;
+    } catch {
+      // The server returns the precise validation error when the user submits.
+    }
+  }
+  return normalizeSocialHandle(candidate).toLowerCase();
+}
+
+function addSocialWatchAccounts(event) {
   event.preventDefault();
+  const existing = new Set(state.socialWatchlist.map((entry) => socialWatchlistKey(
+    entry.platform,
+    entry.accountKey || entry.handle
+  )));
+  const seen = new Set();
+  let skipped = 0;
   const lines = elements.socialWatchlistInput.value
     .split(/\r?\n/)
     .map((value) => value.trim())
-    .filter(Boolean);
-  if (!lines.length) return;
-  state.socialMutationBusy = true;
-  renderSocialWatchlist();
-  try {
-    const payload = await runSocialWrite('POST', '/watchlist/batch', {
-      accounts: lines.map((handle) => ({ handle, platform: 'twitter' }))
+    .filter(Boolean)
+    .filter((value) => {
+      const key = socialWatchInputKey(value);
+      if (!key || seen.has(key)) {
+        skipped += 1;
+        return false;
+      }
+      seen.add(key);
+      if (existing.has(`twitter:${key}`)) {
+        skipped += 1;
+        return false;
+      }
+      return true;
     });
-    elements.socialWatchlistInput.value = '';
-    if (Array.isArray(payload.entries)) {
-      for (const entry of payload.entries) applySocialWatchlistEntry(entry);
-    }
-    await loadSocialSnapshot({ quiet: true });
-    showToast(`已提交 ${lines.length} 个社媒账号`);
-  } catch (error) {
-    showToast(`加入社媒监控失败：${error.message}`, 'error');
-  } finally {
-    state.socialMutationBusy = false;
-    renderSocialWatchlist();
+  if (!lines.length) {
+    if (skipped > 0) showToast('没有可加入的新账号：输入内容均已重复或已在监控名单中');
+    return;
   }
+  state.socialEventEditorMode = 'create';
+  state.socialPendingWatchAccounts = lines;
+  state.socialEditingWatchlistId = null;
+  elements.socialEventEditorId.value = '';
+  elements.socialEventEditorEyebrow.textContent = '新增社媒监控';
+  elements.socialEventEditorTitle.textContent = `新增 ${lines.length} 个账号`;
+  elements.socialEventNoteLabel.textContent = lines.length === 1 ? '自定义备注' : `共同备注（${lines.length} 个账号）`;
+  elements.socialEventNote.value = '';
+  elements.socialEventNote.placeholder = lines.length === 1 ? '输入该账号的备注' : '输入本次账号共用的备注';
+  elements.socialEventOptions.hidden = false;
+  elements.socialEventSelectionActions.hidden = false;
+  elements.socialEventEditorSaveLabel.textContent = '加入监控';
+  setSocialEventEditorSelection(SOCIAL_EVENT_TYPES);
+  elements.socialEventEditorSave.disabled = state.socialMutationBusy;
+  elements.socialEventEditor.showModal();
+  refreshIcons(elements.socialEventEditor);
+  if (skipped > 0) showToast(`已跳过 ${skipped} 个重复或已监控账号`);
 }
 
 function setSocialEventEditorSelection(eventTypes) {
@@ -3152,59 +3205,97 @@ function setSocialEventEditorSelection(eventTypes) {
   });
 }
 
-function openSocialEventEditor(id) {
+function openSocialEventEditor(id, { noteOnly = false } = {}) {
   const numericId = Number(id);
   const entry = state.socialWatchlist.find((item) => Number(item.id) === numericId);
   if (!entry || !Number.isSafeInteger(numericId)) return;
   const handle = String(entry.handle || entry.accountKey || '').replace(/^@/, '');
+  state.socialEventEditorMode = noteOnly ? 'note' : 'edit';
+  state.socialPendingWatchAccounts = [];
   state.socialEditingWatchlistId = numericId;
   elements.socialEventEditorId.value = String(numericId);
+  elements.socialEventEditorEyebrow.textContent = noteOnly ? '快捷编辑备注' : '账号行为监控';
   elements.socialEventEditorTitle.textContent = `@${handle}`;
+  elements.socialEventNoteLabel.textContent = '自定义备注';
   elements.socialEventNote.value = String(entry.note || '');
-  setSocialEventEditorSelection(entry.eventTypes);
+  elements.socialEventNote.placeholder = '输入该账号的备注';
+  elements.socialEventOptions.hidden = noteOnly;
+  elements.socialEventSelectionActions.hidden = noteOnly;
+  elements.socialEventEditorSaveLabel.textContent = noteOnly ? '保存备注' : '保存设置';
+  if (!noteOnly) setSocialEventEditorSelection(entry.eventTypes);
   elements.socialEventEditorSave.disabled = state.socialMutationBusy;
   elements.socialEventEditor.showModal();
   refreshIcons(elements.socialEventEditor);
 }
 
-function closeSocialEventEditor() {
+function resetSocialEventEditor() {
+  state.socialEventEditorMode = 'edit';
   state.socialEditingWatchlistId = null;
+  state.socialPendingWatchAccounts = [];
   elements.socialEventEditorId.value = '';
   elements.socialEventNote.value = '';
-  if (elements.socialEventEditor.open) elements.socialEventEditor.close();
+  elements.socialEventNote.placeholder = '输入该账号的备注';
+  elements.socialEventOptions.hidden = false;
+  elements.socialEventSelectionActions.hidden = false;
+}
+
+function closeSocialEventEditor({ force = false } = {}) {
+  if (state.socialMutationBusy && !force) return;
+  if (elements.socialEventEditor.open) {
+    elements.socialEventEditor.close();
+    return;
+  }
+  resetSocialEventEditor();
 }
 
 async function saveSocialEventPreferences(event) {
   event.preventDefault();
+  const mode = state.socialEventEditorMode;
   const id = Number(elements.socialEventEditorId.value || state.socialEditingWatchlistId);
-  if (!Number.isSafeInteger(id)) return;
-  const eventTypes = SOCIAL_EVENT_TYPES.filter((eventType) => elements.socialEventOptions
+  if (mode !== 'create' && !Number.isSafeInteger(id)) return;
+  const eventTypes = mode === 'note' ? null : SOCIAL_EVENT_TYPES.filter((eventType) => elements.socialEventOptions
     .querySelector(`input[name="socialEventType"][value="${eventType}"]`)?.checked);
   const note = elements.socialEventNote.value.trim();
   state.socialMutationBusy = true;
   elements.socialEventEditorSave.disabled = true;
+  elements.socialEventEditorClose.disabled = true;
   renderSocialWatchlist();
   try {
-    const payload = await runSocialWrite('PATCH', `/watchlist/${id}`, { eventTypes, note });
-    if (payload?.entry) applySocialWatchlistEntry(payload.entry);
-    else {
-      const entry = state.socialWatchlist.find((item) => Number(item.id) === id);
-      if (entry) {
-        entry.eventTypes = [...eventTypes];
-        entry.note = note;
+    if (mode === 'create') {
+      const pendingAccounts = [...state.socialPendingWatchAccounts];
+      if (!pendingAccounts.length) return;
+      const payload = await runSocialWrite('POST', '/watchlist/batch', {
+        accounts: pendingAccounts.map((handle) => ({
+          handle,
+          platform: 'twitter',
+          eventTypes,
+          note
+        }))
+      });
+      if (Array.isArray(payload.entries)) {
+        for (const entry of payload.entries) applySocialWatchlistEntry(entry);
       }
+      elements.socialWatchlistInput.value = '';
+      await loadSocialSnapshot({ quiet: true });
+      closeSocialEventEditor({ force: true });
+      showToast(`已提交 ${pendingAccounts.length} 个社媒账号`);
+      return;
     }
+    const patch = mode === 'note' ? { note } : { eventTypes, note };
+    const payload = await runSocialWrite('PATCH', `/watchlist/${id}`, patch);
+    if (payload?.entry) applySocialWatchlistEntry(payload.entry);
     mergeSocialPosts([]);
     await loadSocialSnapshot({ quiet: true });
-    closeSocialEventEditor();
-    renderSocialMonitor();
-    showToast('账号监控设置与备注已保存');
+    closeSocialEventEditor({ force: true });
+    showToast(mode === 'note' ? '账号备注已保存' : '账号监控设置与备注已保存');
   } catch (error) {
-    showToast(`保存账号行为失败：${error.message}`, 'error');
+    const action = mode === 'create' ? '加入社媒监控' : mode === 'note' ? '保存账号备注' : '保存账号行为';
+    showToast(`${action}失败：${error.message}`, 'error');
   } finally {
     state.socialMutationBusy = false;
     elements.socialEventEditorSave.disabled = false;
-    renderSocialWatchlist();
+    elements.socialEventEditorClose.disabled = false;
+    renderSocialMonitor();
   }
 }
 
@@ -6523,10 +6614,14 @@ elements.socialEventEditorForm.addEventListener('submit', (event) => void saveSo
 elements.socialEventEditorClose.addEventListener('click', closeSocialEventEditor);
 elements.socialEventSelectAll.addEventListener('click', () => setSocialEventEditorSelection(SOCIAL_EVENT_TYPES));
 elements.socialEventClearAll.addEventListener('click', () => setSocialEventEditorSelection([]));
-elements.socialEventEditor.addEventListener('close', () => {
-  state.socialEditingWatchlistId = null;
-  elements.socialEventEditorId.value = '';
-  elements.socialEventNote.value = '';
+elements.socialEventEditor.addEventListener('cancel', (event) => {
+  if (state.socialMutationBusy) event.preventDefault();
+});
+elements.socialEventEditor.addEventListener('close', resetSocialEventEditor);
+elements.socialFeed.addEventListener('click', (event) => {
+  const editButton = event.target.closest('[data-social-feed-note-edit]');
+  if (!editButton) return;
+  openSocialEventEditor(editButton.dataset.socialFeedNoteEdit, { noteOnly: true });
 });
 
 window.addEventListener('message', (event) => {
