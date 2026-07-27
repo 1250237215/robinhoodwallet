@@ -1,7 +1,7 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const BRIDGE_VERSION = '1.7.0';
+  const BRIDGE_VERSION = '1.7.1';
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
   // The WebSocket is the primary lane. This short, coalesced REST poll only
@@ -309,15 +309,129 @@
   }
 
   function mediaItems(tweet) {
-    const items = tweet?.media || tweet?.medias || tweet?.attachments || tweet?.images || [];
-    if (!Array.isArray(items)) return [];
-    return items.slice(0, 12).map((item) => {
-      if (typeof item === 'string') return { type: 'image', url: limitedText(item, 2_000) };
-      const url = limitedText(item?.url || item?.media_url_https || item?.media_url || item?.src || '', 2_000);
-      const previewUrl = limitedText(item?.preview_url || item?.thumbnail_url || item?.poster || '', 2_000);
-      const type = String(item?.type || item?.media_type || 'image').toLowerCase();
-      return { type: type === 'video' ? 'video' : type === 'gif' ? 'gif' : 'image', url, previewUrl };
-    }).filter((item) => item.url || item.previewUrl);
+    if (!tweet || typeof tweet !== 'object') return [];
+    const collected = [];
+    const seen = new Set();
+    const add = (item, forcedType = '') => {
+      if (collected.length >= 12 || item === null || item === undefined) return;
+      if (Array.isArray(item)) {
+        for (const child of item) add(child, forcedType);
+        return;
+      }
+      if (typeof item === 'string') {
+        const url = limitedText(item, 2_000).trim();
+        if (!url || seen.has(url)) return;
+        seen.add(url);
+        collected.push({ type: forcedType === 'video' ? 'video' : 'image', url, previewUrl: '' });
+        return;
+      }
+      if (typeof item !== 'object') return;
+
+      const rawType = String(forcedType || item.type || item.media_type || item.mediaType || '').toLowerCase();
+      const variants = [
+        ...(Array.isArray(item.variants) ? item.variants : []),
+        ...(Array.isArray(item.video_info?.variants) ? item.video_info.variants : [])
+      ];
+      const videoVariant = variants
+        .filter((variant) => variant && typeof variant === 'object')
+        .filter((variant) => {
+          const contentType = String(variant.content_type || variant.contentType || '').toLowerCase();
+          const url = String(variant.url || '');
+          return contentType === 'video/mp4' || /\.mp4(?:[?#]|$)/i.test(url);
+        })
+        .sort((left, right) => Number(right.bitrate || 0) - Number(left.bitrate || 0))[0];
+      const isVideo = rawType === 'video'
+        || rawType === 'animated_gif'
+        || Boolean(videoVariant)
+        || Boolean(item.video_url || item.videoUrl || item.play_url || item.playback_url);
+      const url = limitedText(
+        (isVideo && (
+          item.video_url
+          || item.videoUrl
+          || item.play_url
+          || item.playback_url
+          || videoVariant?.url
+        ))
+          || item.url
+          || item.media_url_https
+          || item.media_url
+          || item.src
+          || '',
+        2_000
+      ).trim();
+      const previewUrl = limitedText(
+        item.preview_url
+          || item.previewUrl
+          || item.thumbnail_url
+          || item.thumbnailUrl
+          || item.poster
+          || item.poster_url
+          || (isVideo ? item.media_url_https || item.media_url || '' : ''),
+        2_000
+      ).trim();
+      const identity = url || previewUrl;
+      if (identity && !seen.has(identity)) {
+        seen.add(identity);
+        collected.push({
+          type: isVideo ? 'video' : rawType === 'gif' ? 'gif' : 'image',
+          url,
+          previewUrl
+        });
+      }
+
+      for (const nested of ['media', 'medias', 'items', 'attachments']) add(item[nested], forcedType);
+      for (const nested of ['pictures', 'picture', 'images', 'photos']) add(item[nested], 'image');
+      for (const nested of ['videos', 'video']) add(item[nested], 'video');
+    };
+
+    add(tweet.pictures, 'image');
+    add(tweet.picture, 'image');
+    add(tweet.images, 'image');
+    add(tweet.videos, 'video');
+    add(tweet.video, 'video');
+    add(tweet.media);
+    add(tweet.medias);
+    add(tweet.attachments);
+    add(tweet.extended_entities?.media);
+    add(tweet.entities?.media);
+    return collected.slice(0, 12);
+  }
+
+  function mergeMediaItems(previous, incoming) {
+    const merged = [];
+    for (const item of [...(Array.isArray(incoming) ? incoming : []), ...(Array.isArray(previous) ? previous : [])]) {
+      if (!item || typeof item !== 'object') continue;
+      const url = limitedText(item.url, 2_000).trim();
+      const previewUrl = limitedText(item.previewUrl, 2_000).trim();
+      if (!url && !previewUrl) continue;
+      const rawType = String(item.type || '').toLowerCase();
+      const type = ['video', 'gif'].includes(rawType) ? rawType : 'image';
+      const matchingIndex = merged.findIndex((candidate) => (
+        [candidate.url, candidate.previewUrl]
+          .filter(Boolean)
+          .some((value) => value === url || value === previewUrl)
+      ));
+      if (matchingIndex >= 0) {
+        const existing = merged[matchingIndex];
+        const mergedType = existing.type === 'video' || type === 'video'
+          ? 'video'
+          : existing.type === 'gif' || type === 'gif' ? 'gif' : 'image';
+        merged[matchingIndex] = {
+          type: mergedType,
+          url: mergedType === 'video'
+            ? (existing.type === 'video' ? existing.url : '') || (type === 'video' ? url : '')
+            : existing.url || url,
+          previewUrl: existing.previewUrl
+            || previewUrl
+            || (existing.type !== 'video' ? existing.url : '')
+            || (type !== 'video' ? url : '')
+        };
+        continue;
+      }
+      merged.push({ type, url, previewUrl });
+      if (merged.length >= 12) break;
+    }
+    return merged;
   }
 
   function handleText(value) {
@@ -608,7 +722,8 @@
       parent.publish_timestamp,
       parent.publishTimestamp
     ]) || 0;
-    if (!externalId && !content && !translatedContent && !url) return null;
+    const media = mediaItems(parent);
+    if (!externalId && !content && !translatedContent && !url && !media.length) return null;
     return {
       externalId,
       author: {
@@ -626,7 +741,8 @@
       content,
       translatedContent,
       url: url || (handle && externalId ? `https://x.com/${handle}/status/${externalId}` : ''),
-      publishedAt
+      publishedAt,
+      media
     };
   }
 
@@ -708,7 +824,8 @@
       content: '',
       translatedContent: '',
       url: '',
-      publishedAt: 0
+      publishedAt: 0,
+      media: []
     } : null;
   }
 
@@ -937,7 +1054,8 @@
       url: preferText(newer.url, older.url),
       publishedAt: Number(newer.publishedAt || 0) > 0
         ? Number(newer.publishedAt)
-        : Math.max(0, Number(older.publishedAt || 0))
+        : Math.max(0, Number(older.publishedAt || 0)),
+      media: mergeMediaItems(older.media, newer.media)
     };
   }
 
@@ -952,6 +1070,7 @@
       ...older,
       ...newer,
       author: mergeSocialAccount(older.author, newer.author),
+      media: mergeMediaItems(older.media, newer.media),
       discoveredAt: Math.min(
         Number(older.discoveredAt || older.receivedAt || Number.MAX_SAFE_INTEGER),
         Number(newer.discoveredAt || newer.receivedAt || Number.MAX_SAFE_INTEGER)

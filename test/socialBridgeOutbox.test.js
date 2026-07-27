@@ -173,6 +173,12 @@ test('outbox persists complete relationship, reference and profile activity thro
         translatedContent: '父帖翻译',
         url: 'https://x.com/parent_user/status/parent-1',
         publishedAt: 90,
+        media: [{
+          type: 'image',
+          url: 'https://pbs.twimg.com/media/reply-parent.jpg',
+          previewUrl: '',
+          cookie: 'private-reply-media-cookie'
+        }],
         raw: 'private-reply-raw'
       }
     }),
@@ -194,6 +200,12 @@ test('outbox persists complete relationship, reference and profile activity thro
         translatedContent: '引用翻译',
         url: 'https://x.com/quoted_author/status/quoted-1',
         publishedAt: 80,
+        media: [{
+          type: 'video',
+          url: 'https://video.twimg.com/quoted-post.mp4',
+          previewUrl: 'https://pbs.twimg.com/media/quoted-preview.jpg',
+          authorization: 'private-quote-media-authorization'
+        }],
         cookie: 'private-quote-cookie',
         raw: { response: 'private-quote-raw' }
       }
@@ -226,15 +238,25 @@ test('outbox persists complete relationship, reference and profile activity thro
   assert.equal(records[3].target.handle, 'parent_user');
   assert.equal(records[3].replyContext.content, 'Parent text');
   assert.equal(records[3].replyContext.translatedContent, '父帖翻译');
+  assert.deepEqual(records[3].replyContext.media, [{
+    type: 'image',
+    url: 'https://pbs.twimg.com/media/reply-parent.jpg',
+    previewUrl: ''
+  }]);
   assert.equal(Object.hasOwn(records[3].replyContext, 'raw'), false);
   assert.deepEqual(Object.keys(records[4].quoteContext).sort(), [
-    'author', 'content', 'externalId', 'publishedAt', 'translatedContent', 'url'
+    'author', 'content', 'externalId', 'media', 'publishedAt', 'translatedContent', 'url'
   ]);
   assert.deepEqual(Object.keys(records[4].quoteContext.author).sort(), [
     'avatarUrl', 'followersCount', 'handle', 'id', 'name'
   ]);
   assert.equal(records[4].quoteContext.content, 'Quoted text');
   assert.equal(records[4].quoteContext.translatedContent, '引用翻译');
+  assert.deepEqual(records[4].quoteContext.media, [{
+    type: 'video',
+    url: 'https://video.twimg.com/quoted-post.mp4',
+    previewUrl: 'https://pbs.twimg.com/media/quoted-preview.jpg'
+  }]);
   assert.equal(Object.hasOwn(records[5], 'target'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-target-cookie'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-target-authorization'), false);
@@ -242,11 +264,13 @@ test('outbox persists complete relationship, reference and profile activity thro
   assert.equal(JSON.stringify(storage.value).includes('private-profile-before'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-reply-target'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-parent-cookie'), false);
+  assert.equal(JSON.stringify(storage.value).includes('private-reply-media-cookie'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-reply-raw'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-quote-cookie'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-quote-raw'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-quote-author-cookie'), false);
   assert.equal(JSON.stringify(storage.value).includes('private-quote-author-raw'), false);
+  assert.equal(JSON.stringify(storage.value).includes('private-quote-media-authorization'), false);
   assert.equal(storage.value.debotSocialPostOutboxV1.schemaVersion, 2);
 });
 

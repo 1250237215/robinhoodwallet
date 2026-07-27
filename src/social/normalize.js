@@ -333,7 +333,8 @@ function normalizePostContext(input, aliases, fieldName) {
         100_000
       ),
       url,
-      publishedAt: normalizeTimestamp(firstValue(context, ['publishedAt', 'createdAt', 'timestamp']), 0) || 0
+      publishedAt: normalizeTimestamp(firstValue(context, ['publishedAt', 'createdAt', 'timestamp']), 0) || 0,
+      media: normalizeMedia(firstValue(context, ['media', 'attachments'], []))
     }
   };
 }
@@ -348,7 +349,7 @@ function normalizeQuoteContext(input) {
 
 function normalizeMedia(media) {
   if (!Array.isArray(media)) return [];
-  return media.slice(0, 12).map((item) => {
+  const normalized = media.map((item) => {
     if (typeof item === 'string') return { type: 'image', url: normalizeUrl(item), previewUrl: '' };
     if (!item || typeof item !== 'object') return null;
     const type = text(item.type || item.mediaType || 'image', 20).toLowerCase();
@@ -358,6 +359,34 @@ function normalizeMedia(media) {
       previewUrl: normalizeUrl(item.previewUrl || item.thumbnailUrl || item.poster)
     };
   }).filter((item) => item?.url || item?.previewUrl);
+  const merged = [];
+  for (const item of normalized) {
+    const matchingIndex = merged.findIndex((candidate) => (
+      [candidate.url, candidate.previewUrl]
+        .filter(Boolean)
+        .some((value) => value === item.url || value === item.previewUrl)
+    ));
+    if (matchingIndex < 0) {
+      merged.push(item);
+      if (merged.length >= 12) break;
+      continue;
+    }
+    const existing = merged[matchingIndex];
+    const type = existing.type === 'video' || item.type === 'video'
+      ? 'video'
+      : existing.type === 'gif' || item.type === 'gif' ? 'gif' : 'image';
+    merged[matchingIndex] = {
+      type,
+      url: type === 'video'
+        ? (existing.type === 'video' ? existing.url : '') || (item.type === 'video' ? item.url : '')
+        : existing.url || item.url,
+      previewUrl: existing.previewUrl
+        || item.previewUrl
+        || (existing.type !== 'video' ? existing.url : '')
+        || (item.type !== 'video' ? item.url : '')
+    };
+  }
+  return merged;
 }
 
 function normalizeContracts(contracts, content) {

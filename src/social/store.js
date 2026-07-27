@@ -461,6 +461,43 @@ function mergeSocialAuthor(current, incoming) {
   };
 }
 
+function mergeSocialMedia(current, incoming) {
+  const merged = [];
+  for (const item of [...(Array.isArray(incoming) ? incoming : []), ...(Array.isArray(current) ? current : [])]) {
+    if (!item || typeof item !== 'object') continue;
+    const url = String(item.url || '').trim();
+    const previewUrl = String(item.previewUrl || '').trim();
+    if (!url && !previewUrl) continue;
+    const rawType = String(item.type || '').toLowerCase();
+    const type = ['video', 'gif'].includes(rawType) ? rawType : 'image';
+    const matchingIndex = merged.findIndex((candidate) => (
+      [candidate.url, candidate.previewUrl]
+        .filter(Boolean)
+        .some((value) => value === url || value === previewUrl)
+    ));
+    if (matchingIndex >= 0) {
+      const existing = merged[matchingIndex];
+      const mergedType = existing.type === 'video' || type === 'video'
+        ? 'video'
+        : existing.type === 'gif' || type === 'gif' ? 'gif' : 'image';
+      merged[matchingIndex] = {
+        type: mergedType,
+        url: mergedType === 'video'
+          ? (existing.type === 'video' ? existing.url : '') || (type === 'video' ? url : '')
+          : existing.url || url,
+        previewUrl: existing.previewUrl
+          || previewUrl
+          || (existing.type !== 'video' ? existing.url : '')
+          || (type !== 'video' ? url : '')
+      };
+      continue;
+    }
+    merged.push({ type, url, previewUrl });
+    if (merged.length >= 12) break;
+  }
+  return merged;
+}
+
 function mergeReplyContext(current, incoming, { allowIdentityReplacement = true } = {}) {
   const existing = current && typeof current === 'object' ? current : {};
   const next = incoming && typeof incoming === 'object' ? incoming : {};
@@ -485,7 +522,8 @@ function mergeReplyContext(current, incoming, { allowIdentityReplacement = true 
       content: String(next.content || '').trim(),
       translatedContent: String(next.translatedContent || '').trim(),
       url: String(next.url || '').trim(),
-      publishedAt: Math.max(0, Number(next.publishedAt || 0))
+      publishedAt: Math.max(0, Number(next.publishedAt || 0)),
+      media: mergeSocialMedia([], next.media)
     };
   }
   return {
@@ -501,7 +539,8 @@ function mergeReplyContext(current, incoming, { allowIdentityReplacement = true 
     url: preferText(next.url, existing.url),
     publishedAt: Number(next.publishedAt || 0) > 0
       ? Number(next.publishedAt)
-      : Math.max(0, Number(existing.publishedAt || 0))
+      : Math.max(0, Number(existing.publishedAt || 0)),
+    media: mergeSocialMedia(existing.media, next.media)
   };
 }
 
@@ -1127,6 +1166,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       && normalized.deletedAt === null
       && normalized.sourceUpdatedAt <= existing.sourceUpdatedAt;
     if ((normalized.sourceUpdatedAt < existing.sourceUpdatedAt && !provided.has('deletedAt')) || staleRestore) {
+      const mergedMedia = provided.has('media')
+        ? mergeSocialMedia(existing.media, normalized.media)
+        : existing.media;
       const mergedReplyContext = provided.has('replyContext')
         ? mergeReplyContext(existing.replyContext, normalized.replyContext)
         : existing.replyContext;
@@ -1155,15 +1197,17 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         || json(mergedTarget) !== json(existing.target);
       const quoteSidecarChanged = json(mergedQuoteContext) !== json(existing.quoteContext)
         || mergedQuoteId !== existing.quotedExternalId;
-      if (!feedSourcesChanged && !replySidecarChanged && !quoteSidecarChanged) {
+      const mediaChanged = json(mergedMedia) !== json(existing.media);
+      if (!feedSourcesChanged && !replySidecarChanged && !quoteSidecarChanged && !mediaChanged) {
         return { action: 'unchanged', post: existing, change: null };
       }
       db.prepare(`
         UPDATE social_posts SET
-          feed_sources_json = ?, reply_to_external_id = ?, quoted_external_id = ?, target_json = ?,
+          media_json = ?, feed_sources_json = ?, reply_to_external_id = ?, quoted_external_id = ?, target_json = ?,
           reply_context_json = ?, quote_context_json = ?, updated_at = ?
         WHERE id = ?
       `).run(
+        json(mergedMedia),
         json(mergedFeedSources),
         mergedReplyId,
         mergedQuoteId,
@@ -1207,7 +1251,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       content: choose('content', existing.content),
       translatedContent: choose('translatedContent', existing.translatedContent),
       url: choose('url', existing.url),
-      media: choose('media', existing.media),
+      media: provided.has('media')
+        ? mergeSocialMedia(existing.media, normalized.media)
+        : existing.media,
       contractAddresses: choose('contractAddresses', existing.contractAddresses),
       chainTags: choose('chainTags', existing.chainTags),
       feedSources: mergedFeedSources,

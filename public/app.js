@@ -1563,6 +1563,7 @@ function mergeSocialPosts(posts) {
     const older = incomingIsNewer ? current : incoming;
     const newer = incomingIsNewer ? incoming : current;
     const merged = { ...older, ...newer };
+    merged.media = mergeSocialMediaItems(older.media, newer.media);
     merged.author = { ...(older.author || {}) };
     for (const [name, value] of Object.entries(newer.author || {})) {
       if (value !== '' && value !== null && value !== undefined && !(name === 'followers' && Number(value) === 0)) {
@@ -1585,8 +1586,10 @@ function mergeSocialPosts(posts) {
         continue;
       }
       const mergedContext = { ...olderContext };
+      mergedContext.media = mergeSocialMediaItems(olderContext.media, newerContext.media);
       for (const [name, value] of Object.entries(newerContext)) {
-        if (name !== 'author' && value !== '' && value !== null && value !== undefined && value !== 0) {
+        if (!['author', 'media'].includes(name)
+          && value !== '' && value !== null && value !== undefined && value !== 0) {
           mergedContext[name] = value;
         }
       }
@@ -1649,6 +1652,43 @@ function mergeSocialPosts(posts) {
     .sort((left, right) => Number(right.publishedAt || 0) - Number(left.publishedAt || 0) || Number(right.id || 0) - Number(left.id || 0))
     .slice(0, 500);
   return added;
+}
+
+function mergeSocialMediaItems(current, incoming) {
+  const merged = [];
+  for (const item of [...(Array.isArray(incoming) ? incoming : []), ...(Array.isArray(current) ? current : [])]) {
+    if (!item || typeof item !== 'object') continue;
+    const url = safeHttpUrl(item.url);
+    const previewUrl = safeHttpUrl(item.previewUrl);
+    if (!url && !previewUrl) continue;
+    const rawType = String(item.type || '').toLowerCase();
+    const type = ['video', 'gif'].includes(rawType) ? rawType : 'image';
+    const matchingIndex = merged.findIndex((candidate) => (
+      [candidate.url, candidate.previewUrl]
+        .filter(Boolean)
+        .some((value) => value === url || value === previewUrl)
+    ));
+    if (matchingIndex >= 0) {
+      const existing = merged[matchingIndex];
+      const mergedType = existing.type === 'video' || type === 'video'
+        ? 'video'
+        : existing.type === 'gif' || type === 'gif' ? 'gif' : 'image';
+      merged[matchingIndex] = {
+        type: mergedType,
+        url: mergedType === 'video'
+          ? (existing.type === 'video' ? existing.url : '') || (type === 'video' ? url : '')
+          : existing.url || url,
+        previewUrl: existing.previewUrl
+          || previewUrl
+          || (existing.type !== 'video' ? existing.url : '')
+          || (type !== 'video' ? url : '')
+      };
+      continue;
+    }
+    merged.push({ type, url, previewUrl });
+    if (merged.length >= 12) break;
+  }
+  return merged;
 }
 
 function flushDeferredSocialPosts() {
@@ -1989,13 +2029,60 @@ function socialQuoteIdentity(post) {
   };
 }
 
+function socialMediaMarkup(media, {
+  postUrl = '',
+  context = false,
+  altPrefix = '推文图片'
+} = {}) {
+  const items = mergeSocialMediaItems([], media).slice(0, 6);
+  const sourceUrl = safeHttpUrl(postUrl);
+  const elements = items.map((item, index) => {
+    const type = String(item.type || '').toLowerCase();
+    const mediaUrl = safeHttpUrl(item.url);
+    const previewUrl = safeHttpUrl(item.previewUrl);
+    const fallbackUrl = sourceUrl || mediaUrl || previewUrl;
+    const fallback = fallbackUrl
+      ? `<a class="social-media-error" href="${escapeHtml(fallbackUrl)}" target="_blank" rel="noopener noreferrer"><i data-lucide="image-off" aria-hidden="true"></i><span>媒体加载失败，查看原文</span></a>`
+      : '<span class="social-media-error"><i data-lucide="image-off" aria-hidden="true"></i><span>媒体加载失败</span></span>';
+    if (type === 'video' && mediaUrl) {
+      const posterFallback = previewUrl
+        ? `<a class="social-media-video-poster" href="${escapeHtml(sourceUrl || previewUrl)}" target="_blank" rel="noopener noreferrer" aria-label="打开推文视频封面 ${index + 1}"><img src="${escapeHtml(previewUrl)}" alt="推文视频封面 ${index + 1}" loading="lazy" decoding="async" referrerpolicy="no-referrer" /></a>`
+        : '';
+      return `
+        <figure class="social-media-item" data-social-media-item data-media-kind="video">
+          <video src="${escapeHtml(mediaUrl)}"${previewUrl ? ` poster="${escapeHtml(previewUrl)}"` : ''} controls preload="metadata" playsinline referrerpolicy="no-referrer" aria-label="推文视频 ${index + 1}"></video>
+          ${posterFallback}
+          ${fallback}
+        </figure>
+      `;
+    }
+    const imageUrl = mediaUrl || previewUrl;
+    if (!imageUrl) return '';
+    return `
+      <figure class="social-media-item" data-social-media-item data-media-kind="${type === 'video' ? 'video-preview' : 'image'}">
+        <a class="social-media-preview" href="${escapeHtml(imageUrl)}" target="_blank" rel="noopener noreferrer" aria-label="打开${escapeHtml(altPrefix)} ${index + 1}">
+          <img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(altPrefix)} ${index + 1}" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+        </a>
+        ${fallback}
+      </figure>
+    `;
+  }).filter(Boolean);
+  if (!elements.length) return '';
+  return `<div class="social-post-media${context ? ' is-context' : ''}" data-media-count="${elements.length}">${elements.join('')}</div>`;
+}
+
 function socialReplyMarkup(post) {
   if (String(post?.kind || '').toLowerCase() !== 'reply') return '';
   const context = post.replyContext && typeof post.replyContext === 'object' ? post.replyContext : {};
   const identity = socialReplyIdentity(post);
   const content = String(context.content || '').trim();
   const translatedContent = String(context.translatedContent || '').trim();
-  if (!identity.handle && !identity.name && !content && !translatedContent) return '';
+  const mediaMarkup = socialMediaMarkup(context.media, {
+    postUrl: identity.parentUrl,
+    context: true,
+    altPrefix: '被回复原文图片'
+  });
+  if (!identity.handle && !identity.name && !content && !translatedContent && !mediaMarkup) return '';
   const targetLabel = identity.name || (identity.handle ? `@${identity.handle}` : '原帖作者');
   return `
     <aside class="social-reply-context">
@@ -2007,6 +2094,7 @@ function socialReplyMarkup(post) {
       </div>
       ${content ? `<div class="social-reply-original"><b>被回复原文</b><p>${escapeHtml(content)}</p></div>` : ''}
       ${translatedContent && translatedContent !== content ? `<div class="social-reply-translation"><b>原文翻译</b><p>${escapeHtml(translatedContent)}</p></div>` : ''}
+      ${mediaMarkup}
       ${identity.parentUrl ? `<a class="social-reply-source" href="${escapeHtml(identity.parentUrl)}" target="_blank" rel="noopener noreferrer" title="查看被回复原文" aria-label="查看被回复原文"><i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a>` : ''}
     </aside>
   `;
@@ -2020,7 +2108,12 @@ function socialReferenceMarkup(post) {
   const identity = socialQuoteIdentity(post);
   const content = String(context.content || '').trim();
   const translatedContent = String(context.translatedContent || '').trim();
-  if (!identity.handle && !identity.name && !content && !translatedContent) return '';
+  const mediaMarkup = socialMediaMarkup(context.media, {
+    postUrl: identity.parentUrl,
+    context: true,
+    altPrefix: '被引用原文图片'
+  });
+  if (!identity.handle && !identity.name && !content && !translatedContent && !mediaMarkup) return '';
   const targetLabel = identity.name || (identity.handle ? `@${identity.handle}` : '原帖作者');
   return `
     <aside class="social-reply-context" data-reference-kind="quote">
@@ -2032,6 +2125,7 @@ function socialReferenceMarkup(post) {
       </div>
       ${content ? `<div class="social-reply-original"><b>被引用原文</b><p>${escapeHtml(content)}</p></div>` : ''}
       ${translatedContent && translatedContent !== content ? `<div class="social-reply-translation"><b>被引用原文翻译</b><p>${escapeHtml(translatedContent)}</p></div>` : ''}
+      ${mediaMarkup}
       ${identity.parentUrl ? `<a class="social-reference-source" href="${escapeHtml(identity.parentUrl)}" target="_blank" rel="noopener noreferrer" aria-label="查看被引用原文"><span>查看被引用原文</span><i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a>` : ''}
     </aside>
   `;
@@ -2201,13 +2295,7 @@ function renderSocialFeed() {
       const label = address.length > 16 ? `${address.slice(0, 8)}...${address.slice(-6)}` : address;
       return url ? `<a class="social-contract-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer"><i data-lucide="scan-line" aria-hidden="true"></i>${escapeHtml(label)}</a>` : '';
     }).join('');
-    const mediaMarkup = media.slice(0, 6).map((item) => {
-      const url = safeHttpUrl(item?.url || item?.previewUrl);
-      if (!url) return '';
-      return item.type === 'video'
-        ? `<video src="${escapeHtml(url)}" controls preload="metadata"></video>`
-        : `<img src="${escapeHtml(url)}" alt="" loading="lazy" />`;
-    }).join('');
+    const mediaMarkup = socialMediaMarkup(media, { postUrl, altPrefix: '推文图片' });
     return `
       <article class="social-post${post.deleted ? ' is-deleted' : ''}" data-source="${escapeHtml(post.source || 'debot')}" data-kind="${escapeHtml(kind)}">
         <div class="social-avatar">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" loading="lazy" />` : escapeHtml(socialInitials(post))}</div>
@@ -2235,7 +2323,7 @@ function renderSocialFeed() {
           ${!nonPostActivity && post.translatedContent && post.translatedContent !== post.content ? `<p class="social-post-translation">${escapeHtml(post.translatedContent)}</p>` : ''}
           ${String(post.kind || '').toLowerCase() === 'quote' ? referenceMarkup : ''}
           ${!nonPostActivity && contractMarkup ? `<div class="social-post-contracts">${contractMarkup}</div>` : ''}
-          ${!nonPostActivity && mediaMarkup ? `<div class="social-post-media">${mediaMarkup}</div>` : ''}
+          ${!nonPostActivity ? mediaMarkup : ''}
           ${!nonPostActivity && postUrl ? `<footer class="social-post-footer"><a href="${escapeHtml(postUrl)}" target="_blank" rel="noopener noreferrer">查看原文<i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a></footer>` : ''}
         </div>
       </article>
@@ -6770,6 +6858,27 @@ elements.detail.addEventListener('error', (event) => {
 }, true);
 
 elements.socialFeed.addEventListener('error', (event) => {
+  const mediaItem = event.target instanceof Element
+    ? event.target.closest('[data-social-media-item]')
+    : null;
+  if (mediaItem) {
+    if (event.target instanceof HTMLVideoElement) {
+      if (mediaItem.querySelector('.social-media-video-poster')
+        && !mediaItem.classList.contains('has-poster-error')) {
+        mediaItem.classList.add('is-video-error');
+      } else {
+        mediaItem.classList.add('is-error');
+      }
+      return;
+    }
+    if (event.target.closest('.social-media-video-poster')) {
+      mediaItem.classList.add('has-poster-error');
+      if (mediaItem.classList.contains('is-video-error')) mediaItem.classList.add('is-error');
+      return;
+    }
+    mediaItem.classList.add('is-error');
+    return;
+  }
   if (event.target instanceof HTMLImageElement) event.target.hidden = true;
 }, true);
 

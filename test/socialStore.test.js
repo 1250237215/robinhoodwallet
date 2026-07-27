@@ -344,6 +344,75 @@ test('older bridge retries cannot restore a newer deletion tombstone', (t) => {
   assert.equal(restored.post.deleted, false);
 });
 
+test('sparse later observations cannot clear persisted post media', (t) => {
+  const { store, setNow } = fixture(t);
+  const publishedAt = Date.parse('2026-07-17T11:59:00Z');
+  const expectedMedia = [
+    { type: 'image', url: 'https://pbs.twimg.com/media/post-image.jpg', previewUrl: '' },
+    { type: 'video', url: 'https://video.twimg.com/post-video.mp4', previewUrl: '' }
+  ];
+  const created = store.upsertPosts([{
+    source: 'twitter',
+    id: 'media-preserved',
+    authorHandle: 'alice',
+    text: 'post with media',
+    media: expectedMedia,
+    publishedAt,
+    sourceUpdatedAt: publishedAt
+  }])[0];
+  assert.deepEqual(created.post.media, expectedMedia);
+
+  setNow(Date.parse('2026-07-17T12:00:01Z'));
+  const translated = store.upsertPosts([{
+    source: 'twitter',
+    id: 'media-preserved',
+    translatedText: '后续翻译',
+    media: [],
+    publishedAt,
+    sourceUpdatedAt: publishedAt
+  }])[0];
+  assert.equal(translated.action, 'updated');
+  assert.equal(translated.post.translatedContent, '后续翻译');
+  assert.deepEqual(translated.post.media, expectedMedia);
+
+  setNow(Date.parse('2026-07-17T12:00:02Z'));
+  const newerSparse = store.upsertPosts([{
+    source: 'twitter',
+    id: 'media-preserved',
+    text: 'newer sparse observation',
+    media: [],
+    publishedAt,
+    sourceUpdatedAt: publishedAt + 1_000
+  }])[0];
+  assert.equal(newerSparse.action, 'updated');
+  assert.equal(newerSparse.post.content, 'newer sparse observation');
+  assert.deepEqual(newerSparse.post.media, expectedMedia);
+});
+
+test('video enrichment replaces its matching preview-only media item', (t) => {
+  const { store } = fixture(t);
+  const sourceUpdatedAt = Date.parse('2026-07-17T12:00:00Z');
+  const previewUrl = 'https://pbs.twimg.com/ext_tw_video_thumb/123/poster.jpg';
+  const videoUrl = 'https://video.twimg.com/ext_tw_video/123/video.mp4';
+  store.upsertPosts([{
+    source: 'twitter',
+    id: 'video-preview-enrichment',
+    authorHandle: 'alice',
+    media: [{ type: 'video', previewUrl }],
+    sourceUpdatedAt
+  }]);
+
+  const enriched = store.upsertPosts([{
+    source: 'twitter',
+    id: 'video-preview-enrichment',
+    media: [{ type: 'video', url: videoUrl, previewUrl }],
+    sourceUpdatedAt
+  }])[0];
+
+  assert.equal(enriched.action, 'updated');
+  assert.deepEqual(enriched.post.media, [{ type: 'video', url: videoUrl, previewUrl }]);
+});
+
 test('reply targets and parent post context persist and merge without clearing richer data', (t) => {
   const { store, setNow } = fixture(t);
   const replyId = '2081700497174733126';
@@ -373,6 +442,7 @@ test('reply targets and parent post context persist and merge without clearing r
       content: "It's a dogs world",
       translatedContent: '这是狗狗的世界',
       url: `https://x.com/iruletrenches/status/${parentId}`,
+      media: [{ type: 'image', url: 'https://pbs.twimg.com/media/reply-parent.jpg' }],
       publishedAt: 1_785_150_066_000
     },
     sourceUpdatedAt: 1_785_151_049_000
@@ -382,17 +452,27 @@ test('reply targets and parent post context persist and merge without clearing r
   assert.equal(enriched.post.target.name, 'Miyamoto');
   assert.equal(enriched.post.replyContext.content, "It's a dogs world");
   assert.equal(enriched.post.replyContext.translatedContent, '这是狗狗的世界');
+  assert.deepEqual(enriched.post.replyContext.media, [{
+    type: 'image',
+    url: 'https://pbs.twimg.com/media/reply-parent.jpg',
+    previewUrl: ''
+  }]);
 
   const partial = store.upsertPosts([{
     source: 'twitter',
     id: replyId,
     kind: 'reply',
-    replyContext: { externalId: parentId, author: { handle: 'iruletrenches' } },
+    replyContext: { externalId: parentId, author: { handle: 'iruletrenches' }, media: [] },
     sourceUpdatedAt: 1_785_151_049_000
   }])[0];
   assert.equal(partial.action, 'unchanged');
   assert.equal(partial.post.replyContext.content, "It's a dogs world");
   assert.equal(partial.post.replyContext.translatedContent, '这是狗狗的世界');
+  assert.deepEqual(partial.post.replyContext.media, [{
+    type: 'image',
+    url: 'https://pbs.twimg.com/media/reply-parent.jpg',
+    previewUrl: ''
+  }]);
 });
 
 test('reply context never mixes different parent tweets and stale enrichment still updates its sidecar', (t) => {
@@ -459,6 +539,7 @@ test('quote context persists, merges partial observations and replaces conflicti
       externalId: firstQuotedId,
       author: { handle: 'theunipcs', name: 'Unipcs' },
       content: 'Original quote text',
+      media: [{ type: 'image', url: 'https://pbs.twimg.com/media/quoted-post.jpg' }],
       url: `https://x.com/theunipcs/status/${firstQuotedId}`
     },
     publishedAt: 1_785_162_788_000,
@@ -466,6 +547,11 @@ test('quote context persists, merges partial observations and replaces conflicti
   }])[0];
   assert.equal(created.post.quotedExternalId, firstQuotedId);
   assert.equal(created.post.quoteContext.content, 'Original quote text');
+  assert.deepEqual(created.post.quoteContext.media, [{
+    type: 'image',
+    url: 'https://pbs.twimg.com/media/quoted-post.jpg',
+    previewUrl: ''
+  }]);
 
   setNow(1_785_162_789_000);
   const translated = store.upsertPosts([{
@@ -474,12 +560,18 @@ test('quote context persists, merges partial observations and replaces conflicti
     kind: 'quote',
     quoteContext: {
       url: `https://x.com/theunipcs/status/${firstQuotedId}`,
-      translatedContent: '被引用原文翻译'
+      translatedContent: '被引用原文翻译',
+      media: []
     },
     sourceUpdatedAt: 1_785_162_788_000
   }])[0];
   assert.equal(translated.post.quoteContext.content, 'Original quote text');
   assert.equal(translated.post.quoteContext.translatedContent, '被引用原文翻译');
+  assert.deepEqual(translated.post.quoteContext.media, [{
+    type: 'image',
+    url: 'https://pbs.twimg.com/media/quoted-post.jpg',
+    previewUrl: ''
+  }]);
 
   setNow(1_785_162_790_000);
   const corrected = store.upsertPosts([{

@@ -265,7 +265,7 @@ function createTimelineBridgeHarness(initialHandler, {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.7.0');
+  assert.equal(manifest.version, '1.7.1');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -724,7 +724,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.requestId === 'page-personal-probe'
       && message.payload.ok === true)));
   const personalHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.equal(personalHeartbeat.payload.version, '1.7.0');
+  assert.equal(personalHeartbeat.payload.version, '1.7.1');
   assert.deepEqual(Array.from(personalHeartbeat.payload.capabilities), [
     'posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1'
   ]);
@@ -886,6 +886,8 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
         text_translate: '父帖中文翻译',
         link: `https://x.com/parent_user/status/${replyParentId}`,
         date: 1_784_299_900,
+        pictures: ['https://pbs.twimg.com/media/reply-parent.jpg'],
+        videos: ['https://video.twimg.com/reply-parent.mp4'],
         user: {
           id: 'parent-1',
           username: 'parent_user',
@@ -901,7 +903,10 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   assert.equal(replyPost.kind, 'reply');
   assert.equal(replyPost.target.handle, 'parent_user');
   assert.equal(replyPost.replyToExternalId, replyParentId);
-  assert.deepEqual(JSON.parse(JSON.stringify(replyPost.replyContext)), {
+  const normalizedReplyContext = JSON.parse(JSON.stringify(replyPost.replyContext));
+  const replyParentMedia = normalizedReplyContext.media;
+  delete normalizedReplyContext.media;
+  assert.deepEqual(normalizedReplyContext, {
     externalId: replyParentId,
     author: {
       id: 'parent-1',
@@ -914,6 +919,10 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     url: `https://x.com/parent_user/status/${replyParentId}`,
     publishedAt: 1_784_299_900_000
   });
+  assert.deepEqual(replyParentMedia.map((item) => ({ type: item.type, url: item.url })), [
+    { type: 'image', url: 'https://pbs.twimg.com/media/reply-parent.jpg' },
+    { type: 'video', url: 'https://video.twimg.com/reply-parent.mp4' }
+  ]);
   acknowledge(replyDelivery);
 
   const explicitParentSocketId = '1900000000000000107';
@@ -987,6 +996,8 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
         text: 'Quoted post retained across observations',
         link: `https://x.com/quoted_author/status/${quotedPostId}`,
         date: 1_784_299_800,
+        pictures: ['https://pbs.twimg.com/media/quoted-post.jpg'],
+        videos: ['https://video.twimg.com/quoted-post.mp4'],
         user: {
           id: 'quoted-author-1',
           username: 'quoted_author',
@@ -1000,7 +1011,10 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const firstQuotePost = firstQuoteDelivery.payload.posts[0];
   assert.equal(firstQuotePost.kind, 'quote');
   assert.equal(firstQuotePost.quotedExternalId, quotedPostId);
-  assert.deepEqual(JSON.parse(JSON.stringify(firstQuotePost.quoteContext)), {
+  const normalizedQuoteContext = JSON.parse(JSON.stringify(firstQuotePost.quoteContext));
+  const quotedMedia = normalizedQuoteContext.media;
+  delete normalizedQuoteContext.media;
+  assert.deepEqual(normalizedQuoteContext, {
     externalId: quotedPostId,
     author: {
       id: 'quoted-author-1',
@@ -1013,6 +1027,10 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     url: `https://x.com/quoted_author/status/${quotedPostId}`,
     publishedAt: 1_784_299_800_000
   });
+  assert.deepEqual(quotedMedia.map((item) => ({ type: item.type, url: item.url })), [
+    { type: 'image', url: 'https://pbs.twimg.com/media/quoted-post.jpg' },
+    { type: 'video', url: 'https://video.twimg.com/quoted-post.mp4' }
+  ]);
 
   sendPersonalActivity({
     ...incoming,
@@ -1043,6 +1061,13 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     'https://pbs.twimg.com/profile_images/quoted-author.jpg'
   );
   assert.equal(mergedQuotePost.quoteContext.url, `https://x.com/quoted_author/status/${quotedPostId}`);
+  assert.deepEqual(
+    Array.from(mergedQuotePost.quoteContext.media, (item) => ({ type: item.type, url: item.url })),
+    [
+      { type: 'image', url: 'https://pbs.twimg.com/media/quoted-post.jpg' },
+      { type: 'video', url: 'https://video.twimg.com/quoted-post.mp4' }
+    ]
+  );
   acknowledge(mergedQuoteDelivery);
 
   const mergedReplySocketId = '1900000000000000109';
@@ -1058,6 +1083,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       ori_tweet: {
         tweet_id: mergedParentId,
         text: 'Parent text retained across observations',
+        pictures: ['https://pbs.twimg.com/media/merged-parent.jpg'],
         user: { username: 'merge_parent', name: 'Merge Parent' }
       }
     }
@@ -1090,6 +1116,10 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   assert.equal(
     mergedReplyPost.replyContext.author.avatarUrl,
     'https://pbs.twimg.com/profile_images/merged-parent.jpg'
+  );
+  assert.deepEqual(
+    Array.from(mergedReplyPost.replyContext.media, (item) => ({ type: item.type, url: item.url })),
+    [{ type: 'image', url: 'https://pbs.twimg.com/media/merged-parent.jpg' }]
   );
 
   const replacementParentId = '1900000000000000019';
@@ -1627,7 +1657,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const recoveredHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
   assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
   assert.equal(Object.hasOwn(recoveredHeartbeat.payload, 'error'), false);
-  assert.equal(recoveredHeartbeat.payload.version, '1.7.0');
+  assert.equal(recoveredHeartbeat.payload.version, '1.7.1');
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.accountCount >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.rawRows >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.normalizedRows >= 0, true);
@@ -2076,6 +2106,7 @@ test('a REST timeline observation enriches an acknowledged WebSocket post with U
   let restEnrichment = false;
   const enrichedUrl = `https://x.com/enriched_user/status/${externalId}`;
   const imageUrl = 'https://cdn.example/enriched-post.jpg';
+  const videoUrl = 'https://video.twimg.com/enriched-post.mp4';
   const harness = createTimelineBridgeHarness(async () => ({
     feeds: restEnrichment
       ? [{
@@ -2092,7 +2123,8 @@ test('a REST timeline observation enriches an acknowledged WebSocket post with U
             text: 'same post content',
             date: publishedAt,
             link: enrichedUrl,
-            media: [{ type: 'image', url: imageUrl }]
+            pictures: [imageUrl],
+            videos: [videoUrl]
           }
         }]
       : [],
@@ -2148,9 +2180,42 @@ test('a REST timeline observation enriches an acknowledged WebSocket post with U
   assert.equal(enrichedPost.author.name, 'Enriched User');
   assert.equal(enrichedPost.url, enrichedUrl);
   assert.deepEqual(Array.from(enrichedPost.media, (item) => ({ type: item.type, url: item.url })), [
-    { type: 'image', url: imageUrl }
+    { type: 'image', url: imageUrl },
+    { type: 'video', url: videoUrl }
   ]);
   assert.equal(enrichedPost.discoveredAt, simplePost.discoveredAt);
+
+  harness.acknowledgeAll();
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter',
+    {
+      Payload: JSON.stringify({
+        data: {
+          doc_id: externalId,
+          platform: 0,
+          user: { id: 'enriched-user-id', username: 'enriched_user' },
+          tweet: {
+            tweet_id: externalId,
+            text: 'same post content',
+            text_translate: '同一条推文的后续翻译',
+            date: publishedAt
+          }
+        }
+      })
+    }
+  ])}`);
+  await eventually(() => assert.equal(harness.window.messages.filter((message) =>
+    message.type === 'posts'
+      && message.payload.posts.some((post) => post.externalId === externalId)).length, 3));
+  const sparseUpdate = harness.window.messages
+    .filter((message) => message.type === 'posts'
+      && message.payload.posts.some((post) => post.externalId === externalId))
+    .at(-1).payload.posts.find((post) => post.externalId === externalId);
+  assert.equal(sparseUpdate.translatedContent, '同一条推文的后续翻译');
+  assert.deepEqual(Array.from(sparseUpdate.media, (item) => ({ type: item.type, url: item.url })), [
+    { type: 'image', url: imageUrl },
+    { type: 'video', url: videoUrl }
+  ]);
 });
 
 test('personal timeline catch-up stops after one hundred historical pages', async () => {

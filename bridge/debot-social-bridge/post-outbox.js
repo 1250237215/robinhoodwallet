@@ -54,9 +54,16 @@ function replyContext(value) {
     content: text(context.content, 100_000),
     translatedContent: text(context.translatedContent, 100_000),
     url: text(context.url, 2_000),
-    publishedAt: number(context.publishedAt)
+    publishedAt: number(context.publishedAt),
+    media: (Array.isArray(context.media) ? context.media : []).slice(0, 12).map((item) => ({
+      type: text(item?.type, 20),
+      url: text(item?.url, 2_000),
+      previewUrl: text(item?.previewUrl, 2_000)
+    }))
   };
-  return normalized.externalId || normalized.author.handle || normalized.content ? normalized : null;
+  return normalized.externalId || normalized.author.handle || normalized.content || normalized.media.length
+    ? normalized
+    : null;
 }
 
 function validPersistedPost(post) {

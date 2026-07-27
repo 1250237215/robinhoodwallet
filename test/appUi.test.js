@@ -19,8 +19,19 @@ function executableSocialReferenceMarkup() {
     ${appSourceBetween('function escapeHtml(value)', 'function finiteNumber(')}
     const SOCIAL_HANDLE_PATTERN = /^[a-z0-9_]{1,15}$/i;
     ${appSourceBetween('function normalizeSocialHandle(value)', 'function decodeSocialActivityExternalId(')}
+    ${appSourceBetween('function mergeSocialMediaItems(current, incoming)', 'function flushDeferredSocialPosts()')}
     ${appSourceBetween('function socialXStatusIdentity(value)', 'function visibleSocialPosts(')}
     return socialReferenceMarkup;
+  `;
+  return Function(source)();
+}
+
+function executableSocialMediaMarkup() {
+  const source = `
+    ${appSourceBetween('function escapeHtml(value)', 'function finiteNumber(')}
+    ${appSourceBetween('function mergeSocialMediaItems(current, incoming)', 'function flushDeferredSocialPosts()')}
+    ${appSourceBetween('function socialMediaMarkup(media,', 'function socialReplyMarkup(post)')}
+    return socialMediaMarkup;
   `;
   return Function(source)();
 }
@@ -1473,6 +1484,122 @@ test('quote cards show and search the quoted account, original, translation and 
     });
     assert.deepEqual(visible.map((post) => post.id), [77]);
   }
+});
+
+test('social media markup renders safe main images without nesting its grid wrapper', () => {
+  const renderMedia = executableSocialMediaMarkup();
+  const markup = renderMedia([
+    {
+      type: 'image',
+      url: 'https://pbs.twimg.com/media/first.jpg?name=orig&format=jpg'
+    },
+    {
+      type: 'photo',
+      previewUrl: 'https://pbs.twimg.com/media/second.jpg?name=small'
+    },
+    {
+      type: 'image',
+      url: 'javascript:alert(1)',
+      previewUrl: 'data:image/svg+xml,<svg onload=alert(2)>'
+    }
+  ], {
+    postUrl: 'https://x.com/example/status/12345?view=1&source=radar',
+    altPrefix: '推文图片'
+  });
+
+  assert.equal((markup.match(/class="social-post-media/g) || []).length, 1);
+  assert.equal((markup.match(/class="social-media-item"/g) || []).length, 2);
+  assert.match(markup, /class="social-post-media" data-media-count="2"/);
+  assert.match(markup, /src="https:\/\/pbs\.twimg\.com\/media\/first\.jpg\?name=orig&amp;format=jpg"/);
+  assert.match(markup, /src="https:\/\/pbs\.twimg\.com\/media\/second\.jpg\?name=small"/);
+  assert.match(markup, /alt="推文图片 1"/);
+  assert.match(markup, /loading="lazy" decoding="async" referrerpolicy="no-referrer"/);
+  assert.match(markup, /href="https:\/\/x\.com\/example\/status\/12345\?view=1&amp;source=radar"/);
+  assert.doesNotMatch(markup, /javascript:|data:image|onload=|<div class="social-post-media[^>]*>[\s\S]*<div class="social-post-media/i);
+
+  const renderSource = appSourceBetween('function renderSocialFeed()', 'function renderSocialMonitor()');
+  assert.match(renderSource, /const mediaMarkup = socialMediaMarkup\(media,/);
+  assert.match(renderSource, /\$\{!nonPostActivity \? mediaMarkup : ''\}/);
+  assert.doesNotMatch(renderSource, /<div class="social-post-media">\$\{mediaMarkup\}<\/div>/);
+});
+
+test('social media markup gives playable videos a poster and degrades preview-only videos to images', () => {
+  const renderMedia = executableSocialMediaMarkup();
+  const markup = renderMedia([
+    {
+      type: 'video',
+      previewUrl: 'https://pbs.twimg.com/ext_tw_video_thumb/123/pu/img/poster.jpg?name=large'
+    },
+    {
+      type: 'video',
+      url: 'https://video.twimg.com/ext_tw_video/123/pu/vid/avc1/1280x720/video.mp4?tag=12&v=1',
+      previewUrl: 'https://pbs.twimg.com/ext_tw_video_thumb/123/pu/img/poster.jpg?name=large'
+    },
+    {
+      type: 'video',
+      previewUrl: 'https://pbs.twimg.com/ext_tw_video_thumb/456/pu/img/preview.jpg?name=large'
+    }
+  ], {
+    postUrl: 'https://x.com/example/status/67890'
+  });
+
+  assert.equal((markup.match(/<video\b/g) || []).length, 1);
+  assert.match(markup, /data-media-count="2"/);
+  assert.match(markup, /<video src="https:\/\/video\.twimg\.com\/[^\"]+video\.mp4\?tag=12&amp;v=1"/);
+  assert.match(markup, /poster="https:\/\/pbs\.twimg\.com\/[^\"]+poster\.jpg\?name=large"/);
+  assert.match(markup, /controls preload="metadata" playsinline referrerpolicy="no-referrer"/);
+  assert.match(markup, /class="social-media-video-poster"[\s\S]*alt="推文视频封面 1"/);
+  assert.match(markup, /data-media-kind="video-preview"[\s\S]*<img src="https:\/\/pbs\.twimg\.com\/[^\"]+preview\.jpg\?name=large"/);
+  assert.doesNotMatch(markup, /<video[^>]+src="https:\/\/pbs\.twimg\.com/);
+  assert.equal((markup.match(/媒体加载失败，查看原文/g) || []).length, 2);
+  assert.match(markup, /href="https:\/\/x\.com\/example\/status\/67890"/);
+});
+
+test('reply and quote contexts render their own escaped media grids', () => {
+  const renderReference = executableSocialReferenceMarkup();
+  const replyMarkup = renderReference({
+    kind: 'reply',
+    replyContext: {
+      externalId: '12345',
+      author: { handle: 'parent_user', name: 'Parent User' },
+      content: 'Parent post',
+      media: [{
+        type: 'image',
+        url: 'https://pbs.twimg.com/media/reply.jpg?name=orig&source=reply'
+      }]
+    }
+  });
+  const quoteMarkup = renderReference({
+    kind: 'quote',
+    quoteContext: {
+      externalId: '67890',
+      author: { handle: 'quote_user', name: 'Quote User' },
+      content: 'Quoted post',
+      media: [{
+        type: 'video',
+        previewUrl: 'https://pbs.twimg.com/media/quote-preview.jpg?name=large&source=quote'
+      }]
+    }
+  });
+
+  assert.equal((replyMarkup.match(/class="social-post-media is-context"/g) || []).length, 1);
+  assert.match(replyMarkup, /alt="被回复原文图片 1"/);
+  assert.match(replyMarkup, /reply\.jpg\?name=orig&amp;source=reply/);
+  assert.equal((quoteMarkup.match(/class="social-post-media is-context"/g) || []).length, 1);
+  assert.match(quoteMarkup, /data-reference-kind="quote"/);
+  assert.match(quoteMarkup, /data-media-kind="video-preview"/);
+  assert.match(quoteMarkup, /alt="被引用原文图片 1"/);
+  assert.match(quoteMarkup, /quote-preview\.jpg\?name=large&amp;source=quote/);
+});
+
+test('social media CSS provides bounded responsive grids and a visible load-error fallback', () => {
+  assert.match(stylesCss, /\.social-post-media \{[\s\S]*display: grid;[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);[\s\S]*width: min\(100%, 680px\);[\s\S]*overflow: hidden/);
+  assert.match(stylesCss, /\.social-media-item \{[\s\S]*min-width: 0;[\s\S]*aspect-ratio: 4 \/ 3;[\s\S]*overflow: hidden/);
+  assert.match(stylesCss, /\.social-media-preview,[\s\S]*\.social-media-item img,[\s\S]*\.social-media-item video \{[\s\S]*width: 100%;[\s\S]*height: 100%/);
+  assert.match(stylesCss, /\.social-media-item\.is-error \.social-media-error \{[\s\S]*display: flex/);
+  assert.match(stylesCss, /\.social-media-item\.is-video-error \.social-media-video-poster \{[\s\S]*display: block/);
+  assert.match(stylesCss, /\.social-post-media\.is-context \{[\s\S]*width: min\(100%, 520px\)/);
+  assert.match(appJs, /elements\.socialFeed\.addEventListener\('error',[\s\S]*event\.target instanceof HTMLVideoElement[\s\S]*classList\.add\('is-video-error'\)[\s\S]*classList\.add\('is-error'\)/);
 });
 
 test('chain and social elapsed times advance every second without rerendering either feed', () => {

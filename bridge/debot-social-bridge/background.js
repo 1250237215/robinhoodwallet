@@ -132,9 +132,12 @@ function safeReplyContext(value) {
     content: text(context.content),
     translatedContent: text(context.translatedContent),
     url: text(context.url, 2_000),
-    publishedAt: number(context.publishedAt)
+    publishedAt: number(context.publishedAt),
+    media: safeMedia(context.media)
   };
-  return normalized.externalId || normalized.author.handle || normalized.content ? normalized : null;
+  return normalized.externalId || normalized.author.handle || normalized.content || normalized.media.length
+    ? normalized
+    : null;
 }
 
 function safePost(value) {
