@@ -73,6 +73,11 @@ function diagnosticErrorCategory(value) {
 function bridgeDiagnosticsDefaults() {
   return {
     ws: {
+      connectionOpens: 0,
+      authorizationSuccesses: 0,
+      subscribeAttempts: 0,
+      subscribeFailures: 0,
+      lastSubscribeAt: null,
       framesSeen: 0,
       accepted: 0,
       rejected: 0,
@@ -119,6 +124,11 @@ function bridgeDiagnosticsFromInput(value) {
   const defaults = bridgeDiagnosticsDefaults();
   return {
     ws: {
+      connectionOpens: diagnosticCounter(ws.connectionOpens),
+      authorizationSuccesses: diagnosticCounter(ws.authorizationSuccesses),
+      subscribeAttempts: diagnosticCounter(ws.subscribeAttempts),
+      subscribeFailures: diagnosticCounter(ws.subscribeFailures),
+      lastSubscribeAt: diagnosticTimestamp(ws.lastSubscribeAt),
       framesSeen: diagnosticCounter(ws.framesSeen),
       accepted: diagnosticCounter(ws.accepted),
       rejected: diagnosticCounter(ws.rejected),

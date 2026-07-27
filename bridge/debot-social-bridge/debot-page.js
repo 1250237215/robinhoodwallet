@@ -1,7 +1,7 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const BRIDGE_VERSION = '1.4.0';
+  const BRIDGE_VERSION = '1.5.0';
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
   // The WebSocket is the primary lane. This short, coalesced REST poll only
@@ -29,6 +29,10 @@
   const EVM_ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
   const MAX_DIAGNOSTIC_COUNTER = 1_000_000_000;
   const MAX_SOCKET_PAYLOADS_PER_FRAME = 24;
+  const PERSONAL_TWITTER_PAYLOAD_CHANNELS = new Set([
+    'twitter_user_subscribe',
+    'twitter_translate_user_subscribe'
+  ]);
   const seen = new Map();
   const pendingPosts = new Map();
   const pendingDeliveries = new Map();
@@ -59,6 +63,11 @@
   // credentials, account names, or raw WebSocket frames.
   const bridgeDiagnostics = {
     ws: {
+      connectionOpens: 0,
+      authorizationSuccesses: 0,
+      subscribeAttempts: 0,
+      subscribeFailures: 0,
+      lastSubscribeAt: 0,
       framesSeen: 0,
       accepted: 0,
       rejected: 0,
@@ -125,6 +134,11 @@
     const { ws, poll, forcePoll } = bridgeDiagnostics;
     return {
       ws: {
+        connectionOpens: ws.connectionOpens,
+        authorizationSuccesses: ws.authorizationSuccesses,
+        subscribeAttempts: ws.subscribeAttempts,
+        subscribeFailures: ws.subscribeFailures,
+        lastSubscribeAt: ws.lastSubscribeAt,
         framesSeen: ws.framesSeen,
         accepted: ws.accepted,
         rejected: ws.rejected,
@@ -1724,6 +1738,53 @@
     return payloads;
   }
 
+  function decodedSocketPayload(value) {
+    if (typeof value !== 'string') return value;
+    const text = value.trim();
+    if (!text || !/^[{[]/.test(text)) return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  }
+
+  function personalSocketEnvelopePayloads(envelope) {
+    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
+      return { payloads: socketActivityPayloads(envelope) };
+    }
+
+    if (Object.hasOwn(envelope, 'Channel')) {
+      const payloadChannel = String(envelope.Channel || '').trim();
+      if (!PERSONAL_TWITTER_PAYLOAD_CHANNELS.has(payloadChannel)) {
+        return { error: 'unmatchedChannel', payloads: [] };
+      }
+    }
+
+    const payloadKey = Object.hasOwn(envelope, 'Payload')
+      ? 'Payload'
+      : Object.hasOwn(envelope, 'payload')
+        ? 'payload'
+        : '';
+    if (!payloadKey) return { payloads: socketActivityPayloads(envelope) };
+
+    const decoded = decodedSocketPayload(envelope[payloadKey]);
+    if (!decoded || typeof decoded !== 'object') {
+      return { error: 'invalidEnvelope', payloads: [] };
+    }
+
+    const transportEvent = String(decoded.event_type || decoded.eventType || '').trim();
+    const isTransportWrapper = isSocialTwitterChannel(transportEvent);
+    if (isTransportWrapper && !isPersonalTwitterChannel(transportEvent)) {
+      return { error: 'unmatchedChannel', payloads: [] };
+    }
+    // DeBot's official handler always consumes JSON.parse(Payload).data for
+    // these two personal channels. The transport event name is not stable
+    // enough to decide whether the wrapper must be unwrapped.
+    const activityRoot = Object.hasOwn(decoded, 'data') ? decoded.data : decoded;
+    return { payloads: socketActivityPayloads(activityRoot) };
+  }
+
   function isCachedTwitterAuthor(post) {
     if (post?.source !== 'twitter') return false;
     const author = handleText(post?.author?.handle).toLowerCase();
@@ -1749,7 +1810,12 @@
       return;
     }
 
-    const payloads = socketActivityPayloads(parsed.envelope);
+    const extracted = personalSocketEnvelopePayloads(parsed.envelope);
+    if (extracted.error) {
+      rejectSocketFrame(extracted.error);
+      return;
+    }
+    const { payloads } = extracted;
     if (!payloads.length) {
       rejectSocketFrame('invalidEnvelope');
       return;
@@ -1833,14 +1899,18 @@
   }
 
   function subscribePortalTwitter(socket, frame) {
-    if (!isPortalAuthorizationSuccess(frame) || portalSubscribedSockets.has(socket)
-      || typeof socket?.send !== 'function') return;
+    if (!isPortalAuthorizationSuccess(frame)) return;
+    incrementDiagnosticCounter(bridgeDiagnostics.ws, 'authorizationSuccesses');
+    if (portalSubscribedSockets.has(socket) || typeof socket?.send !== 'function') return;
     try {
       // DeBot's own social module sends this exact Socket.IO event after a
       // successful authorization. No session material is inspected or copied.
+      incrementDiagnosticCounter(bridgeDiagnostics.ws, 'subscribeAttempts');
+      bridgeDiagnostics.ws.lastSubscribeAt = Date.now();
       socket.send('42["subscribe","social-user-twitter"]');
       portalSubscribedSockets.add(socket);
     } catch {
+      incrementDiagnosticCounter(bridgeDiagnostics.ws, 'subscribeFailures');
       // A normal one-second REST poll remains available if a socket closes here.
     }
   }
@@ -1851,6 +1921,11 @@
       construct(target, args) {
         const socket = Reflect.construct(target, args);
         const portalSocket = isDeBotPortalSocket(socket, args);
+        if (portalSocket) {
+          socket.addEventListener('open', () => {
+            incrementDiagnosticCounter(bridgeDiagnostics.ws, 'connectionOpens');
+          });
+        }
         socket.addEventListener('message', (event) => {
           if (portalSocket) subscribePortalTwitter(socket, event.data);
           observeSocketFrame(event.data);

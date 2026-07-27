@@ -229,6 +229,11 @@ function safeBridgeDiagnostics(value) {
   const hash = text(poll.configHash, 8).toLowerCase();
   return {
     ws: {
+      connectionOpens: diagnosticCounter(ws.connectionOpens),
+      authorizationSuccesses: diagnosticCounter(ws.authorizationSuccesses),
+      subscribeAttempts: diagnosticCounter(ws.subscribeAttempts),
+      subscribeFailures: diagnosticCounter(ws.subscribeFailures),
+      lastSubscribeAt: diagnosticTimestamp(ws.lastSubscribeAt),
       framesSeen: diagnosticCounter(ws.framesSeen),
       accepted: diagnosticCounter(ws.accepted),
       rejected: diagnosticCounter(ws.rejected),

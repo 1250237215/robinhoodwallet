@@ -72,6 +72,10 @@ class FakeWebSocket {
     this.listeners.get(type).push(listener);
   }
 
+  open() {
+    for (const listener of this.listeners.get('open') || []) listener({ type: 'open' });
+  }
+
   receive(data) {
     for (const listener of this.listeners.get('message') || []) listener({ data });
   }
@@ -261,7 +265,7 @@ function createTimelineBridgeHarness(initialHandler, {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.4.0');
+  assert.equal(manifest.version, '1.5.0');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -720,7 +724,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.requestId === 'page-personal-probe'
       && message.payload.ok === true)));
   const personalHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.equal(personalHeartbeat.payload.version, '1.4.0');
+  assert.equal(personalHeartbeat.payload.version, '1.5.0');
   assert.deepEqual(Array.from(personalHeartbeat.payload.capabilities), [
     'posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1'
   ]);
@@ -791,7 +795,14 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   };
   socket.receive(`42${JSON.stringify([
     'social-user-twitter',
-    { Payload: JSON.stringify({ data: incoming }) }
+    {
+      Channel: 'twitter_user_subscribe',
+      Payload: JSON.stringify({
+        user_id: 1,
+        event_type: 'twitter_user_subscribe',
+        data: incoming
+      })
+    }
   ])}`);
   const myPosts = window.messages.find((message) => message.type === 'posts');
   assert.equal(myPosts.payload.posts[0].externalId, '1900000000000000100');
@@ -807,7 +818,14 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const acknowledgedCount = window.messages.filter((message) => message.type === 'posts').length;
   socket.receive(`42${JSON.stringify([
     'social-user-twitter',
-    { Payload: JSON.stringify({ data: incoming }) }
+    {
+      Channel: 'twitter_user_subscribe',
+      Payload: JSON.stringify({
+        user_id: 1,
+        event_type: 'twitter_user_subscribe',
+        data: incoming
+      })
+    }
   ])}`);
   assert.equal(window.messages.filter((message) => message.type === 'posts').length, acknowledgedCount);
 
@@ -822,9 +840,16 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   assert.equal(window.messages.filter((message) => message.type === 'posts').length, beforeHotChannel);
   assert.equal(myPosts.payload.posts[0].discoveredAt, firstDiscoveredAt);
 
-  const sendPersonalActivity = (data) => socket.receive(`42${JSON.stringify([
+  const sendPersonalActivity = (data, channel = 'twitter_user_subscribe') => socket.receive(`42${JSON.stringify([
     'social-user-twitter',
-    { Payload: JSON.stringify({ data }) }
+    {
+      Channel: channel,
+      Payload: JSON.stringify({
+        user_id: 1,
+        event_type: channel,
+        data
+      })
+    }
   ])}`);
   const deliveryFor = (externalId) => window.messages
     .filter((message) => message.type === 'posts')
@@ -834,6 +859,26 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     type: 'posts-delivery-result',
     payload: { deliveryId: delivery.payload.deliveryId, ok: true }
   });
+
+  const translatedSocketId = '1900000000000000104';
+  sendPersonalActivity({
+    ...incoming,
+    doc_id: translatedSocketId,
+    tweet: { ...incoming.tweet, tweet_id: translatedSocketId, text_translate: 'Robinhood contract' }
+  }, 'twitter_translate_user_subscribe');
+  const translatedDelivery = deliveryFor(translatedSocketId);
+  assert.ok(translatedDelivery);
+  acknowledge(translatedDelivery);
+
+  const rejectedInnerChannelId = '1900000000000000105';
+  const beforeRejectedInnerChannel = window.messages.filter((message) => message.type === 'posts').length;
+  sendPersonalActivity({
+    ...incoming,
+    doc_id: rejectedInnerChannelId,
+    tweet: { ...incoming.tweet, tweet_id: rejectedInnerChannelId }
+  }, 'twitter_hot_subscribe');
+  assert.equal(window.messages.filter((message) => message.type === 'posts').length, beforeRejectedInnerChannel);
+  assert.equal(deliveryFor(rejectedInnerChannelId), undefined);
 
   const versionedSocketId = '1900000000000000101';
   socket.receive(`42${JSON.stringify([
@@ -884,12 +929,29 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   assert.equal(window.messages.filter((message) => message.type === 'posts').length, beforeUnmonitoredSocketAuthor);
 
   const portalSocket = new window.WebSocket('wss://debot.ai/portal-ws/?EIO=4&transport=websocket');
+  portalSocket.open();
   portalSocket.receive('42["authorization","denied"]');
   assert.deepEqual(Array.from(portalSocket.sent), []);
   portalSocket.receive('42["authorization","success"]');
   assert.deepEqual(Array.from(portalSocket.sent), ['42["subscribe","social-user-twitter"]']);
   portalSocket.receive('42["authorization","success"]');
   assert.equal(portalSocket.sent.length, 1);
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'force-poll',
+    requestId: 'portal-diagnostics'
+  });
+  await eventually(() => assert.ok(window.messages.some((message) => (
+    message.type === 'force-poll-result'
+      && message.payload.requestId === 'portal-diagnostics'
+      && message.payload.ok === true
+  ))));
+  const portalHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
+  assert.equal(portalHeartbeat.payload.diagnostics.ws.connectionOpens, 1);
+  assert.equal(portalHeartbeat.payload.diagnostics.ws.authorizationSuccesses, 2);
+  assert.equal(portalHeartbeat.payload.diagnostics.ws.subscribeAttempts, 1);
+  assert.equal(portalHeartbeat.payload.diagnostics.ws.subscribeFailures, 0);
+  assert.equal(portalHeartbeat.payload.diagnostics.ws.lastSubscribeAt > 0, true);
 
   const nonPortalSocket = new window.WebSocket('wss://debot.ai/socket.io/?EIO=4&transport=websocket');
   nonPortalSocket.receive('42["authorization","success"]');
@@ -1314,7 +1376,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const recoveredHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
   assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
   assert.equal(Object.hasOwn(recoveredHeartbeat.payload, 'error'), false);
-  assert.equal(recoveredHeartbeat.payload.version, '1.4.0');
+  assert.equal(recoveredHeartbeat.payload.version, '1.5.0');
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.accountCount >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.rawRows >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.normalizedRows >= 0, true);
@@ -3310,6 +3372,11 @@ test('background uses the bridge secret only as authorization and submits allowl
       error: 'authorization: Bearer debot-auth-value; sub_token=debot-session-value',
       diagnostics: {
         ws: {
+          connectionOpens: 2,
+          authorizationSuccesses: 2,
+          subscribeAttempts: 2,
+          subscribeFailures: 0,
+          lastSubscribeAt: 1_782_000_123_456,
           framesSeen: 20,
           accepted: 3,
           rawFrame: 'sub_token=must-not-leave-the-page'
@@ -3336,6 +3403,11 @@ test('background uses the bridge secret only as authorization and submits allowl
   assert.match(heartbeatBody, /\[redacted\]/);
   assert.deepEqual(JSON.parse(heartbeatBody).diagnostics, {
     ws: {
+      connectionOpens: 2,
+      authorizationSuccesses: 2,
+      subscribeAttempts: 2,
+      subscribeFailures: 0,
+      lastSubscribeAt: 1_782_000_123_456,
       framesSeen: 20,
       accepted: 3,
       rejected: 0,

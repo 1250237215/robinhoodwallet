@@ -942,6 +942,11 @@ test('versioned and legacy stale snapshots cannot revive a confirmed removal tom
   });
   assert.deepEqual(diagnostics, {
     ws: {
+      connectionOpens: 0,
+      authorizationSuccesses: 0,
+      subscribeAttempts: 0,
+      subscribeFailures: 0,
+      lastSubscribeAt: null,
       framesSeen: 0,
       accepted: 0,
       rejected: 0,
@@ -987,6 +992,11 @@ test('bridge heartbeat diagnostics retain only bounded health counters and categ
     capabilities: ['posts', 'watchlist'],
     diagnostics: {
       ws: {
+        connectionOpens: 4,
+        authorizationSuccesses: 3,
+        subscribeAttempts: 3,
+        subscribeFailures: 1,
+        lastSubscribeAt: initialNow - 75,
         framesSeen: 123,
         accepted: 17,
         rejected: 106,
@@ -1029,6 +1039,11 @@ test('bridge heartbeat diagnostics retain only bounded health counters and categ
 
   assert.deepEqual(bridge.diagnostics, {
     ws: {
+      connectionOpens: 4,
+      authorizationSuccesses: 3,
+      subscribeAttempts: 3,
+      subscribeFailures: 1,
+      lastSubscribeAt: initialNow - 75,
       framesSeen: 123,
       accepted: 17,
       rejected: 106,
@@ -1078,7 +1093,16 @@ test('bridge heartbeat diagnostics retain only bounded health counters and categ
 
   const invalid = store.recordBridgeHeartbeat({
     diagnostics: {
-      ws: { framesSeen: -1, accepted: Infinity, lastEventAt: 'not-a-timestamp' },
+      ws: {
+        connectionOpens: -1,
+        authorizationSuccesses: Infinity,
+        subscribeAttempts: 1_000_000_001,
+        subscribeFailures: 'not-a-counter',
+        lastSubscribeAt: 'not-a-timestamp',
+        framesSeen: -1,
+        accepted: Infinity,
+        lastEventAt: 'not-a-timestamp'
+      },
       poll: {
         elapsedMs: 600_001,
         configHash: 'account-identifiers-must-not-be-saved',
@@ -1088,6 +1112,11 @@ test('bridge heartbeat diagnostics retain only bounded health counters and categ
     }
   });
   assert.deepEqual(invalid.diagnostics.ws, {
+    connectionOpens: 0,
+    authorizationSuccesses: 0,
+    subscribeAttempts: 0,
+    subscribeFailures: 0,
+    lastSubscribeAt: null,
     framesSeen: 0,
     accepted: 0,
     rejected: 0,

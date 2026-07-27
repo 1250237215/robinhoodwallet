@@ -256,6 +256,11 @@ test('bridge diagnostics are sanitized and available in social snapshot and stat
       capabilities: ['posts', 'watchlist'],
       diagnostics: {
         ws: {
+          connectionOpens: 5,
+          authorizationSuccesses: 4,
+          subscribeAttempts: 4,
+          subscribeFailures: 1,
+          lastSubscribeAt: 1_782_000_123_456,
           framesSeen: 12,
           accepted: 3,
           rawFrame: 'debot-session=must-not-return'
@@ -279,6 +284,11 @@ test('bridge diagnostics are sanitized and available in social snapshot and stat
   assert.equal(heartbeat.status, 200);
   const heartbeatBody = await heartbeat.json();
   assert.deepEqual(heartbeatBody.bridge.diagnostics.ws, {
+    connectionOpens: 5,
+    authorizationSuccesses: 4,
+    subscribeAttempts: 4,
+    subscribeFailures: 1,
+    lastSubscribeAt: 1_782_000_123_456,
     framesSeen: 12,
     accepted: 3,
     rejected: 0,
