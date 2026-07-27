@@ -1,5 +1,6 @@
 {$ROBINHOOD_SITE_ADDRESS:http://localhost} {
-	encode zstd gzip
+	@compressible not path /robinhood-radar/api/social/stream /robinhood-radar/api/robinhood/monitor/stream /robinhood-radar/api/base/monitor/stream /robinhood-radar/api/solana/monitor/stream
+	encode @compressible zstd gzip
 	header Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
@@ -17,6 +18,42 @@
 	}
 
 	redir /robinhood-radar /robinhood-radar/ 308
+
+	handle /robinhood-radar/api/social/stream {
+		uri strip_prefix /robinhood-radar
+		reverse_proxy 127.0.0.1:18118 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up Host {host}
+			flush_interval -1
+		}
+	}
+
+	handle /robinhood-radar/api/robinhood/monitor/stream {
+		uri strip_prefix /robinhood-radar
+		reverse_proxy 127.0.0.1:18118 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up Host {host}
+			flush_interval -1
+		}
+	}
+
+	handle /robinhood-radar/api/base/monitor/stream {
+		uri strip_prefix /robinhood-radar
+		reverse_proxy 127.0.0.1:18119 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up Host {host}
+			flush_interval -1
+		}
+	}
+
+	handle /robinhood-radar/api/solana/monitor/stream {
+		uri strip_prefix /robinhood-radar
+		reverse_proxy 127.0.0.1:18120 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up Host {host}
+			flush_interval -1
+		}
+	}
 
 	handle /robinhood-radar/api/robinhood/* {
 		uri strip_prefix /robinhood-radar
