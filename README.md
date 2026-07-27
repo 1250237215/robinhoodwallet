@@ -147,9 +147,11 @@ marked partial.
   the three DQD AI backup directories after 48 hours; current prediction data and
   website files are outside its match scope.
 - `deploy/Caddyfile.example` contains the prefix-based reverse proxy used by the
-  existing radar URL. Set `ROBINHOOD_SITE_ADDRESS` to the public site address.
-  It does not add a browser login; the exact Solana webhook route remains
-  protected by the independent `SOLANA_HELIUS_AUTH_HEADER` secret.
+  existing radar URL. Set `ROBINHOOD_SITE_ADDRESS` to the public HTTPS site
+  address. The legacy HTTP IP page is redirected to the canonical HTTPS page so
+  social watchlist writes never cross plaintext HTTP. It does not add a browser
+  login; the exact Solana webhook route remains protected by the independent
+  `SOLANA_HELIUS_AUTH_HEADER` secret.
 - If a complete `Caddyfile` is included in the deployment staging directory,
   `deploy/install-remote.sh` backs up, validates, installs, reloads, publicly
   verifies, and rolls it back with the rest of the release. External `.LEGAL.txt`

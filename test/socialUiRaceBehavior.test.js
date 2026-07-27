@@ -68,9 +68,13 @@ function createSocialBehaviorHarness({
   origin = 'http://radar.test',
   protocol = 'http:',
   hostname = 'radar.test',
+  pathname = '/robinhood-radar/',
+  search = '',
+  hash = '',
   localStorage = null
 } = {}) {
   const timers = createTimerHarness();
+  const redirects = [];
   const elements = new Map();
   const eventSources = [];
   class EventSourceStub {
@@ -113,12 +117,13 @@ function createSocialBehaviorHarness({
       setItem() {}
     },
     location: {
-      hash: '',
+      hash,
       hostname,
       origin,
-      pathname: '/robinhood-radar/',
+      pathname,
       protocol,
-      search: ''
+      search,
+      replace(value) { redirects.push(String(value)); }
     },
     postMessage() {},
     EventSource: EventSourceStub
@@ -183,15 +188,17 @@ function createSocialBehaviorHarness({
     eventSources.length = 0;
   };
   reset();
-  return { api, eventSources, reset, timers };
+  return { api, eventSources, redirects, reset, timers };
 }
 
-test('the public HTTP page clears a legacy social token during initialization', () => {
+test('the public HTTP page redirects to HTTPS and clears a legacy social token during initialization', () => {
   const insecureRemovals = [];
-  createSocialBehaviorHarness({
+  const insecureHarness = createSocialBehaviorHarness({
     origin: 'http://217.116.171.250',
     protocol: 'http:',
     hostname: '217.116.171.250',
+    search: '?chain=solana',
+    hash: '#monitor',
     localStorage: {
       getItem() { return 'legacy-secret'; },
       removeItem(key) { insecureRemovals.push(key); },
@@ -199,9 +206,12 @@ test('the public HTTP page clears a legacy social token during initialization', 
     }
   });
   assert.deepEqual(insecureRemovals, ['robinhood-social-device-token']);
+  assert.deepEqual(insecureHarness.redirects, [
+    'https://radar.217-116-171-250.sslip.io/robinhood-radar/?chain=solana#monitor'
+  ]);
 
   const secureRemovals = [];
-  createSocialBehaviorHarness({
+  const secureHarness = createSocialBehaviorHarness({
     origin: 'https://radar.217-116-171-250.sslip.io',
     protocol: 'https:',
     hostname: 'radar.217-116-171-250.sslip.io',
@@ -212,6 +222,7 @@ test('the public HTTP page clears a legacy social token during initialization', 
     }
   });
   assert.deepEqual(secureRemovals, []);
+  assert.deepEqual(secureHarness.redirects, []);
 });
 
 function watchEntry({ id = 7, handle = '1874a3', eventTypes = ['post'] } = {}) {

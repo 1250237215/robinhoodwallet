@@ -68,6 +68,7 @@ test('Base and Solana production bundles cannot execute the Robinhood entrypoint
 });
 
 test('reverse proxy routes each chain API to its own process', () => {
+  assert.match(caddy, /\{\$ROBINHOOD_LEGACY_HTTP_ADDRESS:http:\/\/217\.116\.171\.250\}[\s\S]*@legacyRadarPage path \/robinhood-radar \/robinhood-radar\/[\s\S]*redir @legacyRadarPage https:\/\/radar\.217-116-171-250\.sslip\.io\{uri\} 308/);
   assert.match(caddy, /\/api\/robinhood\/\*[\s\S]*127\.0\.0\.1:18118/);
   assert.match(caddy, /\/api\/base\/\*[\s\S]*127\.0\.0\.1:18119/);
   assert.match(caddy, /\/api\/solana\/\*[\s\S]*127\.0\.0\.1:18120/);

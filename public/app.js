@@ -1,3 +1,13 @@
+const LEGACY_RADAR_ORIGIN = 'http://217.116.171.250';
+const CANONICAL_RADAR_ORIGIN = 'https://radar.217-116-171-250.sslip.io';
+const IS_LEGACY_RADAR_PAGE = window.location.origin === LEGACY_RADAR_ORIGIN
+  && /^\/robinhood-radar(?:\/|$)/.test(window.location.pathname);
+if (IS_LEGACY_RADAR_PAGE) {
+  window.location.replace(
+    `${CANONICAL_RADAR_ORIGIN}${window.location.pathname}${window.location.search}${window.location.hash}`
+  );
+}
+
 const APP_BASE = /^\/robinhood-radar(?:\/|$)/.test(window.location.pathname) ? '/robinhood-radar' : '';
 const CHAIN_CONFIGS = Object.freeze({
   robinhood: Object.freeze({
