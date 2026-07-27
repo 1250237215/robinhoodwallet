@@ -1,5 +1,5 @@
 {$ROBINHOOD_LEGACY_HTTP_ADDRESS:http://217.116.171.250} {
-	@legacyRadarPage path /robinhood-radar /robinhood-radar/
+	@legacyRadarPage path /robinhood-radar /robinhood-radar/*
 	redir @legacyRadarPage https://radar.217-116-171-250.sslip.io{uri} 308
 }
 
