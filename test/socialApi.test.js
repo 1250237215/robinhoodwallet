@@ -244,6 +244,63 @@ test('paired bridge authenticates heartbeat, ingestion, watchlist commands and a
   assert.equal((await acknowledgement.json()).command.status, 'completed');
 });
 
+test('bridge diagnostics are sanitized and available in social snapshot and status', async (t) => {
+  const token = 'bridge-diagnostics-token';
+  const { baseUrl } = await withSocialServer(t, { token });
+  const heartbeat = await fetch(`${baseUrl}/api/social/bridge/heartbeat`, {
+    method: 'POST',
+    headers: auth(token),
+    body: JSON.stringify({
+      bridgeId: 'chrome-main',
+      version: '1.3.0',
+      capabilities: ['posts', 'watchlist'],
+      diagnostics: {
+        ws: {
+          framesSeen: 12,
+          accepted: 3,
+          rawFrame: 'debot-session=must-not-return'
+        },
+        poll: {
+          rawRows: 4,
+          normalizedRows: 3,
+          accountCount: 22,
+          configHash: 'A1B2C3D4',
+          lastErrorCategory: 'NETWORK',
+          rawResponse: { token: 'must-not-return' }
+        },
+        forcePoll: {
+          successes: 2,
+          failures: 1,
+          lastErrorCategory: 'not-an-allowed-category'
+        }
+      }
+    })
+  });
+  assert.equal(heartbeat.status, 200);
+  const heartbeatBody = await heartbeat.json();
+  assert.deepEqual(heartbeatBody.bridge.diagnostics.ws, {
+    framesSeen: 12,
+    accepted: 3,
+    rejected: 0,
+    unmatchedChannel: 0,
+    invalidPacket: 0,
+    invalidEnvelope: 0,
+    unmonitoredAuthor: 0,
+    invalidEvent: 0,
+    unreadable: 0,
+    lastEventAt: null
+  });
+  assert.equal(heartbeatBody.bridge.diagnostics.poll.configHash, 'a1b2c3d4');
+  assert.equal(heartbeatBody.bridge.diagnostics.poll.lastErrorCategory, 'NETWORK');
+  assert.equal(heartbeatBody.bridge.diagnostics.forcePoll.lastErrorCategory, '');
+  assert.equal(JSON.stringify(heartbeatBody).includes('must-not-return'), false);
+
+  const snapshot = await (await fetch(`${baseUrl}/api/social/snapshot`)).json();
+  const status = await (await fetch(`${baseUrl}/api/social/status`)).json();
+  assert.deepEqual(snapshot.bridge.diagnostics, heartbeatBody.bridge.diagnostics);
+  assert.deepEqual(status.bridge.diagnostics, heartbeatBody.bridge.diagnostics);
+});
+
 test('watchlist event preferences patch locally, allow empty values and publish only real changes', async (t) => {
   const token = 'watch-event-device-token';
   const { baseUrl, socialService } = await withSocialServer(t, { token });

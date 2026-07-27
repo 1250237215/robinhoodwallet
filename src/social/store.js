@@ -35,6 +35,128 @@ function boolean(value) {
   return Boolean(Number(value));
 }
 
+// The bridge reports only a compact health summary. Do not expand this into a
+// generic telemetry object: heartbeat data originates in a signed-in browser
+// tab and must never retain raw DeBot frames, post text, account identifiers,
+// or credentials.
+const BRIDGE_DIAGNOSTIC_COUNTER_MAX = 1_000_000_000;
+const BRIDGE_DIAGNOSTIC_DURATION_MAX_MS = 10 * 60 * 1_000;
+const BRIDGE_DIAGNOSTIC_ERROR_CATEGORIES = new Set([
+  '', 'AUTH', 'TIMEOUT', 'NETWORK', 'DEBOT', 'UNKNOWN'
+]);
+
+function diagnosticCounter(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 && number <= BRIDGE_DIAGNOSTIC_COUNTER_MAX
+    ? number
+    : 0;
+}
+
+function diagnosticTimestamp(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number > 0 ? number : null;
+}
+
+function diagnosticDuration(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 && number <= BRIDGE_DIAGNOSTIC_DURATION_MAX_MS
+    ? number
+    : null;
+}
+
+function diagnosticErrorCategory(value) {
+  const category = String(value || '').trim().toUpperCase();
+  return BRIDGE_DIAGNOSTIC_ERROR_CATEGORIES.has(category) ? category : '';
+}
+
+function bridgeDiagnosticsDefaults() {
+  return {
+    ws: {
+      framesSeen: 0,
+      accepted: 0,
+      rejected: 0,
+      unmatchedChannel: 0,
+      invalidPacket: 0,
+      invalidEnvelope: 0,
+      unmonitoredAuthor: 0,
+      invalidEvent: 0,
+      unreadable: 0,
+      lastEventAt: null
+    },
+    poll: {
+      startedAt: null,
+      finishedAt: null,
+      elapsedMs: null,
+      rawRows: 0,
+      normalizedRows: 0,
+      droppedRows: 0,
+      accountCount: 0,
+      configHash: '',
+      latestSourceAt: null,
+      lastErrorCategory: '',
+      attempts: 0,
+      successes: 0,
+      failures: 0
+    },
+    forcePoll: {
+      successes: 0,
+      failures: 0,
+      lastAt: null,
+      elapsedMs: null,
+      lastErrorCategory: ''
+    }
+  };
+}
+
+function bridgeDiagnosticsFromInput(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const ws = value.ws && typeof value.ws === 'object' && !Array.isArray(value.ws) ? value.ws : {};
+  const poll = value.poll && typeof value.poll === 'object' && !Array.isArray(value.poll) ? value.poll : {};
+  const forcePoll = value.forcePoll && typeof value.forcePoll === 'object' && !Array.isArray(value.forcePoll)
+    ? value.forcePoll
+    : {};
+  const defaults = bridgeDiagnosticsDefaults();
+  return {
+    ws: {
+      framesSeen: diagnosticCounter(ws.framesSeen),
+      accepted: diagnosticCounter(ws.accepted),
+      rejected: diagnosticCounter(ws.rejected),
+      unmatchedChannel: diagnosticCounter(ws.unmatchedChannel),
+      invalidPacket: diagnosticCounter(ws.invalidPacket),
+      invalidEnvelope: diagnosticCounter(ws.invalidEnvelope),
+      unmonitoredAuthor: diagnosticCounter(ws.unmonitoredAuthor),
+      invalidEvent: diagnosticCounter(ws.invalidEvent),
+      unreadable: diagnosticCounter(ws.unreadable),
+      lastEventAt: diagnosticTimestamp(ws.lastEventAt)
+    },
+    poll: {
+      startedAt: diagnosticTimestamp(poll.startedAt),
+      finishedAt: diagnosticTimestamp(poll.finishedAt),
+      elapsedMs: diagnosticDuration(poll.elapsedMs),
+      rawRows: diagnosticCounter(poll.rawRows),
+      normalizedRows: diagnosticCounter(poll.normalizedRows),
+      droppedRows: diagnosticCounter(poll.droppedRows),
+      accountCount: diagnosticCounter(poll.accountCount),
+      configHash: /^[a-f0-9]{8}$/i.test(String(poll.configHash || ''))
+        ? String(poll.configHash).toLowerCase()
+        : defaults.poll.configHash,
+      latestSourceAt: diagnosticTimestamp(poll.latestSourceAt),
+      lastErrorCategory: diagnosticErrorCategory(poll.lastErrorCategory),
+      attempts: diagnosticCounter(poll.attempts),
+      successes: diagnosticCounter(poll.successes),
+      failures: diagnosticCounter(poll.failures)
+    },
+    forcePoll: {
+      successes: diagnosticCounter(forcePoll.successes),
+      failures: diagnosticCounter(forcePoll.failures),
+      lastAt: diagnosticTimestamp(forcePoll.lastAt),
+      elapsedMs: diagnosticDuration(forcePoll.elapsedMs),
+      lastErrorCategory: diagnosticErrorCategory(forcePoll.lastErrorCategory)
+    }
+  };
+}
+
 function normalizeWatchlistSnapshotVersion(value) {
   const input = value && typeof value === 'object' ? value : {};
   const sessionId = String(input.snapshotSessionId ?? '').trim().slice(0, 240);
@@ -772,6 +894,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       version TEXT NOT NULL DEFAULT '',
       capabilities_json TEXT NOT NULL DEFAULT '[]',
       session_id TEXT NOT NULL DEFAULT '',
+      diagnostics_json TEXT NOT NULL DEFAULT '{}',
       snapshot_session_id TEXT NOT NULL DEFAULT '',
       snapshot_session_started_at INTEGER NOT NULL DEFAULT 0,
       snapshot_revision INTEGER NOT NULL DEFAULT 0,
@@ -837,6 +960,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
   );
   if (!socialBridgeStateColumns.has('snapshot_session_id')) {
     db.exec("ALTER TABLE social_bridge_state ADD COLUMN snapshot_session_id TEXT NOT NULL DEFAULT ''");
+  }
+  if (!socialBridgeStateColumns.has('diagnostics_json')) {
+    db.exec("ALTER TABLE social_bridge_state ADD COLUMN diagnostics_json TEXT NOT NULL DEFAULT '{}'");
   }
   if (!socialBridgeStateColumns.has('snapshot_session_started_at')) {
     db.exec('ALTER TABLE social_bridge_state ADD COLUMN snapshot_session_started_at INTEGER NOT NULL DEFAULT 0');
@@ -1766,27 +1892,49 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         };
       });
     },
-    recordBridgeHeartbeat({ bridgeId = '', version = '', capabilities = [], sessionId = '' } = {}) {
+    recordBridgeHeartbeat({ bridgeId = '', version = '', capabilities = [], sessionId = '', diagnostics } = {}) {
       const timestamp = now();
-      db.prepare(`
-        INSERT INTO social_bridge_state(
-          singleton, bridge_id, version, capabilities_json, session_id, last_seen_at, updated_at
-        ) VALUES (1, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(singleton) DO UPDATE SET
-          bridge_id = excluded.bridge_id,
-          version = excluded.version,
-          capabilities_json = excluded.capabilities_json,
-          session_id = excluded.session_id,
-          last_seen_at = excluded.last_seen_at,
-          updated_at = excluded.updated_at
-      `).run(
+      const sanitizedDiagnostics = bridgeDiagnosticsFromInput(diagnostics);
+      const heartbeatValues = [
         String(bridgeId || '').slice(0, 240),
         String(version || '').slice(0, 120),
         json(Array.isArray(capabilities) ? capabilities.slice(0, 50).map(String) : []),
         String(sessionId || '').slice(0, 240),
         timestamp,
         timestamp
-      );
+      ];
+      if (sanitizedDiagnostics) {
+        db.prepare(`
+          INSERT INTO social_bridge_state(
+            singleton, bridge_id, version, capabilities_json, session_id, diagnostics_json, last_seen_at, updated_at
+          ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(singleton) DO UPDATE SET
+            bridge_id = excluded.bridge_id,
+            version = excluded.version,
+            capabilities_json = excluded.capabilities_json,
+            session_id = excluded.session_id,
+            diagnostics_json = excluded.diagnostics_json,
+            last_seen_at = excluded.last_seen_at,
+            updated_at = excluded.updated_at
+        `).run(
+          ...heartbeatValues.slice(0, 4),
+          json(sanitizedDiagnostics),
+          ...heartbeatValues.slice(4)
+        );
+      } else {
+        db.prepare(`
+          INSERT INTO social_bridge_state(
+            singleton, bridge_id, version, capabilities_json, session_id, last_seen_at, updated_at
+          ) VALUES (1, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(singleton) DO UPDATE SET
+            bridge_id = excluded.bridge_id,
+            version = excluded.version,
+            capabilities_json = excluded.capabilities_json,
+            session_id = excluded.session_id,
+            last_seen_at = excluded.last_seen_at,
+            updated_at = excluded.updated_at
+        `).run(...heartbeatValues);
+      }
       return this.getBridgeState();
     },
     getBridgeState() {
@@ -1800,6 +1948,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
           snapshotSessionId: '',
           snapshotSessionStartedAt: 0,
           snapshotRevision: 0,
+          diagnostics: bridgeDiagnosticsDefaults(),
           lastSeenAt: null
         };
       }
@@ -1811,6 +1960,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         snapshotSessionId: row.snapshot_session_id,
         snapshotSessionStartedAt: Number(row.snapshot_session_started_at || 0),
         snapshotRevision: Number(row.snapshot_revision || 0),
+        diagnostics: bridgeDiagnosticsFromInput(parseJson(row.diagnostics_json, null)) || bridgeDiagnosticsDefaults(),
         lastSeenAt: row.last_seen_at === null ? null : Number(row.last_seen_at)
       };
     },

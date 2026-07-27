@@ -23,6 +23,9 @@ const SNAPSHOT_SESSION_ID = `${SNAPSHOT_SESSION_STARTED_AT.toString(36)}-${Math.
 const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
 const PROFILE_CHANGE_TYPES = new Set(['name', 'avatar', 'bio']);
 const SOCIAL_HANDLE_PATTERN = /^[a-z0-9_]{1,15}$/i;
+const DIAGNOSTIC_COUNTER_MAX = 1_000_000_000;
+const DIAGNOSTIC_DURATION_MAX_MS = 10 * 60_000;
+const DIAGNOSTIC_ERROR_TYPES = new Set(['', 'AUTH', 'TIMEOUT', 'NETWORK', 'DEBOT', 'UNKNOWN']);
 const ANALYSIS_ERROR_TYPES = new Set([
   'AUTH',
   'TIMEOUT',
@@ -191,7 +194,74 @@ function safeHeartbeat(value) {
     capabilities: (Array.isArray(heartbeat.capabilities) ? heartbeat.capabilities : [])
       .slice(0, 50)
       .map((item) => text(item, 120)),
-    error: redactSensitiveText(heartbeat.error)
+    error: redactSensitiveText(heartbeat.error),
+    diagnostics: safeBridgeDiagnostics(heartbeat.diagnostics)
+  };
+}
+
+function diagnosticCounter(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 && number <= DIAGNOSTIC_COUNTER_MAX ? number : 0;
+}
+
+function diagnosticTimestamp(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number > 0 ? number : 0;
+}
+
+function diagnosticDuration(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 && number <= DIAGNOSTIC_DURATION_MAX_MS ? number : 0;
+}
+
+function diagnosticErrorType(value) {
+  const type = text(value, 40).toUpperCase();
+  return DIAGNOSTIC_ERROR_TYPES.has(type) ? type : '';
+}
+
+function safeBridgeDiagnostics(value) {
+  const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const ws = input.ws && typeof input.ws === 'object' && !Array.isArray(input.ws) ? input.ws : {};
+  const poll = input.poll && typeof input.poll === 'object' && !Array.isArray(input.poll) ? input.poll : {};
+  const forcePoll = input.forcePoll && typeof input.forcePoll === 'object' && !Array.isArray(input.forcePoll)
+    ? input.forcePoll
+    : {};
+  const hash = text(poll.configHash, 8).toLowerCase();
+  return {
+    ws: {
+      framesSeen: diagnosticCounter(ws.framesSeen),
+      accepted: diagnosticCounter(ws.accepted),
+      rejected: diagnosticCounter(ws.rejected),
+      unmatchedChannel: diagnosticCounter(ws.unmatchedChannel),
+      invalidPacket: diagnosticCounter(ws.invalidPacket),
+      invalidEnvelope: diagnosticCounter(ws.invalidEnvelope),
+      unmonitoredAuthor: diagnosticCounter(ws.unmonitoredAuthor),
+      invalidEvent: diagnosticCounter(ws.invalidEvent),
+      unreadable: diagnosticCounter(ws.unreadable),
+      lastEventAt: diagnosticTimestamp(ws.lastEventAt)
+    },
+    poll: {
+      startedAt: diagnosticTimestamp(poll.startedAt),
+      finishedAt: diagnosticTimestamp(poll.finishedAt),
+      elapsedMs: diagnosticDuration(poll.elapsedMs),
+      rawRows: diagnosticCounter(poll.rawRows),
+      normalizedRows: diagnosticCounter(poll.normalizedRows),
+      droppedRows: diagnosticCounter(poll.droppedRows),
+      accountCount: diagnosticCounter(poll.accountCount),
+      configHash: /^[a-f0-9]{8}$/.test(hash) ? hash : '',
+      latestSourceAt: diagnosticTimestamp(poll.latestSourceAt),
+      lastErrorCategory: diagnosticErrorType(poll.lastErrorCategory),
+      attempts: diagnosticCounter(poll.attempts),
+      successes: diagnosticCounter(poll.successes),
+      failures: diagnosticCounter(poll.failures)
+    },
+    forcePoll: {
+      successes: diagnosticCounter(forcePoll.successes),
+      failures: diagnosticCounter(forcePoll.failures),
+      lastAt: diagnosticTimestamp(forcePoll.lastAt),
+      elapsedMs: diagnosticDuration(forcePoll.elapsedMs),
+      lastErrorCategory: diagnosticErrorType(forcePoll.lastErrorCategory)
+    }
   };
 }
 

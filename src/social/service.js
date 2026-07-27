@@ -144,7 +144,8 @@ function connectionState(config, bridge, now) {
     heartbeatAgeMs,
     bridgeId: bridge.bridgeId,
     version: bridge.version,
-    capabilities: bridge.capabilities
+    capabilities: bridge.capabilities,
+    diagnostics: bridge.diagnostics
   };
 }
 

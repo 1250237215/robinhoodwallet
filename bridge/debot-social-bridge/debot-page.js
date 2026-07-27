@@ -1,6 +1,7 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
+  const BRIDGE_VERSION = '1.4.0';
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
   // The WebSocket is the primary lane. This short, coalesced REST poll only
@@ -26,6 +27,8 @@
   const WATCHLIST_PAGE_SIZE = 500;
   const WATCHLIST_MAX_PAGES = 10;
   const EVM_ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
+  const MAX_DIAGNOSTIC_COUNTER = 1_000_000_000;
+  const MAX_SOCKET_PAYLOADS_PER_FRAME = 24;
   const seen = new Map();
   const pendingPosts = new Map();
   const pendingDeliveries = new Map();
@@ -52,9 +55,164 @@
   let timelineCatchUpInFlight = null;
   let timelineCatchUpTruncated = false;
   let lastPrimarySuccessAt = 0;
+  // This summary is deliberately bounded and contains no DeBot response data,
+  // credentials, account names, or raw WebSocket frames.
+  const bridgeDiagnostics = {
+    ws: {
+      framesSeen: 0,
+      accepted: 0,
+      rejected: 0,
+      unmatchedChannel: 0,
+      invalidPacket: 0,
+      invalidEnvelope: 0,
+      unmonitoredAuthor: 0,
+      invalidEvent: 0,
+      unreadable: 0,
+      lastEventAt: 0
+    },
+    poll: {
+      attempts: 0,
+      successes: 0,
+      failures: 0,
+      startedAt: 0,
+      finishedAt: 0,
+      elapsedMs: 0,
+      rawRows: 0,
+      normalizedRows: 0,
+      droppedRows: 0,
+      accountCount: 0,
+      configHash: '00000000',
+      latestSourceAt: 0,
+      lastErrorCategory: ''
+    },
+    forcePoll: {
+      successes: 0,
+      failures: 0,
+      lastAt: 0,
+      elapsedMs: 0,
+      lastErrorCategory: ''
+    }
+  };
+  const portalSubscribedSockets = new WeakSet();
 
   function emit(type, payload) {
     window.postMessage({ source: PAGE_SOURCE, type, payload }, window.location.origin);
+  }
+
+  function incrementDiagnosticCounter(target, key, amount = 1) {
+    const current = Number(target?.[key] || 0);
+    const increment = Number(amount);
+    const next = Number.isFinite(current) && Number.isFinite(increment)
+      ? current + increment
+      : MAX_DIAGNOSTIC_COUNTER;
+    target[key] = Math.max(0, Math.min(MAX_DIAGNOSTIC_COUNTER, Math.trunc(next)));
+  }
+
+  function diagnosticConfigHash(configIds) {
+    const values = (Array.isArray(configIds) ? configIds : [])
+      .map((value) => String(value || '').slice(0, 120))
+      .filter(Boolean)
+      .sort();
+    let hash = 0x811c9dc5;
+    for (const character of values.join('|')) {
+      hash ^= character.charCodeAt(0);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0');
+  }
+
+  function bridgeDiagnosticsSnapshot() {
+    const { ws, poll, forcePoll } = bridgeDiagnostics;
+    return {
+      ws: {
+        framesSeen: ws.framesSeen,
+        accepted: ws.accepted,
+        rejected: ws.rejected,
+        unmatchedChannel: ws.unmatchedChannel,
+        invalidPacket: ws.invalidPacket,
+        invalidEnvelope: ws.invalidEnvelope,
+        unmonitoredAuthor: ws.unmonitoredAuthor,
+        invalidEvent: ws.invalidEvent,
+        unreadable: ws.unreadable,
+        lastEventAt: ws.lastEventAt
+      },
+      poll: {
+        attempts: poll.attempts,
+        successes: poll.successes,
+        failures: poll.failures,
+        startedAt: poll.startedAt,
+        finishedAt: poll.finishedAt,
+        elapsedMs: poll.elapsedMs,
+        rawRows: poll.rawRows,
+        normalizedRows: poll.normalizedRows,
+        droppedRows: poll.droppedRows,
+        accountCount: poll.accountCount,
+        configHash: poll.configHash,
+        latestSourceAt: poll.latestSourceAt,
+        lastErrorCategory: poll.lastErrorCategory
+      },
+      forcePoll: {
+        successes: forcePoll.successes,
+        failures: forcePoll.failures,
+        lastAt: forcePoll.lastAt,
+        elapsedMs: forcePoll.elapsedMs,
+        lastErrorCategory: forcePoll.lastErrorCategory
+      }
+    };
+  }
+
+  function rejectSocketFrame(reason) {
+    incrementDiagnosticCounter(bridgeDiagnostics.ws, 'rejected');
+    if (Object.hasOwn(bridgeDiagnostics.ws, reason)) {
+      incrementDiagnosticCounter(bridgeDiagnostics.ws, reason);
+    }
+  }
+
+  function beginPrimaryPollDiagnostics(configIds) {
+    const poll = bridgeDiagnostics.poll;
+    incrementDiagnosticCounter(poll, 'attempts');
+    poll.startedAt = Date.now();
+    poll.accountCount = Math.min(10_000, (Array.isArray(configIds) ? configIds.length : 0));
+    poll.configHash = diagnosticConfigHash(configIds);
+    poll.lastErrorCategory = '';
+  }
+
+  function completePrimaryPollDiagnostics(page) {
+    const poll = bridgeDiagnostics.poll;
+    incrementDiagnosticCounter(poll, 'successes');
+    poll.finishedAt = Date.now();
+    poll.elapsedMs = Math.max(0, Math.min(MAX_DIAGNOSTIC_COUNTER, poll.finishedAt - poll.startedAt));
+    const boundedCount = (value) => {
+      const number = Number(value);
+      return Number.isFinite(number) ? Math.max(0, Math.min(MAX_DIAGNOSTIC_COUNTER, Math.trunc(number))) : 0;
+    };
+    const sourceAt = Number(page?.latestSourceAt);
+    poll.rawRows = boundedCount(page?.rawRows);
+    poll.normalizedRows = boundedCount(page?.normalizedRows);
+    poll.droppedRows = boundedCount(page?.droppedRows);
+    poll.latestSourceAt = Number.isSafeInteger(sourceAt) && sourceAt > 0 ? sourceAt : 0;
+    poll.lastErrorCategory = '';
+  }
+
+  function failPrimaryPollDiagnostics(errorType) {
+    const poll = bridgeDiagnostics.poll;
+    incrementDiagnosticCounter(poll, 'failures');
+    poll.finishedAt = Date.now();
+    poll.elapsedMs = Math.max(0, Math.min(MAX_DIAGNOSTIC_COUNTER, poll.finishedAt - poll.startedAt));
+    poll.lastErrorCategory = ERROR_TYPES.has(errorType) ? errorType : 'DEBOT';
+  }
+
+  function completeForcePollDiagnostics(result, startedAt) {
+    const forcePoll = bridgeDiagnostics.forcePoll;
+    forcePoll.lastAt = Date.now();
+    forcePoll.elapsedMs = Math.max(0, Math.min(MAX_DIAGNOSTIC_COUNTER, forcePoll.lastAt - startedAt));
+    if (result?.ok === true) {
+      incrementDiagnosticCounter(forcePoll, 'successes');
+      forcePoll.lastErrorCategory = '';
+      return;
+    }
+    incrementDiagnosticCounter(forcePoll, 'failures');
+    forcePoll.lastErrorCategory = ERROR_TYPES.has(result?.errorType) ? result.errorType : 'DEBOT';
   }
 
   function numericTimestamp(value) {
@@ -772,9 +930,10 @@
   function emitHealthyHeartbeat() {
     emit('heartbeat', {
       bridgeId: 'debot-browser-extension',
-      version: '1.2.0',
+      version: BRIDGE_VERSION,
       sessionId: String(Date.now()),
-      capabilities: healthyHeartbeatCapabilities()
+      capabilities: healthyHeartbeatCapabilities(),
+      diagnostics: bridgeDiagnosticsSnapshot()
     });
   }
 
@@ -1267,10 +1426,19 @@
       || String(hasMoreField || '').toLowerCase() === 'true'
       || (hasMoreField === undefined && Boolean(nextCursor));
     if (hasMore && !nextCursor) throw new Error('DeBot omitted the personal timeline cursor');
+    const posts = data.feeds.map((item) => normalizePost(item, 'my')).filter(Boolean);
+    const latestSourceAt = posts.reduce((latest, post) => {
+      const sourceAt = Number(post?.sourceUpdatedAt || post?.publishedAt || 0);
+      return Number.isSafeInteger(sourceAt) && sourceAt > latest ? sourceAt : latest;
+    }, 0);
     return {
-      posts: data.feeds.map((item) => normalizePost(item, 'my')).filter(Boolean),
+      posts,
       hasMore,
-      nextCursor
+      nextCursor,
+      rawRows: data.feeds.length,
+      normalizedRows: posts.length,
+      droppedRows: data.feeds.length - posts.length,
+      latestSourceAt
     };
   }
 
@@ -1376,21 +1544,25 @@
 
   async function runPoll() {
     const configIds = cachedAccounts.map((account) => account.remoteId).filter(Boolean);
+    beginPrimaryPollDiagnostics(configIds);
     try {
       const firstPage = await fetchPersonalTimelinePage(configIds);
       const firstPageDelivery = deliverPosts(firstPage.posts);
       lastPrimarySuccessAt = Date.now();
+      completePrimaryPollDiagnostics(firstPage);
       emitHealthyHeartbeat();
       scheduleTimelineCatchUp(configIds, firstPage, firstPageDelivery);
       return { ok: true };
     } catch (error) {
       requestTimelineCatchUp();
       const errorType = coarseErrorType(error);
+      failPrimaryPollDiagnostics(errorType);
       emit('heartbeat', {
         bridgeId: 'debot-browser-extension',
-        version: '1.2.0',
+        version: BRIDGE_VERSION,
         capabilities: ['debot-analysis-v1', 'error'],
-        error: errorType
+        error: errorType,
+        diagnostics: bridgeDiagnosticsSnapshot()
       });
       return { ok: false, errorType };
     }
@@ -1456,22 +1628,149 @@
     throw new Error(`Unsupported command: ${command.type}`);
   }
 
-  function observeSocketText(frame) {
-    if (typeof frame !== 'string' || !frame.includes('social-') || !frame.includes('-twitter')) return;
-    const arrayStart = frame.indexOf('[');
-    if (arrayStart < 0) return;
-    try {
-      const packet = JSON.parse(frame.slice(arrayStart));
-      const channel = String(packet[0] || '');
-      if (channel !== 'social-user-twitter') return;
-      const envelope = packet[1] || {};
-      const parsed = typeof envelope.Payload === 'string' ? JSON.parse(envelope.Payload) : envelope.Payload || envelope;
-      const payload = parsed?.data || parsed;
-      const post = normalizePost(payload, 'my');
-      deliverPosts([post]);
-    } catch {
-      // Fallback polling covers socket frames from an unknown protocol version.
+  function socketChannelKey(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+
+  function isSocialTwitterChannel(value) {
+    const channel = socketChannelKey(value);
+    return /^social(?:-[a-z0-9]+){0,6}-twitter(?:-|$)/.test(channel)
+      || /^social-twitter(?:-|$)/.test(channel);
+  }
+
+  function isPersonalTwitterChannel(value) {
+    const channel = socketChannelKey(value);
+    return /^(?:social-(?:user|personal|my|watchlist|subscribed|monitor|monitored)-twitter|social-twitter-(?:user|personal|my|watchlist|subscribed|monitor|monitored))(?:-|$)/.test(channel);
+  }
+
+  function channelFromSocketObject(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+    for (const key of ['channel', 'topic', 'event', 'name']) {
+      if (typeof value[key] === 'string' && isSocialTwitterChannel(value[key])) return value[key];
     }
+    return '';
+  }
+
+  function parseSocketPacket(frame) {
+    const arrayStart = frame.indexOf('[');
+    const objectStart = frame.indexOf('{');
+    const jsonStart = arrayStart < 0
+      ? objectStart
+      : objectStart < 0
+        ? arrayStart
+        : Math.min(arrayStart, objectStart);
+    if (jsonStart < 0) return { error: 'invalidPacket' };
+
+    let packet;
+    try {
+      packet = JSON.parse(frame.slice(jsonStart));
+    } catch {
+      return { error: 'invalidPacket' };
+    }
+    if (Array.isArray(packet)) {
+      for (let index = 0; index < Math.min(packet.length, 4); index += 1) {
+        const value = packet[index];
+        if (typeof value === 'string' && isSocialTwitterChannel(value)) {
+          return { channel: value, envelope: packet[index + 1] ?? {} };
+        }
+        const channel = channelFromSocketObject(value);
+        if (channel) return { channel, envelope: value };
+      }
+      return { error: 'unmatchedChannel' };
+    }
+    const channel = channelFromSocketObject(packet);
+    return channel ? { channel, envelope: packet } : { error: 'unmatchedChannel' };
+  }
+
+  function isSocketActivityPayload(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    return ['doc_id', 'tweet', 'event_type', 'eventType', 'tw_type', 'twType', 'profile', 'follow']
+      .some((key) => Object.hasOwn(value, key));
+  }
+
+  function socketActivityPayloads(value, depth = 0, payloads = []) {
+    if (payloads.length >= MAX_SOCKET_PAYLOADS_PER_FRAME || depth > 5 || value === null || value === undefined) {
+      return payloads;
+    }
+    if (typeof value === 'string') {
+      const text = value.trim();
+      if (!text || !/^[{[]/.test(text)) return payloads;
+      try {
+        return socketActivityPayloads(JSON.parse(text), depth + 1, payloads);
+      } catch {
+        return payloads;
+      }
+    }
+    if (Array.isArray(value)) {
+      for (const item of value.slice(0, MAX_SOCKET_PAYLOADS_PER_FRAME)) {
+        socketActivityPayloads(item, depth + 1, payloads);
+      }
+      return payloads;
+    }
+    if (typeof value !== 'object') return payloads;
+    if (isSocketActivityPayload(value)) {
+      payloads.push(value);
+      return payloads;
+    }
+    for (const key of ['Payload', 'payload', 'data', 'Data', 'message', 'body', 'result', 'items', 'events', 'feeds', 'records']) {
+      if (!Object.hasOwn(value, key)) continue;
+      socketActivityPayloads(value[key], depth + 1, payloads);
+      if (payloads.length >= MAX_SOCKET_PAYLOADS_PER_FRAME) break;
+    }
+    return payloads;
+  }
+
+  function isCachedTwitterAuthor(post) {
+    if (post?.source !== 'twitter') return false;
+    const author = handleText(post?.author?.handle).toLowerCase();
+    if (!author || !cachedAccounts.length) return false;
+    return cachedAccounts.some((account) => (
+      account?.platform === 'twitter'
+        && handleText(account.accountKey || account.handle).toLowerCase() === author
+    ));
+  }
+
+  function observeSocketText(frame) {
+    if (typeof frame !== 'string') {
+      rejectSocketFrame('unreadable');
+      return;
+    }
+    const parsed = parseSocketPacket(frame);
+    if (!parsed.channel) {
+      rejectSocketFrame(parsed.error || 'invalidPacket');
+      return;
+    }
+    if (!isPersonalTwitterChannel(parsed.channel)) {
+      rejectSocketFrame('unmatchedChannel');
+      return;
+    }
+
+    const payloads = socketActivityPayloads(parsed.envelope);
+    if (!payloads.length) {
+      rejectSocketFrame('invalidEnvelope');
+      return;
+    }
+    const accepted = [];
+    for (const payload of payloads) {
+      const post = normalizePost(payload, 'my');
+      if (!post) {
+        rejectSocketFrame('invalidEvent');
+        continue;
+      }
+      if (!isCachedTwitterAuthor(post)) {
+        rejectSocketFrame('unmonitoredAuthor');
+        continue;
+      }
+      accepted.push(post);
+    }
+    if (!accepted.length) return;
+    incrementDiagnosticCounter(bridgeDiagnostics.ws, 'accepted', accepted.length);
+    bridgeDiagnostics.ws.lastEventAt = Date.now();
+    deliverPosts(accepted);
   }
 
   async function socketFrameText(frame) {
@@ -1493,13 +1792,57 @@
   }
 
   function observeSocketFrame(frame) {
+    incrementDiagnosticCounter(bridgeDiagnostics.ws, 'framesSeen');
     if (typeof frame === 'string') {
       observeSocketText(frame);
       return;
     }
-    void socketFrameText(frame).then(observeSocketText).catch(() => {
-      // The one-second primary fallback poll covers unreadable binary frames.
-    });
+    void socketFrameText(frame).then((text) => {
+      if (!text) rejectSocketFrame('unreadable');
+      else observeSocketText(text);
+    }).catch(() => rejectSocketFrame('unreadable'));
+  }
+
+  function isDeBotPortalSocket(socket, constructorArgs) {
+    const address = String(socket?.url || constructorArgs?.[0] || '').trim();
+    if (!address) return false;
+    try {
+      const url = new URL(address, window.location.origin);
+      const hostname = url.hostname.toLowerCase();
+      return hostname === 'debot.ai'
+        && (url.pathname === '/portal-ws' || url.pathname === '/portal-ws/');
+    } catch {
+      return false;
+    }
+  }
+
+  function isPortalAuthorizationSuccess(frame) {
+    if (typeof frame !== 'string') return false;
+    const text = frame.trim();
+    if (!text.startsWith('42')) return false;
+    const arrayStart = text.indexOf('[');
+    if (arrayStart < 0) return false;
+    try {
+      const packet = JSON.parse(text.slice(arrayStart));
+      return Array.isArray(packet)
+        && packet[0] === 'authorization'
+        && packet[1] === 'success';
+    } catch {
+      return false;
+    }
+  }
+
+  function subscribePortalTwitter(socket, frame) {
+    if (!isPortalAuthorizationSuccess(frame) || portalSubscribedSockets.has(socket)
+      || typeof socket?.send !== 'function') return;
+    try {
+      // DeBot's own social module sends this exact Socket.IO event after a
+      // successful authorization. No session material is inspected or copied.
+      socket.send('42["subscribe","social-user-twitter"]');
+      portalSubscribedSockets.add(socket);
+    } catch {
+      // A normal one-second REST poll remains available if a socket closes here.
+    }
   }
 
   const NativeWebSocket = window.WebSocket;
@@ -1507,7 +1850,11 @@
     window.WebSocket = new Proxy(NativeWebSocket, {
       construct(target, args) {
         const socket = Reflect.construct(target, args);
-        socket.addEventListener('message', (event) => observeSocketFrame(event.data));
+        const portalSocket = isDeBotPortalSocket(socket, args);
+        socket.addEventListener('message', (event) => {
+          if (portalSocket) subscribePortalTwitter(socket, event.data);
+          observeSocketFrame(event.data);
+        });
         return socket;
       }
     });
@@ -1533,7 +1880,9 @@
     if (message.type === 'force-poll') {
       const requestId = typeof message.requestId === 'string' ? message.requestId : '';
       if (!requestId.trim()) return;
+      const startedAt = Date.now();
       void fallbackPoll().then((result) => {
+        completeForcePollDiagnostics(result, startedAt);
         emit('force-poll-result', {
           requestId,
           ok: result?.ok === true,

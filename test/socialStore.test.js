@@ -929,7 +929,8 @@ test('versioned and legacy stale snapshots cannot revive a confirmed removal tom
   assert.equal(tombstone.desiredState, 'removed');
   assert.equal(tombstone.syncStatus, 'synced');
   assert.equal(store.listWatchlist().some((entry) => entry.handle === 'alice'), false);
-  assert.deepEqual(store.getBridgeState(), {
+  const { diagnostics, ...bridgeState } = store.getBridgeState();
+  assert.deepEqual(bridgeState, {
     bridgeId: '',
     version: '',
     capabilities: [],
@@ -939,6 +940,197 @@ test('versioned and legacy stale snapshots cannot revive a confirmed removal tom
     snapshotRevision: 3,
     lastSeenAt: null
   });
+  assert.deepEqual(diagnostics, {
+    ws: {
+      framesSeen: 0,
+      accepted: 0,
+      rejected: 0,
+      unmatchedChannel: 0,
+      invalidPacket: 0,
+      invalidEnvelope: 0,
+      unmonitoredAuthor: 0,
+      invalidEvent: 0,
+      unreadable: 0,
+      lastEventAt: null
+    },
+    poll: {
+      startedAt: null,
+      finishedAt: null,
+      elapsedMs: null,
+      rawRows: 0,
+      normalizedRows: 0,
+      droppedRows: 0,
+      accountCount: 0,
+      configHash: '',
+      latestSourceAt: null,
+      lastErrorCategory: '',
+      attempts: 0,
+      successes: 0,
+      failures: 0
+    },
+    forcePoll: {
+      successes: 0,
+      failures: 0,
+      lastAt: null,
+      elapsedMs: null,
+      lastErrorCategory: ''
+    }
+  });
+});
+
+test('bridge heartbeat diagnostics retain only bounded health counters and categories', (t) => {
+  const initialNow = Date.parse('2026-07-17T12:00:00Z');
+  const { store, setNow } = fixture(t, initialNow);
+  const bridge = store.recordBridgeHeartbeat({
+    bridgeId: 'chrome-main',
+    version: '1.3.0',
+    capabilities: ['posts', 'watchlist'],
+    diagnostics: {
+      ws: {
+        framesSeen: 123,
+        accepted: 17,
+        rejected: 106,
+        unmatchedChannel: 55,
+        invalidPacket: 10,
+        invalidEnvelope: 11,
+        unmonitoredAuthor: 20,
+        invalidEvent: 7,
+        unreadable: 3,
+        lastEventAt: initialNow - 50,
+        rawFrame: '{"secret":"must-not-persist"}'
+      },
+      poll: {
+        startedAt: initialNow - 1_000,
+        finishedAt: initialNow - 850,
+        elapsedMs: 150,
+        rawRows: 12,
+        normalizedRows: 10,
+        droppedRows: 2,
+        accountCount: 22,
+        configHash: 'ABCDEF12',
+        latestSourceAt: initialNow - 1_500,
+        lastErrorCategory: 'network',
+        attempts: 50,
+        successes: 48,
+        failures: 2,
+        payload: 'debot-cookie-value'
+      },
+      forcePoll: {
+        successes: 5,
+        failures: 1,
+        lastAt: initialNow - 500,
+        elapsedMs: 321,
+        lastErrorCategory: 'TIMEOUT',
+        credential: 'Bearer bridge-secret'
+      },
+      rawDeBotPayload: { text: 'must-not-persist' }
+    }
+  });
+
+  assert.deepEqual(bridge.diagnostics, {
+    ws: {
+      framesSeen: 123,
+      accepted: 17,
+      rejected: 106,
+      unmatchedChannel: 55,
+      invalidPacket: 10,
+      invalidEnvelope: 11,
+      unmonitoredAuthor: 20,
+      invalidEvent: 7,
+      unreadable: 3,
+      lastEventAt: initialNow - 50
+    },
+    poll: {
+      startedAt: initialNow - 1_000,
+      finishedAt: initialNow - 850,
+      elapsedMs: 150,
+      rawRows: 12,
+      normalizedRows: 10,
+      droppedRows: 2,
+      accountCount: 22,
+      configHash: 'abcdef12',
+      latestSourceAt: initialNow - 1_500,
+      lastErrorCategory: 'NETWORK',
+      attempts: 50,
+      successes: 48,
+      failures: 2
+    },
+    forcePoll: {
+      successes: 5,
+      failures: 1,
+      lastAt: initialNow - 500,
+      elapsedMs: 321,
+      lastErrorCategory: 'TIMEOUT'
+    }
+  });
+  const persisted = store.db.prepare('SELECT diagnostics_json FROM social_bridge_state WHERE singleton = 1').get();
+  assert.equal(persisted.diagnostics_json.includes('must-not-persist'), false);
+  assert.equal(persisted.diagnostics_json.includes('bridge-secret'), false);
+  assert.equal(persisted.diagnostics_json.includes('debot-cookie-value'), false);
+
+  setNow(initialNow + 1_000);
+  const legacyHeartbeat = store.recordBridgeHeartbeat({
+    bridgeId: 'chrome-main',
+    version: '1.2.0',
+    capabilities: ['posts']
+  });
+  assert.deepEqual(legacyHeartbeat.diagnostics, bridge.diagnostics);
+
+  const invalid = store.recordBridgeHeartbeat({
+    diagnostics: {
+      ws: { framesSeen: -1, accepted: Infinity, lastEventAt: 'not-a-timestamp' },
+      poll: {
+        elapsedMs: 600_001,
+        configHash: 'account-identifiers-must-not-be-saved',
+        lastErrorCategory: 'some-error-text-that-is-not-a-category'
+      },
+      forcePoll: { elapsedMs: -1, lastErrorCategory: 'AUTH' }
+    }
+  });
+  assert.deepEqual(invalid.diagnostics.ws, {
+    framesSeen: 0,
+    accepted: 0,
+    rejected: 0,
+    unmatchedChannel: 0,
+    invalidPacket: 0,
+    invalidEnvelope: 0,
+    unmonitoredAuthor: 0,
+    invalidEvent: 0,
+    unreadable: 0,
+    lastEventAt: null
+  });
+  assert.equal(invalid.diagnostics.poll.elapsedMs, null);
+  assert.equal(invalid.diagnostics.poll.configHash, '');
+  assert.equal(invalid.diagnostics.poll.lastErrorCategory, '');
+  assert.equal(invalid.diagnostics.forcePoll.elapsedMs, null);
+  assert.equal(invalid.diagnostics.forcePoll.lastErrorCategory, 'AUTH');
+});
+
+test('existing bridge state databases migrate diagnostics without resetting heartbeat state', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-social-bridge-diagnostics-migration-'));
+  const filename = path.join(directory, 'social.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  let store = createSocialStore(filename);
+  store.recordBridgeHeartbeat({
+    bridgeId: 'legacy-browser',
+    version: '1.2.0',
+    capabilities: ['posts'],
+    sessionId: 'legacy-session'
+  });
+  store.close();
+
+  const legacy = new DatabaseSync(filename);
+  legacy.exec('ALTER TABLE social_bridge_state DROP COLUMN diagnostics_json');
+  legacy.close();
+
+  store = createSocialStore(filename);
+  t.after(() => store.close());
+  const columns = store.db.prepare('PRAGMA table_info(social_bridge_state)').all().map((column) => column.name);
+  assert.equal(columns.includes('diagnostics_json'), true);
+  assert.equal(store.getBridgeState().bridgeId, 'legacy-browser');
+  assert.equal(store.getBridgeState().sessionId, 'legacy-session');
+  assert.equal(store.getBridgeState().diagnostics.poll.accountCount, 0);
 });
 
 test('legacy snapshots cannot remove accounts added by a newer versioned snapshot', (t) => {

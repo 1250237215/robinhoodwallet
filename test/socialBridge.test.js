@@ -64,6 +64,7 @@ class FakeWebSocket {
   constructor(url) {
     this.url = url;
     this.listeners = new Map();
+    this.sent = [];
   }
 
   addEventListener(type, listener) {
@@ -73,6 +74,10 @@ class FakeWebSocket {
 
   receive(data) {
     for (const listener of this.listeners.get('message') || []) listener({ data });
+  }
+
+  send(data) {
+    this.sent.push(data);
   }
 }
 
@@ -92,6 +97,18 @@ function timelinePost(id, text = `timeline post ${id}`) {
     platform: 0,
     user: { id: 'timeline-author', username: 'timeline_user', name: 'Timeline User' },
     tweet: { tweet_id: String(id), text, date: 1_784_300_000 }
+  };
+}
+
+function personalTwitterWatchlist(handle, configId = 42) {
+  return {
+    list: [{
+      platform: 0,
+      monitor_object: handle,
+      config_name: handle,
+      config_id: configId
+    }],
+    total: 1
   };
 }
 
@@ -244,7 +261,7 @@ function createTimelineBridgeHarness(initialHandler, {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.3.0');
+  assert.equal(manifest.version, '1.4.0');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -578,13 +595,19 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     hot_subscribe_id: 7,
     monitor_level: 'high'
   };
+  const starAccount = {
+    platform: 0,
+    monitor_object: 'star_okx',
+    config_name: 'Star OKX',
+    config_id: 45
+  };
   const personalPollPost = {
     doc_id: '1900000000000000001',
     platform: 0,
     user: { id: 'personal-author', username: 'personal_author', name: 'Personal Author', followers_count: 10 },
     tweet: { tweet_id: '1900000000000000001', text: 'Personal timeline survived', date: 1_784_300_001 }
   };
-  let subscribedAccounts = [account];
+  let subscribedAccounts = [account, starAccount];
   let preserveRemovedAccounts = false;
   let resolveDeferredPrimary = null;
   let fetchMode = 'ok';
@@ -697,6 +720,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.requestId === 'page-personal-probe'
       && message.payload.ok === true)));
   const personalHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
+  assert.equal(personalHeartbeat.payload.version, '1.4.0');
   assert.deepEqual(Array.from(personalHeartbeat.payload.capabilities), [
     'posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1'
   ]);
@@ -810,6 +834,66 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     type: 'posts-delivery-result',
     payload: { deliveryId: delivery.payload.deliveryId, ok: true }
   });
+
+  const versionedSocketId = '1900000000000000101';
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter-v2',
+    {
+      payload: {
+        data: {
+          ...incoming,
+          doc_id: versionedSocketId,
+          tweet: { ...incoming.tweet, tweet_id: versionedSocketId }
+        }
+      }
+    }
+  ])}`);
+  const versionedDelivery = deliveryFor(versionedSocketId);
+  assert.ok(versionedDelivery);
+  acknowledge(versionedDelivery);
+
+  const objectEnvelopeSocketId = '1900000000000000102';
+  socket.receive(JSON.stringify({
+    channel: 'social-twitter-user-v2',
+    data: JSON.stringify({
+      data: {
+        ...incoming,
+        doc_id: objectEnvelopeSocketId,
+        tweet: { ...incoming.tweet, tweet_id: objectEnvelopeSocketId }
+      }
+    })
+  }));
+  const objectEnvelopeDelivery = deliveryFor(objectEnvelopeSocketId);
+  assert.ok(objectEnvelopeDelivery);
+  acknowledge(objectEnvelopeDelivery);
+
+  const beforeUnmonitoredSocketAuthor = window.messages.filter((message) => message.type === 'posts').length;
+  socket.receive(`42${JSON.stringify([
+    'social-user-twitter-v2',
+    {
+      Payload: JSON.stringify({
+        data: {
+          ...incoming,
+          doc_id: '1900000000000000103',
+          user: { ...incoming.user, username: 'not_watched' },
+          tweet: { ...incoming.tweet, tweet_id: '1900000000000000103' }
+        }
+      })
+    }
+  ])}`);
+  assert.equal(window.messages.filter((message) => message.type === 'posts').length, beforeUnmonitoredSocketAuthor);
+
+  const portalSocket = new window.WebSocket('wss://debot.ai/portal-ws/?EIO=4&transport=websocket');
+  portalSocket.receive('42["authorization","denied"]');
+  assert.deepEqual(Array.from(portalSocket.sent), []);
+  portalSocket.receive('42["authorization","success"]');
+  assert.deepEqual(Array.from(portalSocket.sent), ['42["subscribe","social-user-twitter"]']);
+  portalSocket.receive('42["authorization","success"]');
+  assert.equal(portalSocket.sent.length, 1);
+
+  const nonPortalSocket = new window.WebSocket('wss://debot.ai/socket.io/?EIO=4&transport=websocket');
+  nonPortalSocket.receive('42["authorization","success"]');
+  assert.equal(nonPortalSocket.sent.length, 0);
 
   const followPayload = {
     doc_id: 'Zm9sbG93OnN0YXJfb2t4OmVuem9pbnNpZGVlOjE3ODQzMDAwMDIwMDA',
@@ -1230,6 +1314,15 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const recoveredHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
   assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
   assert.equal(Object.hasOwn(recoveredHeartbeat.payload, 'error'), false);
+  assert.equal(recoveredHeartbeat.payload.version, '1.4.0');
+  assert.equal(recoveredHeartbeat.payload.diagnostics.poll.accountCount >= 0, true);
+  assert.equal(recoveredHeartbeat.payload.diagnostics.poll.rawRows >= 0, true);
+  assert.equal(recoveredHeartbeat.payload.diagnostics.poll.normalizedRows >= 0, true);
+  assert.equal(recoveredHeartbeat.payload.diagnostics.poll.droppedRows >= 0, true);
+  assert.equal(recoveredHeartbeat.payload.diagnostics.ws.framesSeen > 0, true);
+  assert.equal(recoveredHeartbeat.payload.diagnostics.ws.accepted > 0, true);
+  assert.equal(recoveredHeartbeat.payload.diagnostics.ws.unmonitoredAuthor > 0, true);
+  assert.equal(JSON.stringify(recoveredHeartbeat.payload.diagnostics).includes('must-not-leave-the-page'), false);
 });
 
 test('personal timeline delivers the newest page without waiting for encoded cursor recovery', async () => {
@@ -1364,7 +1457,10 @@ test('personal timeline recovery does not let a newer WebSocket event hide an ol
     feeds: [timelinePost(baselineId)],
     has_more: false,
     next_cursor: ''
-  }), { autoAcknowledge: true });
+  }), {
+    autoAcknowledge: true,
+    initialWatchlistHandler: async () => personalTwitterWatchlist('timeline_user')
+  });
 
   await eventually(() => assert.ok(harness.window.messages.some((message) =>
     message.type === 'posts' && message.payload.posts.some((post) => post.externalId === baselineId))));
@@ -1492,6 +1588,8 @@ test('personal timeline freezes its healthy boundary before outage WebSocket del
       throw new Error('Catch-up continued after reaching the frozen healthy boundary');
     }
     throw new Error(`Unexpected recovery cursor: ${cursor}`);
+  }, {
+    initialWatchlistHandler: async () => personalTwitterWatchlist('timeline_user')
   });
 
   await eventually(() => assert.equal(harness.timelineCalls().length, 1));
@@ -1625,7 +1723,9 @@ test('DeBot social timestamps normalize seconds through nanoseconds to epoch mil
     ['1910000000000000503', '1784300123456000'],
     ['1910000000000000504', '1784300123456000000']
   ];
-  const harness = createTimelineBridgeHarness(async () => ({ feeds: [], has_more: false, next_cursor: '' }));
+  const harness = createTimelineBridgeHarness(async () => ({ feeds: [], has_more: false, next_cursor: '' }), {
+    initialWatchlistHandler: async () => personalTwitterWatchlist('timestamp_user')
+  });
   await eventually(() => assert.equal(harness.timelineCalls().length, 1));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -1685,7 +1785,9 @@ test('a REST timeline observation enriches an acknowledged WebSocket post with U
       : [],
     has_more: false,
     next_cursor: ''
-  }));
+  }), {
+    initialWatchlistHandler: async () => personalTwitterWatchlist('enriched_user')
+  });
   await eventually(() => assert.equal(harness.timelineCalls().length, 1));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -1697,8 +1799,13 @@ test('a REST timeline observation enriches an acknowledged WebSocket post with U
         data: {
           doc_id: externalId,
           platform: 0,
-          user: { id: 'enriched-user-id' },
-          tweet: { tweet_id: externalId, text: 'same post content', date: publishedAt }
+          user: { id: 'enriched-user-id', username: 'enriched_user' },
+          tweet: {
+            tweet_id: externalId,
+            text: 'same post content',
+            date: publishedAt,
+            link: 'https://t.co/pending-enrichment'
+          }
         }
       })
     }
@@ -1710,7 +1817,7 @@ test('a REST timeline observation enriches an acknowledged WebSocket post with U
     .find((message) => message.type === 'posts'
       && message.payload.posts.some((post) => post.externalId === externalId))
     .payload.posts.find((post) => post.externalId === externalId);
-  assert.equal(simplePost.url, '');
+  assert.equal(simplePost.url, 'https://t.co/pending-enrichment');
   assert.equal(simplePost.media.length, 0);
   harness.acknowledgeAll();
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -3200,12 +3307,69 @@ test('background uses the bridge secret only as authorization and submits allowl
       bridgeId: 'test',
       capabilities: ['posts'],
       cookie: 'debot-cookie-value',
-      error: 'authorization: Bearer debot-auth-value; sub_token=debot-session-value'
+      error: 'authorization: Bearer debot-auth-value; sub_token=debot-session-value',
+      diagnostics: {
+        ws: {
+          framesSeen: 20,
+          accepted: 3,
+          rawFrame: 'sub_token=must-not-leave-the-page'
+        },
+        poll: {
+          rawRows: 8,
+          normalizedRows: 5,
+          accountCount: 22,
+          configHash: 'A1B2C3D4',
+          lastErrorCategory: 'NETWORK',
+          rawResponse: 'cookie=must-not-leave-the-page'
+        },
+        forcePoll: {
+          successes: 1,
+          failures: 0,
+          lastErrorCategory: 'not-an-allowed-error'
+        }
+      }
     }
   });
   const heartbeatBody = requests.at(-1).options.body;
   assert.equal(/debot-(?:cookie|session|auth)-value/.test(heartbeatBody), false);
+  assert.equal(heartbeatBody.includes('must-not-leave-the-page'), false);
   assert.match(heartbeatBody, /\[redacted\]/);
+  assert.deepEqual(JSON.parse(heartbeatBody).diagnostics, {
+    ws: {
+      framesSeen: 20,
+      accepted: 3,
+      rejected: 0,
+      unmatchedChannel: 0,
+      invalidPacket: 0,
+      invalidEnvelope: 0,
+      unmonitoredAuthor: 0,
+      invalidEvent: 0,
+      unreadable: 0,
+      lastEventAt: 0
+    },
+    poll: {
+      startedAt: 0,
+      finishedAt: 0,
+      elapsedMs: 0,
+      rawRows: 8,
+      normalizedRows: 5,
+      droppedRows: 0,
+      accountCount: 22,
+      configHash: 'a1b2c3d4',
+      latestSourceAt: 0,
+      lastErrorCategory: 'NETWORK',
+      attempts: 0,
+      successes: 0,
+      failures: 0
+    },
+    forcePoll: {
+      successes: 1,
+      failures: 0,
+      lastAt: 0,
+      elapsedMs: 0,
+      lastErrorCategory: ''
+    }
+  });
 
   await send({
     source: 'debot-social-relay',
