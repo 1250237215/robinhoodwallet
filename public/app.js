@@ -86,11 +86,13 @@ const SOCIAL_SEARCH_DEBOUNCE_MS = 180;
 const SOCIAL_STREAM_RETRY_INITIAL_MS = 250;
 const SOCIAL_STREAM_RETRY_MAX_MS = 2_000;
 const SOCIAL_STATUS_REFRESH_MS = 2_000;
-const SOCIAL_STATUS_TIMEOUT_MS = 1_500;
+const SOCIAL_STATUS_TIMEOUT_MS = 3_000;
 const SOCIAL_SNAPSHOT_TIMEOUT_MS = 5_000;
 const SOCIAL_STREAM_STALE_MS = 35_000;
 const SOCIAL_RECOVERY_RETRY_MS = 3_000;
 const SOCIAL_REALTIME_HEARTBEAT_MAX_AGE_MS = 45_000;
+const SOCIAL_TRANSIENT_BRIDGE_ERROR_GRACE_MS = 8_000;
+const SOCIAL_TRANSIENT_BRIDGE_ERROR_CATEGORIES = new Set(['TIMEOUT', 'NETWORK', 'DEBOT']);
 const SOCIAL_WATCHLIST_SNAPSHOT_RETRY_MS = Object.freeze([100, 2_000, 4_000, 8_000]);
 const SOCIAL_DEFERRED_POST_LIMIT = 500;
 const SOCIAL_DEFERRED_POST_MAX_AGE_MS = 2 * 60_000;
@@ -433,6 +435,7 @@ const state = {
   socialWatchlist: [],
   socialBridge: { state: 'loading', paired: false, online: false, readOnly: true },
   socialBridgeObservedAt: null,
+  socialBridgeTransientErrorStartedAt: null,
   socialCounts: {},
   socialSearchQuery: '',
   socialSearchTimer: null,
@@ -1874,15 +1877,35 @@ function sortSocialWatchlistByAdded(entries) {
   });
 }
 
+function socialBridgeErrorCategory(bridge = state.socialBridge) {
+  const diagnostics = bridge?.diagnostics;
+  return String(bridge?.error || diagnostics?.poll?.lastErrorCategory || '').trim().toUpperCase();
+}
+
 function applySocialBridgeStatus(bridge) {
   if (!bridge || typeof bridge !== 'object') return;
-  state.socialBridge = { ...state.socialBridge, ...bridge };
+  const previousCategory = socialBridgeErrorCategory();
+  const nextBridge = { ...state.socialBridge, ...bridge };
+  const nextCategory = socialBridgeErrorCategory(nextBridge);
+  const previousTransient = SOCIAL_TRANSIENT_BRIDGE_ERROR_CATEGORIES.has(previousCategory);
+  const nextTransient = SOCIAL_TRANSIENT_BRIDGE_ERROR_CATEGORIES.has(nextCategory);
+  if (nextTransient && (!previousTransient || state.socialBridgeTransientErrorStartedAt === null)) {
+    state.socialBridgeTransientErrorStartedAt = performance.now();
+  } else if (!nextTransient) {
+    state.socialBridgeTransientErrorStartedAt = null;
+  }
+  state.socialBridge = nextBridge;
   state.socialBridgeObservedAt = performance.now();
 }
 
 function markSocialStreamActivity() {
   state.socialLastStreamActivityAt = performance.now();
   state.socialReconnectAttempt = 0;
+}
+
+function socialStreamIsRecent() {
+  if (state.socialTransport !== 'sse' || state.socialLastStreamActivityAt === null) return false;
+  return performance.now() - state.socialLastStreamActivityAt <= SOCIAL_STREAM_STALE_MS;
 }
 
 function completeSocialRecovery(remoteLatestChangeId = state.socialLatestChangeId) {
@@ -2328,24 +2351,37 @@ function renderSocialBridgeStatus() {
     : Boolean(bridge.online);
   const streamConnected = state.socialTransport === 'sse';
   const streamLive = streamConnected && bridge.online && heartbeatCurrent;
-  const stateName = !state.socialConnected
-    ? 'loading'
-    : bridge.state === 'error'
-      ? 'error'
-      : bridge.online && !heartbeatCurrent
+  const bridgeErrorCategory = socialBridgeErrorCategory(bridge);
+  const authError = bridgeErrorCategory === 'AUTH';
+  const transientBridgeIssue = SOCIAL_TRANSIENT_BRIDGE_ERROR_CATEGORIES.has(bridgeErrorCategory);
+  const transientErrorStartedAt = finiteNumber(state.socialBridgeTransientErrorStartedAt);
+  const transientErrorInGrace = transientBridgeIssue
+    && transientErrorStartedAt !== null
+    && performance.now() - transientErrorStartedAt <= SOCIAL_TRANSIENT_BRIDGE_ERROR_GRACE_MS;
+  const transientBridgeDegraded = transientBridgeIssue
+    && ((bridge.state === 'error' && transientErrorInGrace) || (bridge.online && heartbeatCurrent));
+  const stateName = authError
+    ? 'error'
+    : !state.socialConnected
+      ? 'loading'
+      : transientBridgeDegraded
         ? 'delayed'
-      : bridge.online
-      ? 'online'
-      : bridge.paired
-        ? 'offline'
-        : 'unpaired';
+        : bridge.state === 'error'
+          ? 'error'
+          : bridge.online && !heartbeatCurrent
+            ? 'delayed'
+            : bridge.online
+              ? 'online'
+              : bridge.paired
+                ? 'offline'
+                : 'unpaired';
   elements.socialBridgeBadge.dataset.state = stateName;
   elements.socialBridgeLabel.textContent = stateName === 'loading'
     ? state.socialTransport === 'reconnecting' ? '正在重连' : state.socialStarted ? '正在连接' : '等待连接'
     : stateName === 'error'
-      ? 'DeBot 异常'
+      ? authError ? 'DeBot 需要重新登录' : 'DeBot 异常'
     : stateName === 'delayed'
-      ? '社媒延迟'
+      ? transientBridgeDegraded ? 'REST 补漏波动' : '社媒延迟'
     : stateName === 'online'
       ? streamLive ? '社媒实时' : state.socialTransport === 'reconnecting' ? '正在重连' : 'DeBot 已连接'
       : stateName === 'offline'
@@ -3218,7 +3254,7 @@ async function loadSocialStatus(expectedSequence = state.socialSequence) {
     renderSocialWatchlist();
   } catch {
     if (!socialLifecycleIsCurrent(expectedSequence)) return;
-    state.socialConnected = false;
+    if (!socialStreamIsRecent()) state.socialConnected = false;
     renderSocialBridgeStatus();
   } finally {
     clearTimeout(timeout);
@@ -3388,6 +3424,7 @@ function stopSocialMonitor() {
   state.socialStatusRequestSequence += 1;
   state.socialStatusBusy = false;
   state.socialLastStreamActivityAt = null;
+  state.socialBridgeTransientErrorStartedAt = null;
   state.socialRecoveryBusy = false;
   state.socialRecoveryStartedAt = null;
   state.socialRecoveryTargetId = 0;

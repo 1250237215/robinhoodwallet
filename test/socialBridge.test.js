@@ -89,6 +89,14 @@ class FakeWebSocket {
     for (const listener of this.listeners.get('message') || []) listener({ data });
   }
 
+  close() {
+    for (const listener of this.listeners.get('close') || []) listener({ type: 'close' });
+  }
+
+  fail() {
+    for (const listener of this.listeners.get('error') || []) listener({ type: 'error' });
+  }
+
   send(data) {
     this.sent.push(data);
   }
@@ -271,10 +279,17 @@ function createTimelineBridgeHarness(initialHandler, {
   };
 }
 
+function timelineFailure(errorType) {
+  const error = new Error(errorType);
+  error.errorType = errorType;
+  if (errorType === 'TIMEOUT') error.name = 'AbortError';
+  return error;
+}
+
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.8.0');
+  assert.equal(manifest.version, '1.8.1');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms', 'scripting']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -296,6 +311,8 @@ test('extension manifest, configuration and scripts are valid and narrowly scope
   const optionsSource = bridgeSource('options.js');
   assert.match(pageSource, /const PRIMARY_POLL_INTERVAL_MS = 1_000/);
   assert.match(pageSource, /const PRIMARY_API_TIMEOUT_MS = 1_500/);
+  assert.match(pageSource, /const PRIMARY_TRANSIENT_ERROR_MIN_FAILURES = 3/);
+  assert.match(pageSource, /const PRIMARY_TRANSIENT_ERROR_MIN_DURATION_MS = 8_000/);
   assert.match(pageSource, /const TIMELINE_PAGE_SIZE = 50/);
   assert.match(pageSource, /const TIMELINE_CATCHUP_PAGES_PER_POLL = 3/);
   assert.match(pageSource, /const TIMELINE_CATCHUP_MAX_PAGES = 100/);
@@ -323,6 +340,154 @@ test('extension manifest, configuration and scripts are valid and narrowly scope
     });
     assert.equal(checked.status, 0, `${filename}: ${checked.stderr}`);
   }
+});
+
+test('one transient personal-timeline timeout stays healthy and records diagnostics', async () => {
+  let mode = 'healthy';
+  const harness = createTimelineBridgeHarness(async () => {
+    if (mode === 'timeout') throw timelineFailure('TIMEOUT');
+    return { feeds: [], has_more: false, next_cursor: '' };
+  });
+  await eventually(() => assert.ok(harness.window.messages.some((message) => message.type === 'heartbeat')));
+
+  mode = 'timeout';
+  harness.window.messages.length = 0;
+  const result = await harness.forcePoll('single-timeout');
+  assert.equal(result.ok, false);
+  assert.equal(result.errorType, 'TIMEOUT');
+  const heartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
+  assert.equal(heartbeat.payload.capabilities.includes('error'), false);
+  assert.equal(heartbeat.payload.capabilities.includes('posts'), true);
+  assert.equal(heartbeat.payload.error, undefined);
+  assert.equal(heartbeat.payload.diagnostics.poll.lastErrorCategory, 'TIMEOUT');
+});
+
+test('a failed primary poll drops its queued immediate follow-up until the next interval', async () => {
+  let mode = 'healthy';
+  let rejectPending = null;
+  const harness = createTimelineBridgeHarness(async () => {
+    if (mode === 'pending-failure') {
+      return new Promise((_resolve, reject) => {
+        rejectPending = reject;
+      });
+    }
+    return { feeds: [], has_more: false, next_cursor: '' };
+  });
+  await eventually(() => assert.ok(harness.window.messages.some((message) => message.type === 'heartbeat')));
+  const primaryInterval = harness.intervals.find((interval) => interval.delay === 1_000);
+  const callsBeforeFailure = harness.timelineCalls().length;
+
+  mode = 'pending-failure';
+  primaryInterval.callback();
+  await eventually(() => assert.equal(typeof rejectPending, 'function'));
+  primaryInterval.callback();
+  assert.equal(harness.timelineCalls().length, callsBeforeFailure + 1);
+  rejectPending(timelineFailure('NETWORK'));
+  await eventually(() => assert.equal(
+    harness.window.messages.findLast((message) => message.type === 'heartbeat')
+      .payload.diagnostics.poll.lastErrorCategory,
+    'NETWORK'
+  ));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(harness.timelineCalls().length, callsBeforeFailure + 1);
+
+  mode = 'healthy';
+  primaryInterval.callback();
+  await eventually(() => assert.equal(harness.timelineCalls().length, callsBeforeFailure + 2));
+});
+
+test('an authorized portal WebSocket keeps repeated transient timeline failures healthy', async () => {
+  let mode = 'healthy';
+  const harness = createTimelineBridgeHarness(async () => {
+    if (mode === 'network') throw timelineFailure('NETWORK');
+    return { feeds: [], has_more: false, next_cursor: '' };
+  });
+  await eventually(() => assert.ok(harness.window.messages.some((message) => message.type === 'heartbeat')));
+  const portal = new harness.window.WebSocket('wss://debot.ai/portal-ws/?EIO=4&transport=websocket');
+  portal.open();
+  portal.receive('42["authorization","success"]');
+
+  mode = 'network';
+  harness.window.messages.length = 0;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (attempt) harness.advance(4_000);
+    assert.equal((await harness.forcePoll(`authorized-network-${attempt}`)).ok, false);
+    const heartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
+    assert.equal(heartbeat.payload.capabilities.includes('error'), false);
+    assert.equal(heartbeat.payload.capabilities.includes('posts'), true);
+    assert.equal(heartbeat.payload.diagnostics.poll.lastErrorCategory, 'NETWORK');
+  }
+});
+
+test('transient timeline failures require count and duration without a healthy portal socket', async () => {
+  for (const termination of ['close', 'fail']) {
+    let mode = 'healthy';
+    const harness = createTimelineBridgeHarness(async () => {
+      if (mode === 'network') throw timelineFailure('NETWORK');
+      return { feeds: [], has_more: false, next_cursor: '' };
+    });
+    await eventually(() => assert.ok(harness.window.messages.some((message) => message.type === 'heartbeat')));
+    const portal = new harness.window.WebSocket('wss://debot.ai/portal-ws/?EIO=4&transport=websocket');
+    portal.open();
+    portal.receive('42["authorization","success"]');
+    portal[termination]();
+
+    mode = 'network';
+    harness.window.messages.length = 0;
+    assert.equal((await harness.forcePoll(`${termination}-failure-1`)).ok, false);
+    assert.equal(harness.window.messages.findLast((message) => message.type === 'heartbeat')
+      .payload.capabilities.includes('error'), false);
+    harness.advance(4_000);
+    assert.equal((await harness.forcePoll(`${termination}-failure-2`)).ok, false);
+    assert.equal(harness.window.messages.findLast((message) => message.type === 'heartbeat')
+      .payload.capabilities.includes('error'), false);
+    harness.advance(4_000);
+    assert.equal((await harness.forcePoll(`${termination}-failure-3`)).ok, false);
+    const failedHeartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
+    assert.deepEqual(Array.from(failedHeartbeat.payload.capabilities), ['debot-analysis-v1', 'error']);
+    assert.equal(failedHeartbeat.payload.error, 'NETWORK');
+
+    mode = 'healthy';
+    assert.equal((await harness.forcePoll(`${termination}-recovered`)).ok, true);
+    const recoveredHeartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
+    assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
+
+    mode = 'network';
+    harness.advance(9_000);
+    assert.equal((await harness.forcePoll(`${termination}-failure-after-reset`)).ok, false);
+    const resetHeartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
+    assert.equal(resetHeartbeat.payload.capabilities.includes('error'), false);
+  }
+});
+
+test('authentication failures report immediately without changing the page-session identity', async () => {
+  let mode = 'healthy';
+  const harness = createTimelineBridgeHarness(async () => {
+    if (mode === 'auth') throw timelineFailure('AUTH');
+    return { feeds: [], has_more: false, next_cursor: '' };
+  });
+  await eventually(() => assert.ok(harness.window.messages.some((message) => message.type === 'heartbeat')));
+  const healthyHeartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
+  const sessionId = healthyHeartbeat.payload.sessionId;
+  assert.match(sessionId, /^[a-z0-9]+-[a-z0-9]+$/);
+
+  mode = 'auth';
+  harness.advance(1_000);
+  harness.window.messages.length = 0;
+  const result = await harness.forcePoll('auth-failure');
+  assert.equal(result.ok, false);
+  assert.equal(result.errorType, 'AUTH');
+  const heartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
+  assert.deepEqual(Array.from(heartbeat.payload.capabilities), ['debot-analysis-v1', 'error']);
+  assert.equal(heartbeat.payload.error, 'AUTH');
+  assert.equal(heartbeat.payload.sessionId, sessionId);
+
+  mode = 'healthy';
+  harness.advance(1_000);
+  assert.equal((await harness.forcePoll('auth-recovered')).ok, true);
+  const recoveredHeartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
+  assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
+  assert.equal(recoveredHeartbeat.payload.sessionId, sessionId);
 });
 
 test('extension service worker has no unsupported async module loading', async () => {
@@ -811,7 +976,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.requestId === 'page-personal-probe'
       && message.payload.ok === true)));
   const personalHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.equal(personalHeartbeat.payload.version, '1.8.0');
+  assert.equal(personalHeartbeat.payload.version, '1.8.1');
   assert.deepEqual(Array.from(personalHeartbeat.payload.capabilities), [
     'posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1'
   ]);
@@ -1711,7 +1876,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   assert.match(rejectedRemoval.payload.error, /still contains the deleted account/);
   preserveRemovedAccounts = false;
 
-  for (const [mode, errorType] of [['network', 'NETWORK'], ['timeout', 'TIMEOUT'], ['auth', 'AUTH']]) {
+  for (const [mode, errorType] of [['network', 'NETWORK'], ['timeout', 'TIMEOUT']]) {
     fetchMode = mode;
     window.messages.length = 0;
     window.dispatchMessage({
@@ -1724,11 +1889,30 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
         && message.payload.requestId === `page-${mode}-probe`
         && message.payload.ok === false
         && message.payload.errorType === errorType)));
-    const errorHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-    assert.deepEqual(Array.from(errorHeartbeat.payload.capabilities), ['debot-analysis-v1', 'error']);
-    assert.equal(errorHeartbeat.payload.error, errorType);
-    assert.equal(JSON.stringify(errorHeartbeat).includes('must-not-leave-the-page'), false);
+    const degradedHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
+    assert.equal(degradedHeartbeat.payload.capabilities.includes('error'), false);
+    assert.equal(degradedHeartbeat.payload.capabilities.includes('posts'), true);
+    assert.equal(degradedHeartbeat.payload.error, undefined);
+    assert.equal(degradedHeartbeat.payload.diagnostics.poll.lastErrorCategory, errorType);
+    assert.equal(JSON.stringify(degradedHeartbeat).includes('must-not-leave-the-page'), false);
   }
+
+  fetchMode = 'auth';
+  window.messages.length = 0;
+  window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'force-poll',
+    requestId: 'page-auth-probe'
+  });
+  await eventually(() => assert.ok(window.messages.some((message) =>
+    message.type === 'force-poll-result'
+      && message.payload.requestId === 'page-auth-probe'
+      && message.payload.ok === false
+      && message.payload.errorType === 'AUTH')));
+  const authHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
+  assert.deepEqual(Array.from(authHeartbeat.payload.capabilities), ['debot-analysis-v1', 'error']);
+  assert.equal(authHeartbeat.payload.error, 'AUTH');
+  assert.equal(JSON.stringify(authHeartbeat).includes('must-not-leave-the-page'), false);
 
   fetchMode = 'ok';
   window.messages.length = 0;
@@ -1744,7 +1928,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const recoveredHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
   assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
   assert.equal(Object.hasOwn(recoveredHeartbeat.payload, 'error'), false);
-  assert.equal(recoveredHeartbeat.payload.version, '1.8.0');
+  assert.equal(recoveredHeartbeat.payload.version, '1.8.1');
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.accountCount >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.rawRows >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.normalizedRows >= 0, true);
@@ -1864,10 +2048,18 @@ test('personal timeline recovers when has_more omits its required cursor', async
     next_cursor: ''
   }));
 
-  await eventually(() => assert.ok(harness.window.messages.some((message) =>
-    message.type === 'heartbeat'
-      && message.payload.capabilities.includes('error')
-      && message.payload.error === 'DEBOT')));
+  await eventually(() => assert.ok(harness.window.messages.some((message) => message.type === 'heartbeat')));
+  assert.equal(harness.window.messages.findLast((message) => message.type === 'heartbeat')
+    .payload.capabilities.includes('error'), false);
+  harness.advance(4_000);
+  assert.equal((await harness.forcePoll('missing-cursor-failure-2')).ok, false);
+  assert.equal(harness.window.messages.findLast((message) => message.type === 'heartbeat')
+    .payload.capabilities.includes('error'), false);
+  harness.advance(4_000);
+  assert.equal((await harness.forcePoll('missing-cursor-failure-3')).ok, false);
+  const failedHeartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
+  assert.equal(failedHeartbeat.payload.capabilities.includes('error'), true);
+  assert.equal(failedHeartbeat.payload.error, 'DEBOT');
   assert.equal(harness.window.messages.some((message) => message.type === 'posts'), false);
 
   harness.setHandler(async () => ({ feeds: [timelinePost(recoveredId)], has_more: false, next_cursor: '' }));
@@ -2054,7 +2246,10 @@ test('personal timeline freezes its healthy boundary before outage WebSocket del
     harness.window.messages.filter((message) => message.type === 'heartbeat').length,
     heartbeatsBeforeFocus + 1
   ));
-  assert.equal(harness.window.messages.findLast((message) => message.type === 'heartbeat').payload.error, 'NETWORK');
+  const secondOutageHeartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
+  assert.equal(secondOutageHeartbeat.payload.error, undefined);
+  assert.equal(secondOutageHeartbeat.payload.capabilities.includes('error'), false);
+  assert.equal(secondOutageHeartbeat.payload.diagnostics.poll.lastErrorCategory, 'NETWORK');
 
   phase = 'recovered';
   const recoveryCallIndex = harness.timelineCalls().length;
@@ -2129,7 +2324,7 @@ test('a changed personal watchlist forces catch-up with an empty prior-account b
   await eventually(() => assert.equal(
     harness.window.messages.filter((message) =>
       message.type === 'heartbeat' && message.payload.capabilities.includes('error')).length,
-    errorHeartbeatsBeforeRefresh + 1
+    errorHeartbeatsBeforeRefresh
   ));
 
   timelinePhase = 'recovered';
@@ -3005,6 +3200,70 @@ test('relay transports only supported page events and delivers claimed commands 
   const before = runtimeMessages.length;
   window.dispatchMessage({ source: 'unknown-page', type: 'posts', payload: {} });
   assert.equal(runtimeMessages.length, before);
+});
+
+test('relay serializes heartbeat uploads and only keeps the latest queued state', async () => {
+  const window = new FakeWindow('https://debot.ai');
+  const heartbeatCalls = [];
+  let activeHeartbeats = 0;
+  let maximumActiveHeartbeats = 0;
+  const chrome = {
+    runtime: {
+      id: 'extension-test-id',
+      sendMessage(message) {
+        if (message.type !== 'heartbeat') return Promise.resolve({ ok: true, payload: {} });
+        activeHeartbeats += 1;
+        maximumActiveHeartbeats = Math.max(maximumActiveHeartbeats, activeHeartbeats);
+        let settle;
+        const promise = new Promise((resolve, reject) => {
+          settle = (method, value) => {
+            activeHeartbeats -= 1;
+            method(value);
+          };
+          heartbeatCalls.push({
+            message,
+            resolve: (value = { ok: true }) => settle(resolve, value),
+            reject: (error = new Error('upload failed')) => settle(reject, error)
+          });
+        });
+        return promise;
+      },
+      onMessage: { addListener() {} }
+    }
+  };
+  vm.runInNewContext(bridgeSource('debot-relay.js'), {
+    window,
+    chrome,
+    setInterval: () => 1,
+    setTimeout,
+    clearTimeout
+  }, { filename: 'debot-relay.js' });
+
+  const sendHeartbeat = (state) => window.dispatchMessage({
+    source: 'debot-social-page',
+    type: 'heartbeat',
+    payload: { state }
+  });
+
+  sendHeartbeat('A');
+  assert.equal(heartbeatCalls.length, 1);
+  sendHeartbeat('B');
+  sendHeartbeat('C');
+  assert.equal(heartbeatCalls.length, 1);
+  heartbeatCalls[0].reject();
+  await eventually(() => assert.equal(heartbeatCalls.length, 2));
+  assert.equal(heartbeatCalls[1].message.payload.state, 'C');
+
+  sendHeartbeat('D');
+  sendHeartbeat('E');
+  heartbeatCalls[1].resolve();
+  await eventually(() => assert.equal(heartbeatCalls.length, 3));
+  assert.equal(heartbeatCalls[2].message.payload.state, 'E');
+  heartbeatCalls[2].resolve();
+  await eventually(() => assert.equal(activeHeartbeats, 0));
+
+  assert.deepEqual(heartbeatCalls.map((call) => call.message.payload.state), ['A', 'C', 'E']);
+  assert.equal(maximumActiveHeartbeats, 1);
 });
 
 test('relay claims at most four analysis jobs, validates claim tokens and refills immediately', async () => {

@@ -1195,6 +1195,10 @@ test('social monitoring is a personal-watchlist feed without global feed, source
   assert.match(indexHtml, /id="social-bridge-badge"[^>]*data-state="loading"/);
   assert.match(appJs, /bridge\.state === 'error'/);
   assert.match(appJs, /'DeBot 异常'/);
+  assert.match(appJs, /'DeBot 需要重新登录'/);
+  assert.match(appJs, /'REST 补漏波动'/);
+  assert.match(appJs, /SOCIAL_TRANSIENT_BRIDGE_ERROR_GRACE_MS = 8_000/);
+  assert.match(appJs, /SOCIAL_TRANSIENT_BRIDGE_ERROR_CATEGORIES = new Set\(\['TIMEOUT', 'NETWORK', 'DEBOT'\]\)/);
   assert.match(appJs, /state\.socialTransport === 'sse'/);
   assert.match(appJs, /'社媒实时'/);
   assert.match(appJs, /'社媒延迟'/);
@@ -1699,7 +1703,7 @@ test('social snapshot and SSE lifecycle stay pinned to the Robinhood host servic
   assert.match(appJs, /state\.socialLatestChangeId = resetCursor\s+\? normalizedChangeId\s+: Math\.max\(state\.socialLatestChangeId, normalizedChangeId\)/);
   assert.match(appJs, /applySocialSnapshot\(parseSocialStreamEvent\(event\), \{ resetCursor: true \}\)/);
   assert.match(appJs, /const SOCIAL_STATUS_REFRESH_MS = 2_000/);
-  assert.match(appJs, /const SOCIAL_STATUS_TIMEOUT_MS = 1_500/);
+  assert.match(appJs, /const SOCIAL_STATUS_TIMEOUT_MS = 3_000/);
   assert.match(appJs, /const SOCIAL_SNAPSHOT_TIMEOUT_MS = 5_000/);
   assert.match(appJs, /const SOCIAL_STREAM_RETRY_INITIAL_MS = 250/);
   assert.match(appJs, /const SOCIAL_STREAM_RETRY_MAX_MS = 2_000/);
@@ -1715,6 +1719,7 @@ test('social snapshot and SSE lifecycle stay pinned to the Robinhood host servic
   );
   assert.match(appJs, /state\.socialStatusAbortController\?\.abort\(\)/);
   assert.match(appJs, /const SOCIAL_STREAM_STALE_MS = 35_000/);
+  assert.match(appJs, /if \(!socialStreamIsRecent\(\)\) state\.socialConnected = false/);
   assert.match(appJs, /Math\.trunc\(remoteLatestChangeId\) > state\.socialLatestChangeId/);
   assert.match(appJs, /if \(missedChanges \|\| cursorMovedBack \|\| streamEpochChanged \|\| streamIsSilent\) \{\s+recoverSocialStream\(expectedSequence, remoteLatestChangeId\)/);
   assert.match(appJs, /function recoverSocialStream\(sequence, remoteLatestChangeId = state\.socialLatestChangeId\)/);

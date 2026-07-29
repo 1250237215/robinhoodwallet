@@ -71,7 +71,8 @@ function createSocialBehaviorHarness({
   pathname = '/robinhood-radar/',
   search = '',
   hash = '',
-  localStorage = null
+  localStorage = null,
+  fetchImpl = async () => { throw new Error('unexpected fetch'); }
 } = {}) {
   const timers = createTimerHarness();
   const redirects = [];
@@ -141,7 +142,7 @@ function createSocialBehaviorHarness({
     clearTimeout: timers.clearTimeout,
     console,
     document,
-    fetch: async () => { throw new Error('unexpected fetch'); },
+    fetch: fetchImpl,
     performance,
     setInterval() { return 1; },
     setTimeout: timers.setTimeout,
@@ -149,27 +150,38 @@ function createSocialBehaviorHarness({
   });
 
   const exposure = `
+    const renderSocialBridgeStatusUnderTest = renderSocialBridgeStatus;
     renderSocialMonitor = () => {};
     renderSocialBridgeStatus = () => {};
     globalThis.__socialBehavior = {
       state,
       applySocialChange,
       applySocialSnapshot,
+      applySocialBridgeStatus,
+      loadSocialStatus,
+      renderSocialBridgeStatus: renderSocialBridgeStatusUnderTest,
       startSocialMonitor,
       setSnapshotLoader(loader) { loadSocialSnapshot = loader; },
       reset() {
         state.activeTab = 'monitor';
         state.socialStarted = true;
         state.socialConnected = true;
+        state.socialTransport = 'idle';
         state.socialSequence = 1;
+        state.socialStatusBusy = false;
+        state.socialStatusRequestSequence = 0;
+        state.socialStatusAbortController = null;
         state.socialLatestChangeId = 0;
         state.socialStreamEpoch = 'test-epoch';
         state.socialReconnectAttempt = 0;
+        state.socialLastStreamActivityAt = null;
         state.socialPosts = [];
         state.socialDeferredPosts = new Map();
         state.socialWatchlist = [];
         state.socialCounts = {};
         state.socialBridge = {};
+        state.socialBridgeObservedAt = null;
+        state.socialBridgeTransientErrorStartedAt = null;
         state.socialWatchlistSnapshotTimer = null;
         state.socialRecoveryBusy = false;
         state.socialRecoveryStartedAt = null;
@@ -188,7 +200,7 @@ function createSocialBehaviorHarness({
     eventSources.length = 0;
   };
   reset();
-  return { api, eventSources, redirects, reset, timers };
+  return { api, elements, eventSources, redirects, reset, timers };
 }
 
 test('an insecure public page clears a legacy social token without assuming an operator hostname', () => {
@@ -420,6 +432,91 @@ test('a failed optional snapshot does not mark an already-live social SSE offlin
 
   assert.equal(api.state.socialTransport, 'sse');
   assert.equal(api.state.socialConnected, true);
+});
+
+test('transient DeBot REST failures are degraded during grace while AUTH errors immediately', () => {
+  for (const category of ['TIMEOUT', 'NETWORK', 'DEBOT']) {
+    const { api, elements } = createSocialBehaviorHarness();
+    api.state.socialTransport = 'sse';
+    api.applySocialBridgeStatus({
+      state: 'error',
+      paired: true,
+      online: false,
+      heartbeatAgeMs: 10,
+      diagnostics: { poll: { lastErrorCategory: category } }
+    });
+    api.renderSocialBridgeStatus();
+
+    assert.equal(elements.get('#social-bridge-badge').dataset.state, 'delayed');
+    assert.equal(elements.get('#social-bridge-label').textContent, 'REST 补漏波动');
+  }
+
+  const { api, elements } = createSocialBehaviorHarness();
+  api.applySocialBridgeStatus({
+    state: 'error',
+    paired: true,
+    online: false,
+    heartbeatAgeMs: 10,
+    diagnostics: { poll: { lastErrorCategory: 'TIMEOUT' } }
+  });
+  api.state.socialBridgeTransientErrorStartedAt = performance.now() - 8_001;
+  api.renderSocialBridgeStatus();
+  assert.equal(elements.get('#social-bridge-badge').dataset.state, 'error');
+  assert.equal(elements.get('#social-bridge-label').textContent, 'DeBot 异常');
+
+  api.applySocialBridgeStatus({
+    state: 'error',
+    paired: true,
+    online: false,
+    heartbeatAgeMs: 10,
+    diagnostics: { poll: { lastErrorCategory: 'AUTH' } }
+  });
+  api.renderSocialBridgeStatus();
+  assert.equal(elements.get('#social-bridge-badge').dataset.state, 'error');
+  assert.equal(elements.get('#social-bridge-label').textContent, 'DeBot 需要重新登录');
+
+  api.applySocialBridgeStatus({
+    state: 'online',
+    paired: true,
+    online: true,
+    heartbeatAgeMs: 10,
+    diagnostics: {
+      poll: { lastErrorCategory: '' },
+      forcePoll: { lastErrorCategory: 'AUTH' }
+    }
+  });
+  api.renderSocialBridgeStatus();
+  assert.equal(elements.get('#social-bridge-badge').dataset.state, 'online');
+  assert.equal(elements.get('#social-bridge-label').textContent, 'DeBot 已连接');
+});
+
+test('a status timeout cannot mark a recently active social SSE offline', async () => {
+  const fetchImpl = (_url, { signal } = {}) => new Promise((_resolve, reject) => {
+    signal?.addEventListener('abort', () => {
+      const error = new Error('aborted');
+      error.name = 'AbortError';
+      reject(error);
+    }, { once: true });
+  });
+  const { api, timers } = createSocialBehaviorHarness({ fetchImpl });
+  api.state.socialTransport = 'sse';
+  api.state.socialLastStreamActivityAt = performance.now();
+
+  const request = api.loadSocialStatus();
+  assert.deepEqual(timers.pendingDelays(), [3_000]);
+  await timers.runNext();
+  await request;
+
+  assert.equal(api.state.socialConnected, true);
+  assert.equal(api.state.socialStatusBusy, false);
+
+  api.state.socialLastStreamActivityAt = performance.now() - 35_001;
+  const staleRequest = api.loadSocialStatus();
+  assert.deepEqual(timers.pendingDelays(), [3_000]);
+  await timers.runNext();
+  await staleRequest;
+
+  assert.equal(api.state.socialConnected, false);
 });
 
 test('reset applies its watchlist and posts before flushing deferred live posts', () => {

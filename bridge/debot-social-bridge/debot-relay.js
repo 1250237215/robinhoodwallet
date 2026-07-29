@@ -12,6 +12,8 @@ const analysisJobs = new Map();
 const pendingAnalysisResults = new Map();
 let commandPollBusy = false;
 let analysisPollBusy = false;
+let heartbeatUpload = null;
+let pendingHeartbeat = null;
 
 function sendToBackground(type, payload) {
   return chrome.runtime.sendMessage({ source: RELAY_SOURCE, type, payload });
@@ -41,6 +43,26 @@ function forwardPosts(payload) {
   }).catch(() => {
     acknowledgePostDelivery(deliveryId);
   });
+}
+
+function forwardHeartbeat(payload) {
+  pendingHeartbeat = payload;
+  if (heartbeatUpload) return heartbeatUpload;
+  heartbeatUpload = (async () => {
+    while (pendingHeartbeat !== null) {
+      const current = pendingHeartbeat;
+      pendingHeartbeat = null;
+      try {
+        await sendToBackground('heartbeat', current);
+      } catch {
+        // A newer heartbeat, if one arrived, is still delivered next.
+      }
+    }
+  })().finally(() => {
+    heartbeatUpload = null;
+    if (pendingHeartbeat !== null) forwardHeartbeat(pendingHeartbeat);
+  });
+  return heartbeatUpload;
 }
 
 function analysisKey(jobId, claimToken) {
@@ -165,8 +187,12 @@ window.addEventListener('message', (event) => {
     forwardPosts(message.payload);
     return;
   }
-  if (['heartbeat', 'watchlist'].includes(message.type)) {
-    void sendToBackground(message.type, message.payload).catch(() => {});
+  if (message.type === 'heartbeat') {
+    void forwardHeartbeat(message.payload);
+    return;
+  }
+  if (message.type === 'watchlist') {
+    void sendToBackground('watchlist', message.payload).catch(() => {});
     return;
   }
   if (message.type === 'force-poll-result') {

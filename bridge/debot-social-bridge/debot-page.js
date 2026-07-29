@@ -1,13 +1,16 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const BRIDGE_VERSION = '1.8.0';
+  const BRIDGE_VERSION = '1.8.1';
+  const BRIDGE_SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
   // The WebSocket is the primary lane. This short, coalesced REST poll only
   // covers frames DeBot does not expose or cannot be decoded in the page.
   const PRIMARY_POLL_INTERVAL_MS = 1_000;
   const PRIMARY_API_TIMEOUT_MS = 1_500;
+  const PRIMARY_TRANSIENT_ERROR_MIN_FAILURES = 3;
+  const PRIMARY_TRANSIENT_ERROR_MIN_DURATION_MS = 8_000;
   const TIMELINE_PAGE_SIZE = 50;
   const TIMELINE_CATCHUP_PAGES_PER_POLL = 3;
   const TIMELINE_CATCHUP_MAX_PAGES = 100;
@@ -59,6 +62,8 @@
   let timelineCatchUpInFlight = null;
   let timelineCatchUpTruncated = false;
   let lastPrimarySuccessAt = 0;
+  let transientPrimaryFailures = 0;
+  let firstTransientPrimaryFailureAt = 0;
   // This summary is deliberately bounded and contains no DeBot response data,
   // credentials, account names, or raw WebSocket frames.
   const bridgeDiagnostics = {
@@ -103,6 +108,8 @@
     }
   };
   const portalSubscribedSockets = new WeakSet();
+  const portalAuthorizedSockets = new WeakSet();
+  let portalAuthorizedSocketCount = 0;
 
   function emit(type, payload) {
     window.postMessage({ source: PAGE_SOURCE, type, payload }, window.location.origin);
@@ -1358,10 +1365,35 @@
     emit('heartbeat', {
       bridgeId: 'debot-browser-extension',
       version: BRIDGE_VERSION,
-      sessionId: String(Date.now()),
+      sessionId: BRIDGE_SESSION_ID,
       capabilities: healthyHeartbeatCapabilities(),
       diagnostics: bridgeDiagnosticsSnapshot()
     });
+  }
+
+  function resetTransientPrimaryFailures() {
+    transientPrimaryFailures = 0;
+    firstTransientPrimaryFailureAt = 0;
+  }
+
+  function hasAuthorizedPortalSocket() {
+    return portalAuthorizedSocketCount > 0;
+  }
+
+  function shouldReportPrimaryError(errorType) {
+    if (errorType === 'AUTH') {
+      resetTransientPrimaryFailures();
+      return true;
+    }
+    if (hasAuthorizedPortalSocket()) {
+      resetTransientPrimaryFailures();
+      return false;
+    }
+    const timestamp = Date.now();
+    if (transientPrimaryFailures === 0) firstTransientPrimaryFailureAt = timestamp;
+    transientPrimaryFailures += 1;
+    return transientPrimaryFailures >= PRIMARY_TRANSIENT_ERROR_MIN_FAILURES
+      && timestamp - firstTransientPrimaryFailureAt >= PRIMARY_TRANSIENT_ERROR_MIN_DURATION_MS;
   }
 
   function requestTimelineCatchUp({ force = false, boundaryCutoff = lastPrimarySuccessAt } = {}) {
@@ -1976,6 +2008,7 @@
       const firstPage = await fetchPersonalTimelinePage(configIds);
       const firstPageDelivery = deliverPosts(firstPage.posts);
       lastPrimarySuccessAt = Date.now();
+      resetTransientPrimaryFailures();
       completePrimaryPollDiagnostics(firstPage);
       emitHealthyHeartbeat();
       scheduleTimelineCatchUp(configIds, firstPage, firstPageDelivery);
@@ -1984,25 +2017,32 @@
       requestTimelineCatchUp();
       const errorType = coarseErrorType(error);
       failPrimaryPollDiagnostics(errorType);
-      emit('heartbeat', {
-        bridgeId: 'debot-browser-extension',
-        version: BRIDGE_VERSION,
-        capabilities: ['debot-analysis-v1', 'error'],
-        error: errorType,
-        diagnostics: bridgeDiagnosticsSnapshot()
-      });
+      if (shouldReportPrimaryError(errorType)) {
+        emit('heartbeat', {
+          bridgeId: 'debot-browser-extension',
+          version: BRIDGE_VERSION,
+          sessionId: BRIDGE_SESSION_ID,
+          capabilities: ['debot-analysis-v1', 'error'],
+          error: errorType,
+          diagnostics: bridgeDiagnosticsSnapshot()
+        });
+      } else emitHealthyHeartbeat();
       return { ok: false, errorType };
     }
   }
 
   function fallbackPoll() {
     if (pollInFlight) return pollInFlight;
-    const operation = runPoll().finally(() => {
+    let succeeded = false;
+    const operation = runPoll().then((result) => {
+      succeeded = result?.ok === true;
+      return result;
+    }).finally(() => {
       if (pollInFlight !== operation) return;
       pollInFlight = null;
       if (primaryFollowUpRequested) {
         primaryFollowUpRequested = false;
-        void fallbackPoll();
+        if (succeeded) void fallbackPoll();
       }
     });
     pollInFlight = operation;
@@ -2314,6 +2354,11 @@
   function subscribePortalTwitter(socket, frame) {
     if (!isPortalAuthorizationSuccess(frame)) return;
     incrementDiagnosticCounter(bridgeDiagnostics.ws, 'authorizationSuccesses');
+    if (!portalAuthorizedSockets.has(socket)) {
+      portalAuthorizedSockets.add(socket);
+      portalAuthorizedSocketCount += 1;
+      resetTransientPrimaryFailures();
+    }
     if (portalSubscribedSockets.has(socket) || typeof socket?.send !== 'function') return;
     try {
       // DeBot's own social module sends this exact Socket.IO event after a
@@ -2328,6 +2373,12 @@
     }
   }
 
+  function forgetPortalSocket(socket) {
+    portalSubscribedSockets.delete(socket);
+    if (!portalAuthorizedSockets.delete(socket)) return;
+    portalAuthorizedSocketCount = Math.max(0, portalAuthorizedSocketCount - 1);
+  }
+
   const NativeWebSocket = window.WebSocket;
   if (typeof NativeWebSocket === 'function') {
     window.WebSocket = new Proxy(NativeWebSocket, {
@@ -2338,6 +2389,8 @@
           socket.addEventListener('open', () => {
             incrementDiagnosticCounter(bridgeDiagnostics.ws, 'connectionOpens');
           });
+          socket.addEventListener('close', () => forgetPortalSocket(socket));
+          socket.addEventListener('error', () => forgetPortalSocket(socket));
         }
         socket.addEventListener('message', (event) => {
           if (portalSocket) subscribePortalTwitter(socket, event.data);
