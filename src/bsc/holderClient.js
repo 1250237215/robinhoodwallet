@@ -228,6 +228,7 @@ function normalizeBlockSample(value, expectedBlock) {
 export class BscHolderClient {
   constructor({
     rpcClient,
+    logRpcClient = rpcClient,
     debotClient = null,
     creationTimeClient = null,
     infrastructureAddresses = BSC_CHAIN.infrastructureAddresses,
@@ -246,6 +247,9 @@ export class BscHolderClient {
       !rpcClient?.call) {
       throw new TypeError('A complete BSC RPC client is required');
     }
+    if (typeof logRpcClient?.request !== 'function') {
+      throw new TypeError('A BSC Holder log RPC client is required');
+    }
     if (debotClient !== null && typeof debotClient?.fetchTokenDetail !== 'function') {
       throw new TypeError('A DeBot token detail client is required');
     }
@@ -254,6 +258,7 @@ export class BscHolderClient {
     }
     if (typeof now !== 'function') throw new TypeError('A clock function is required');
     this.rpcClient = rpcClient;
+    this.logRpcClient = logRpcClient;
     this.debotClient = debotClient;
     this.creationTimeClient = creationTimeClient;
     this.now = now;
@@ -332,23 +337,16 @@ export class BscHolderClient {
       );
     }
 
-    if (!start.reliable) {
-      if (entries.length > this.maxBalanceChecks) {
-        throw new BscHolderScanLimitError(
-          `BSC fallback start requires ${entries.length} balance checks; configured maximum is ${this.maxBalanceChecks}`,
-          { code: 'BALANCE_CHECK_LIMIT' }
-        );
-      }
-      await this.#verifyBalances(address, entries, latestBlock, { signal });
+    if (entries.length > this.maxBalanceChecks) {
+      throw new BscHolderScanLimitError(
+        `BSC Holder integrity verification requires ${entries.length} balance checks; ` +
+        `configured maximum is ${this.maxBalanceChecks}`,
+        { code: 'BALANCE_CHECK_LIMIT' }
+      );
     }
+    await this.#verifyBalances(address, entries, latestBlock, { signal });
 
     const selected = await this.#selectWalletHolders(address, entries, metadata, target, latestBlock, { signal });
-    await this.#verifyBalances(
-      address,
-      selected.map((item) => [item.row.address, item.amount]),
-      latestBlock,
-      { signal }
-    );
     const snapshotAt = new Date().toISOString();
     const source = 'bsc_rpc_transfer_ledger';
     return {
@@ -368,7 +366,7 @@ export class BscHolderClient {
       deploymentBlockSource: start.source,
       historyStartReliable: start.reliable,
       historyStartValidation: start.reliable
-        ? 'historical_code_boundary_and_supply_reconciliation'
+        ? 'historical_code_boundary_supply_and_all_observed_balance_reconciliation'
         : 'supply_and_all_observed_balance_reconciliation',
       firstTransferBlock: logs[0]?.blockNumber ?? null,
       latestBlock,
@@ -622,7 +620,7 @@ export class BscHolderClient {
   async #fetchCompleteLogRange(address, fromBlock, toBlock, { signal }) {
     let rows;
     try {
-      rows = await this.rpcClient.request('eth_getLogs', [{
+      rows = await this.logRpcClient.request('eth_getLogs', [{
         address,
         topics: [ERC20_TRANSFER_TOPIC],
         fromBlock: blockTag(fromBlock),

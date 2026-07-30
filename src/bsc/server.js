@@ -230,6 +230,7 @@ export async function startBscStandaloneServer(
   {
     monitorRpcClient = null,
     holderRpcClient = null,
+    holderLogRpcClient = null,
     debotClient = null,
     marketDataClient = null,
     holderClient = null,
@@ -241,24 +242,67 @@ export async function startBscStandaloneServer(
   const config = createBscRuntimeConfig(env);
   const rpcClient = monitorRpcClient || createBscRpcClient(config, config.rpcUrl, fetchImpl);
   await assertBscRpcChain(rpcClient, 'BSC monitor RPC');
-  let holderRpc = holderRpcClient;
+  if (holderClient && (holderRpcClient || holderLogRpcClient)) {
+    throw new Error(
+      'An injected BSC holderClient is authoritative; do not also inject holderRpcClient or holderLogRpcClient'
+    );
+  }
+  let holderRpc = holderClient?.rpcClient || holderRpcClient;
+  let holderLogRpc = null;
   if (!holderClient) {
     holderRpc ||= config.holderRpcUrl
       ? createBscRpcClient(config, config.holderRpcUrl, fetchImpl)
       : null;
+    if (!holderRpc && (holderLogRpcClient || config.holderLogRpcUrl)) {
+      throw new Error(
+        'BSC Holder log RPC requires strict Holder state mode; configure BSC_HOLDER_RPC_URL or inject holderRpcClient'
+      );
+    }
+    holderLogRpc = holderRpc
+      ? (holderLogRpcClient || (config.holderLogRpcUrl
+          ? createBscRpcClient(config, config.holderLogRpcUrl, fetchImpl)
+          : holderRpc))
+      : null;
     if (holderRpc === rpcClient) {
       throw new Error('BSC monitor and Holder analysis must use separate RPC client instances');
     }
+    if (holderLogRpc === rpcClient) {
+      throw new Error('BSC monitor and Holder log analysis must use separate RPC client instances');
+    }
     if (holderRpc) await assertBscRpcChain(holderRpc, 'BSC Holder RPC');
+    if (holderLogRpc && holderLogRpc !== holderRpc) {
+      await assertBscRpcChain(holderLogRpc, 'BSC Holder log RPC');
+    }
   } else if (holderClient?.rpcClient === rpcClient) {
     throw new Error('BSC monitor and Holder analysis must use separate RPC client instances');
+  } else {
+    holderLogRpc = holderClient?.logRpcClient || null;
+    if (holderLogRpc === rpcClient) {
+      throw new Error('BSC monitor and Holder log analysis must use separate RPC client instances');
+    }
   }
   const holderEndpointClient = holderRpc || holderClient?.rpcClient || null;
   const monitorEndpoint = rpcEndpointIdentity(rpcClient, config.rpcUrl);
-  const holderEndpoint = rpcEndpointIdentity(holderEndpointClient, config.holderRpcUrl);
+  const holderEndpoint = rpcEndpointIdentity(
+    holderEndpointClient,
+    holderClient ? '' : config.holderRpcUrl
+  );
+  const holderLogFallback = holderLogRpc === holderEndpointClient
+    ? (holderClient ? '' : config.holderRpcUrl)
+    : (holderClient ? '' : config.holderLogRpcUrl);
+  const holderLogEndpoint = rpcEndpointIdentity(holderLogRpc, holderLogFallback);
   if (!config.allowSharedRpcEndpoint && monitorEndpoint && holderEndpoint && monitorEndpoint === holderEndpoint) {
     throw new Error(
-      'BSC monitor and Holder analysis must use different RPC endpoints; set BSC_ALLOW_SHARED_RPC_ENDPOINT=true only for isolated development'
+      'BSC monitor and Holder analysis must use different RPC endpoints; set BSC_ALLOW_SHARED_RPC_ENDPOINT=true only when the shared state endpoint is intentional'
+    );
+  }
+  if (
+    monitorEndpoint &&
+    holderLogEndpoint &&
+    monitorEndpoint === holderLogEndpoint
+  ) {
+    throw new Error(
+      'BSC monitor and Holder log analysis must use different RPC endpoints'
     );
   }
   await assertBscMonitorRpcCapabilities(rpcClient);
@@ -308,6 +352,7 @@ export async function startBscStandaloneServer(
   const activeHolderClient = holderClient || (holderRpc
     ? new BscHolderClient({
         rpcClient: holderRpc,
+        logRpcClient: holderLogRpc,
         debotClient: activeDebotClient,
         creationTimeClient: activeMarketDataClient,
         infrastructureAddresses: BSC_CHAIN.infrastructureAddresses,
@@ -403,6 +448,7 @@ export async function startBscStandaloneServer(
     marketDataClient: activeMarketDataClient,
     holderClient: activeHolderClient,
     holderRpcClient: holderRpc,
+    holderLogRpcClient: holderLogRpc,
     rpcClient,
     config,
     host: config.host,

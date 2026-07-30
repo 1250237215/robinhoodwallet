@@ -11,6 +11,8 @@ import {
 const token = '0x1111111111111111111111111111111111111111';
 const walletA = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const walletB = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const walletC = '0xcacacacacacacacacacacacacacacacacacacaca';
+const walletD = '0xdadadadadadadadadadadadadadadadadadadada';
 const contract = '0xcccccccccccccccccccccccccccccccccccccccc';
 const infrastructure = '0xdddddddddddddddddddddddddddddddddddddddd';
 const delegated = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
@@ -185,9 +187,101 @@ test('replays a complete BSC Transfer ledger and returns only verified wallet ho
   assert.deepEqual(result.holders.map((row) => row.holdingSharePercent), [40, 25]);
   assert.equal(rpc.logRequests.some(([from, to]) => from === 100 && to === 200), true);
   assert.equal(rpc.logRequests.some(([from, to]) => to - from + 1 <= 50), true);
-  assert.deepEqual(rpc.balanceChecks.sort(), [walletA, walletB].sort());
+  assert.deepEqual(rpc.balanceChecks.sort(), [...completeBalances.keys()].sort());
   assert.deepEqual(rpc.blockSampleRequests, []);
   assert.equal(rpc.codeRequests.filter(([address]) => address === token).length > 1, true);
+});
+
+test('routes only Transfer logs through an independently injected Holder log RPC', async () => {
+  class StateOnlyRpc extends FakeBscRpc {
+    constructor(options) {
+      super(options);
+      this.stateOperations = [];
+    }
+
+    async getBlockNumber(options) {
+      this.stateOperations.push('getBlockNumber');
+      return super.getBlockNumber(options);
+    }
+
+    async call(transaction, options) {
+      this.stateOperations.push(`call:${transaction.data}`);
+      return super.call(transaction, options);
+    }
+
+    async request(method, params, options) {
+      assert.notEqual(method, 'eth_getLogs', 'the state RPC must never receive Holder log reads');
+      this.stateOperations.push(method);
+      return super.request(method, params, options);
+    }
+
+    async batchRequest(calls, options) {
+      this.stateOperations.push(...calls.map((call) => `batch:${call.method}`));
+      return super.batchRequest(calls, options);
+    }
+  }
+
+  const rpc = new StateOnlyRpc();
+  const logRequests = [];
+  const logRpc = {
+    async request(method, params) {
+      assert.equal(method, 'eth_getLogs');
+      const [filter] = params;
+      const from = Number(BigInt(filter.fromBlock));
+      const to = Number(BigInt(filter.toBlock));
+      logRequests.push([from, to]);
+      if (to - from + 1 > 50) throw new Error('block range limit exceeded');
+      return completeTransfers().filter((row) => {
+        const block = Number(BigInt(row.blockNumber));
+        return block >= from && block <= to;
+      });
+    }
+  };
+  const client = new BscHolderClient({
+    rpcClient: rpc,
+    logRpcClient: logRpc,
+    infrastructureAddresses: [infrastructure]
+  });
+
+  const result = await client.fetchTopHolders(token, { limit: 10 });
+
+  assert.equal(result.complete, true);
+  assert.deepEqual(result.holders.map((row) => row.address), [walletA, walletB]);
+  assert.deepEqual(logRequests, [
+    [100, 200],
+    [100, 150],
+    [100, 125],
+    [126, 150],
+    [151, 200]
+  ]);
+  assert.deepEqual(rpc.logRequests, []);
+  assert.equal(rpc.stateOperations.includes('getBlockNumber'), true);
+  assert.equal(rpc.stateOperations.includes('eth_getCode'), true);
+  assert.equal(rpc.stateOperations.includes('call:0x313ce567'), true);
+  assert.equal(rpc.stateOperations.includes('call:0x18160ddd'), true);
+  assert.equal(rpc.stateOperations.includes('batch:eth_getCode'), true);
+  assert.equal(rpc.stateOperations.includes('batch:eth_call'), true);
+  assert.deepEqual(rpc.balanceChecks.sort(), [...completeBalances.keys()].sort());
+});
+
+test('defaults Holder log reads to the primary RPC and rejects an invalid override', async () => {
+  const rpc = new FakeBscRpc();
+  const client = new BscHolderClient({
+    rpcClient: rpc,
+    infrastructureAddresses: [infrastructure]
+  });
+
+  const result = await client.fetchTopHolders(token, { limit: 2 });
+
+  assert.equal(client.logRpcClient, rpc);
+  assert.equal(result.complete, true);
+  assert.deepEqual(rpc.logRequests, [[100, 200]]);
+  for (const logRpcClient of [{}, { request: true }]) {
+    assert.throws(
+      () => new BscHolderClient({ rpcClient: rpc, logRpcClient }),
+      /BSC Holder log RPC client is required/
+    );
+  }
 });
 
 test('uses a buffered DeBot creation time without a historical code search and verifies every balance', async () => {
@@ -221,7 +315,7 @@ test('uses a buffered DeBot creation time without a historical code search and v
     rpc.codeRequests.filter(([address]) => address === token),
     [[token, 200]]
   );
-  assert.equal(rpc.balanceChecks.length, completeBalances.size + 2);
+  assert.equal(rpc.balanceChecks.length, completeBalances.size);
 });
 
 test('prefers market creation time over DeBot and avoids timestamp and code binary searches', async () => {
@@ -264,7 +358,7 @@ test('prefers market creation time over DeBot and avoids timestamp and code bina
     rpc.codeRequests.filter(([address]) => address === token),
     [[token, 200]]
   );
-  assert.equal(rpc.balanceChecks.length, completeBalances.size + 2);
+  assert.equal(rpc.balanceChecks.length, completeBalances.size);
 });
 
 test('uses the historical code boundary when market data has no creation timestamp', async () => {
@@ -407,7 +501,10 @@ test('retries from the historical code boundary when the fast creation-time ledg
   assert.equal(result.deploymentBlock, deploymentBlock);
   assert.equal(result.deploymentBlockSource, 'bsc_rpc_historical_code');
   assert.equal(result.historyStartReliable, true);
-  assert.equal(result.historyStartValidation, 'historical_code_boundary_and_supply_reconciliation');
+  assert.equal(
+    result.historyStartValidation,
+    'historical_code_boundary_supply_and_all_observed_balance_reconciliation'
+  );
   assert.equal(rpc.logRequests.some(([from]) => from === 998_656), true);
   assert.equal(rpc.logRequests.some(([from]) => from === deploymentBlock), true);
   assert.equal(rpc.codeRequests.filter(([address]) => address === token).length > 10, true);
@@ -504,6 +601,45 @@ test('fails on supply or balance reconciliation instead of returning a partial r
   await assert.rejects(
     balanceMismatch.fetchTopHolders(token),
     (error) => error instanceof BscHolderIntegrityError && error.code === 'BALANCE_RECONCILIATION_FAILED'
+  );
+});
+
+test('rejects a log provider that silently omits a transfer between non-selected holders', async () => {
+  const fullLogs = [
+    transfer({ from: zero, to: walletA, amount: 1_000, block: 100, index: 60 }),
+    transfer({ from: walletA, to: walletB, amount: 400, block: 110, index: 61 }),
+    transfer({ from: walletA, to: walletC, amount: 200, block: 120, index: 62 }),
+    transfer({ from: walletB, to: walletD, amount: 100, block: 130, index: 63 }),
+    transfer({ from: walletC, to: walletD, amount: 150, block: 140, index: 64 })
+  ];
+  const actualBalances = new Map([
+    [walletA, 400n],
+    [walletB, 300n],
+    [walletC, 50n],
+    [walletD, 250n]
+  ]);
+  const rpc = new FakeBscRpc({
+    logs: fullLogs,
+    balances: actualBalances,
+    totalSupply: 1_000n
+  });
+  const logRpc = {
+    async request(method, params) {
+      assert.equal(method, 'eth_getLogs');
+      const [filter] = params;
+      const from = Number(BigInt(filter.fromBlock));
+      const to = Number(BigInt(filter.toBlock));
+      return fullLogs
+        .filter((row) => Number(BigInt(row.blockNumber)) >= from && Number(BigInt(row.blockNumber)) <= to)
+        .filter((row) => Number(BigInt(row.logIndex)) !== 64);
+    }
+  };
+  const client = new BscHolderClient({ rpcClient: rpc, logRpcClient: logRpc });
+
+  await assert.rejects(
+    client.fetchTopHolders(token, { limit: 2 }),
+    (error) => error instanceof BscHolderIntegrityError &&
+      error.code === 'BALANCE_RECONCILIATION_FAILED'
   );
 });
 

@@ -148,20 +148,32 @@ known service addresses, and contracts before wallet scoring.
 `BSC_HOLDER_RPC_URL` is optional. Setting it switches Holder discovery to the
 strict mode, which reconstructs the complete current Holder ledger from ERC-20
 `Transfer` history and verifies it against `totalSupply` and on-chain balances.
-This separate endpoint must be a BSC archive RPC that supports historical
-`eth_getCode` and complete large-range `eth_getLogs` queries. The live and
-strict-Holder URLs must be different in production; the shared-endpoint override
-is only for isolated development. The live endpoint always has to report
-`eth_chainId` `0x38` and return a recent confirmed transaction plus receipt in
-one JSON-RPC batch before the BSC database is opened. A configured strict Holder
-endpoint is also chain-checked at startup.
+This state endpoint must be a BSC archive RPC that supports historical
+`eth_getCode`, `eth_call`, and batch requests. `BSC_HOLDER_LOG_RPC_URL` can point
+to a separate log provider that returns complete `eth_getLogs` ranges; when it
+is empty, strict mode reads logs from the state endpoint. The log-only provider
+never handles chain state, supply, balance, or EOA verification.
+
+The monitor, Holder state, and configured Holder log endpoints are all
+chain-checked before the BSC database is opened. Monitor and Holder log clients
+may never be the same object or normalized URL. With
+`BSC_ALLOW_SHARED_RPC_ENDPOINT=false`, monitor and Holder state must also use
+different normalized URLs. Keep that setting false when possible. A production
+deployment may enable it only when the monitor and Holder state must use
+separate clients on the same endpoint; the high-volume Holder log endpoint must
+remain independent regardless of this flag. Holder state and Holder log may
+safely be the same client or URL when the monitor is elsewhere. The live
+endpoint must additionally return a recent confirmed transaction plus receipt
+in one JSON-RPC batch.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `BSC_DEBOT_BRIDGE_URL` | `http://127.0.0.1:18118/internal/debot/request` | Loopback bridge for the default top-100 Holder request |
 | `BSC_DEBOT_BRIDGE_TIMEOUT_MS` | `90000` | Maximum time the server waits for the signed-in browser |
 | `BSC_DEBOT_REQUEST_TIMEOUT_MS` | `95000` | Outer request deadline; it must remain above the bridge timeout |
-| `BSC_HOLDER_RPC_URL` | Empty | Optional archive RPC that enables strict full-ledger Holder reconstruction |
+| `BSC_HOLDER_RPC_URL` | Empty | Optional state/archive RPC that enables strict full-ledger Holder reconstruction |
+| `BSC_HOLDER_LOG_RPC_URL` | Empty | Optional log-only RPC for strict mode; defaults to the Holder state RPC |
+| `BSC_ALLOW_SHARED_RPC_ENDPOINT` | `false` | Allows only separate monitor/state clients to use one normalized URL; it never permits monitor/log sharing |
 
 The default BSC Holder path requires DeBot Bridge extension version `1.9.0` and
 the `debot-token-holders-v1` capability. After updating the repository, open

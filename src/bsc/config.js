@@ -84,6 +84,7 @@ export function createBscConfig(env = process.env) {
     chain: BSC_CHAIN,
     rpcUrl: env.BSC_RPC_URL || BSC_CHAIN.rpcUrl,
     holderRpcUrl: String(env.BSC_HOLDER_RPC_URL || '').trim(),
+    holderLogRpcUrl: String(env.BSC_HOLDER_LOG_RPC_URL || '').trim(),
     debotBridgeUrl: String(
       env.BSC_DEBOT_BRIDGE_URL || 'http://127.0.0.1:18118/internal/debot/request'
     ).trim(),

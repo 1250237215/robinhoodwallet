@@ -240,6 +240,8 @@ BSC_DEBOT_REQUEST_TIMEOUT_MS=95000
 
 # 可选：填写后切换到严格的完整 Transfer 账本模式
 BSC_HOLDER_RPC_URL=
+# 可选：严格模式专用日志入口；留空时复用上面的状态入口
+BSC_HOLDER_LOG_RPC_URL=
 BSC_ALLOW_SHARED_RPC_ENDPOINT=false
 BSC_REQUEST_TIMEOUT_MS=20000
 BSC_MARKET_REQUEST_TIMEOUT_MS=5000
@@ -271,13 +273,21 @@ Holder 时结果会如实标记为部分样本，不会声称覆盖完整 Holder
 `BSC_DEBOT_REQUEST_TIMEOUT_MS`必须更长，示例使用 `90000`和 `95000`毫秒。扩展离线
 或版本过旧时，BSC 实时流水仍会继续运行，但手工 CA 分析会明确失败。
 
-只有需要严格完整的当前 Holder 账本时才填写 `BSC_HOLDER_RPC_URL`。填写后会改用
-独立归档 RPC，从经历史合约代码确认的部署块开始分窗重放 ERC-20 `Transfer`日志，
-再用 `totalSupply`和链上 `balanceOf`核对。这个入口必须支持历史 `eth_getCode`和完整
-大范围 `eth_getLogs`，并在启动时通过 BSC `0x38`链校验。实时与严格 Holder 的 URL
-必须不同；`BSC_ALLOW_SHARED_RPC_ENDPOINT=true`只用于隔离的本地开发，生产环境
-不要开启。任何起点、日志或余额无法完整验证时，严格模式都会明确失败。不要把
-供应商密钥写进仓库内的 `bsc.env.example`。
+只有需要严格完整的当前 Holder 账本时才填写 `BSC_HOLDER_RPC_URL`。填写后会从经
+历史合约代码确认的部署块开始分窗重放 ERC-20 `Transfer`日志，再用 `totalSupply`和
+链上 `balanceOf`核对。这个状态入口负责链头、历史 `eth_getCode`、供应量、余额和
+EOA/合约检查，必须具备归档状态能力。
+
+`BSC_HOLDER_LOG_RPC_URL`是可选的日志专用入口，只负责完整返回 `eth_getLogs`；它不
+需要提供历史状态。留空时，日志仍由 `BSC_HOLDER_RPC_URL`读取。状态入口和日志入口
+可以是同一个客户端或相同 URL。三个入口都会在数据库创建前校验为 BSC `0x38`。
+实时监控客户端与 Holder 日志客户端绝不能是同一个对象，它们的标准化 URL 也必须
+始终不同。能隔离时应保持 `BSC_ALLOW_SHARED_RPC_ENDPOINT=false`；这还会
+要求实时监控与 Holder 状态使用不同 URL。只有生产环境确实必须让实时监控和 Holder
+状态使用同一 URL、同时又给高流量 Holder 日志配置了独立入口时，才应设为 `true`。
+这个开关永远不会允许实时监控与 Holder 日志共享 URL。任何起点、日志或余额无法
+完整验证时，严格模式都会明确失败。不要把供应商密钥写进仓库内的
+`bsc.env.example`。
 
 BSC 实时判断除 PancakeSwap V2/V3 外，也识别 Four.meme 当前 TokenManager 的
 bonding-curve 买入、卖出和创建代币事件；WBNB、USDT、USDC、BUSD、FDUSD、DAI、

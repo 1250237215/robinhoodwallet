@@ -66,12 +66,14 @@ test('defines the BSC mainnet profile and independent data defaults', () => {
   const config = createBscConfig({
     BSC_RPC_URL: 'https://bsc-rpc.example',
     BSC_HOLDER_RPC_URL: 'https://bsc-holder-rpc.example',
+    BSC_HOLDER_LOG_RPC_URL: '  https://bsc-holder-logs.example/v1  ',
     BSC_DATA_FILE: '/tmp/bsc-independent.sqlite',
     BSC_REQUEST_TIMEOUT_MS: '999999'
   });
   assert.equal(config.chain, BSC_CHAIN);
   assert.equal(config.rpcUrl, 'https://bsc-rpc.example');
   assert.equal(config.holderRpcUrl, 'https://bsc-holder-rpc.example');
+  assert.equal(config.holderLogRpcUrl, 'https://bsc-holder-logs.example/v1');
   assert.equal(config.debotBridgeUrl, 'http://127.0.0.1:18118/internal/debot/request');
   assert.equal(config.debotBridgeTimeoutMs, 90_000);
   assert.equal(config.debotRequestTimeoutMs, 95_000);
@@ -80,4 +82,5 @@ test('defines the BSC mainnet profile and independent data defaults', () => {
   assert.equal(config.requestTimeoutMs, 60_000);
 
   assert.equal(createBscConfig({}).holderRpcUrl, '');
+  assert.equal(createBscConfig({}).holderLogRpcUrl, '');
 });

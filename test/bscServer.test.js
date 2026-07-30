@@ -53,12 +53,28 @@ function capableBscMonitorRpc() {
   };
 }
 
+function capableBscHolderRpc(rpcUrl = '') {
+  const rpc = capableBscMonitorRpc();
+  if (rpcUrl) rpc.rpcUrl = rpcUrl;
+  rpc.call = async () => '0x0';
+  rpc.findBlockByTimestamp = async () => 0;
+  return rpc;
+}
+
+async function closeBscServer(running) {
+  running.service.close();
+  running.monitor.close();
+  await new Promise((resolve) => running.server.close(resolve));
+  running.store.close();
+}
+
 test('BSC runtime defaults and tuning are isolated from other chain environments', () => {
   const defaults = createBscRuntimeConfig({});
   assert.equal(defaults.chainId, 'bsc');
   assert.equal(defaults.chainLabel, 'BSC');
   assert.equal(defaults.rpcUrl, BSC_CHAIN.rpcUrl);
   assert.equal(defaults.holderRpcUrl, '');
+  assert.equal(defaults.holderLogRpcUrl, '');
   assert.equal(defaults.port, 18122);
   assert.equal(defaults.noxaLaunchFactory, null);
   assert.deepEqual(defaults.quoteTokenAddresses, BSC_CHAIN.quoteTokens);
@@ -81,6 +97,7 @@ test('BSC runtime defaults and tuning are isolated from other chain environments
     ROBINHOOD_MONITOR_POLL_INTERVAL_MS: '9999',
     BSC_RPC_URL: 'https://bsc-rpc.example',
     BSC_HOLDER_RPC_URL: 'https://bsc-holder-rpc.example',
+    BSC_HOLDER_LOG_RPC_URL: 'https://bsc-holder-logs.example',
     BSC_ALLOW_SHARED_RPC_ENDPOINT: 'true',
     BSC_MONITOR_POLL_INTERVAL_MS: '750',
     BSC_PORT: '19021',
@@ -91,6 +108,7 @@ test('BSC runtime defaults and tuning are isolated from other chain environments
   });
   assert.equal(configured.rpcUrl, 'https://bsc-rpc.example');
   assert.equal(configured.holderRpcUrl, 'https://bsc-holder-rpc.example');
+  assert.equal(configured.holderLogRpcUrl, 'https://bsc-holder-logs.example');
   assert.equal(configured.allowSharedRpcEndpoint, true);
   assert.equal(configured.monitorPollIntervalMs, 750);
   assert.equal(configured.port, 19021);
@@ -161,7 +179,9 @@ test('starts an isolated BSC API, smart-wallet scanner, monitor, Bark store, and
     assert.equal(running.holderClient instanceof BscHolderClient, true);
     assert.equal(running.rpcClient, monitorRpcClient);
     assert.equal(running.holderRpcClient, holderRpcClient);
+    assert.equal(running.holderLogRpcClient, holderRpcClient);
     assert.equal(running.holderClient.rpcClient, holderRpcClient);
+    assert.equal(running.holderClient.logRpcClient, holderRpcClient);
     assert.notEqual(running.holderClient.rpcClient, running.rpcClient);
     assert.equal(running.holderClient.debotClient, running.debotClient);
     assert.equal(running.holderClient.creationTimeClient, running.marketDataClient);
@@ -213,6 +233,110 @@ test('starts an isolated BSC API, smart-wallet scanner, monitor, Bark store, and
     await new Promise((resolve) => running.server.close(resolve));
     running.store.close();
     robinhoodStore.close();
+  }
+});
+
+test('creates and wires a configured BSC Holder log RPC independently', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'bsc-radar-holder-log-rpc-'));
+  const dataFile = path.join(directory, 'bsc.sqlite');
+  const logRpcUrl = 'https://bsc-holder-logs.example/v1';
+  const logRequests = [];
+  const fetchImpl = async (input, init = {}) => {
+    assert.equal(String(input), logRpcUrl);
+    const body = JSON.parse(init.body);
+    logRequests.push(body);
+    return new Response(JSON.stringify({
+      jsonrpc: '2.0',
+      id: body.id,
+      result: '0x38'
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  const holderRpcClient = capableBscHolderRpc('https://bsc-holder-state.example/v1');
+  const running = await startBscStandaloneServer({
+    BSC_HOST: '127.0.0.1',
+    BSC_PORT: '0',
+    BSC_DATA_FILE: dataFile,
+    BSC_HOLDER_LOG_RPC_URL: logRpcUrl
+  }, {
+    monitorRpcClient: capableBscMonitorRpc(),
+    holderRpcClient,
+    fetchImpl
+  });
+  try {
+    assert.equal(running.holderRpcClient, holderRpcClient);
+    assert.equal(running.holderClient.rpcClient, holderRpcClient);
+    assert.notEqual(running.holderLogRpcClient, holderRpcClient);
+    assert.equal(running.holderLogRpcClient.rpcUrl, logRpcUrl);
+    assert.equal(running.holderClient.logRpcClient, running.holderLogRpcClient);
+    assert.deepEqual(logRequests.map((request) => request.method), ['eth_chainId']);
+  } finally {
+    await closeBscServer(running);
+  }
+});
+
+test('preserves injected RPC identities when only monitor and Holder state share a URL', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'bsc-radar-shared-state-rpc-'));
+  const dataFile = path.join(directory, 'bsc.sqlite');
+  const sharedStateUrl = 'https://shared-bsc-state.example/v1';
+  const monitorRpcClient = capableBscMonitorRpc();
+  monitorRpcClient.rpcUrl = `${sharedStateUrl}/`;
+  const holderRpcClient = capableBscHolderRpc(sharedStateUrl);
+  const holderLogRpcClient = {
+    rpcUrl: 'https://independent-bsc-logs.example/v1',
+    request: async () => '0x38'
+  };
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  const running = await startBscStandaloneServer({
+    BSC_HOST: '127.0.0.1',
+    BSC_PORT: '0',
+    BSC_DATA_FILE: dataFile,
+    BSC_ALLOW_SHARED_RPC_ENDPOINT: 'true'
+  }, {
+    monitorRpcClient,
+    holderRpcClient,
+    holderLogRpcClient
+  });
+  try {
+    assert.equal(running.rpcClient, monitorRpcClient);
+    assert.equal(running.holderRpcClient, holderRpcClient);
+    assert.equal(running.holderLogRpcClient, holderLogRpcClient);
+    assert.equal(running.holderClient.rpcClient, holderRpcClient);
+    assert.equal(running.holderClient.logRpcClient, holderLogRpcClient);
+  } finally {
+    await closeBscServer(running);
+  }
+});
+
+test('allows Holder state and log clients to share one normalized endpoint', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'bsc-radar-shared-holder-rpc-'));
+  const dataFile = path.join(directory, 'bsc.sqlite');
+  const holderUrl = 'https://shared-holder.example/v1';
+  const monitorRpcClient = capableBscMonitorRpc();
+  monitorRpcClient.rpcUrl = 'https://independent-monitor.example/v1';
+  const holderRpcClient = capableBscHolderRpc(`${holderUrl}/`);
+  const holderLogRpcClient = {
+    rpcUrl: holderUrl,
+    request: async () => '0x38'
+  };
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  const running = await startBscStandaloneServer({
+    BSC_HOST: '127.0.0.1',
+    BSC_PORT: '0',
+    BSC_DATA_FILE: dataFile
+  }, {
+    monitorRpcClient,
+    holderRpcClient,
+    holderLogRpcClient
+  });
+  try {
+    assert.equal(running.holderRpcClient, holderRpcClient);
+    assert.equal(running.holderLogRpcClient, holderLogRpcClient);
+  } finally {
+    await closeBscServer(running);
   }
 });
 
@@ -290,6 +414,7 @@ test('wires the default BSC token-detail and wallet-profit client through the lo
     assert.equal(running.debotClient.chain, 'bsc');
     assert.equal(running.debotClient.timeoutMs, running.config.debotRequestTimeoutMs);
     assert.equal(running.service.debotClient, running.debotClient);
+    assert.equal(running.holderLogRpcClient, null);
     assert.equal(detail.address, bscToken);
     assert.equal(detail.symbol, 'TEST');
     assert.equal(profit.address, wallet);
@@ -503,4 +628,124 @@ test('rejects separate RPC clients that still share one normalized endpoint', as
     }),
     /must use different RPC endpoints/
   );
+});
+
+test('rejects a wrong-chain Holder log RPC before creating the BSC database', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'bsc-radar-wrong-log-chain-'));
+  const dataFile = path.join(directory, 'bsc.sqlite');
+  try {
+    await assert.rejects(
+      startBscStandaloneServer(
+        { BSC_HOST: '127.0.0.1', BSC_PORT: '0', BSC_DATA_FILE: dataFile },
+        {
+          monitorRpcClient: capableBscMonitorRpc(),
+          holderRpcClient: { request: async () => '0x38' },
+          holderLogRpcClient: { request: async () => '0x1' }
+        }
+      ),
+      (error) => error?.code === 'BSC_RPC_CHAIN_MISMATCH' &&
+        /BSC Holder log RPC/.test(error.message)
+    );
+    assert.equal(fs.existsSync(dataFile), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('rejects a Holder log RPC when strict Holder state mode is disabled', async () => {
+  const cases = [
+    {
+      name: 'configured URL',
+      env: { BSC_HOLDER_LOG_RPC_URL: 'https://orphan-holder-logs.example' },
+      options: {}
+    },
+    {
+      name: 'injected client',
+      env: {},
+      options: { holderLogRpcClient: { request: async () => '0x38' } }
+    }
+  ];
+
+  for (const scenario of cases) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'bsc-radar-orphan-log-rpc-'));
+    const dataFile = path.join(directory, 'bsc.sqlite');
+    try {
+      await assert.rejects(
+        startBscStandaloneServer(
+          {
+            ...scenario.env,
+            BSC_HOST: '127.0.0.1',
+            BSC_PORT: '0',
+            BSC_DATA_FILE: dataFile
+          },
+          { monitorRpcClient: capableBscMonitorRpc(), ...scenario.options }
+        ),
+        (error) => /requires strict Holder state mode/.test(error.message),
+        scenario.name
+      );
+      assert.equal(fs.existsSync(dataFile), false, scenario.name);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test('rejects sharing the live monitor client instance with Holder log reads', async () => {
+  const monitorRpcClient = capableBscMonitorRpc();
+  await assert.rejects(
+    startBscStandaloneServer({ BSC_ALLOW_SHARED_RPC_ENDPOINT: 'true' }, {
+      monitorRpcClient,
+      holderRpcClient: { request: async () => '0x38' },
+      holderLogRpcClient: monitorRpcClient
+    }),
+    /monitor and Holder log analysis must use separate RPC client instances/
+  );
+});
+
+test('rejects separate monitor and Holder log clients on one normalized endpoint', async () => {
+  const sharedUrl = 'https://shared-bsc-rpc.example/v1';
+  const monitorRpcClient = {
+    rpcUrl: `${sharedUrl}/`,
+    request: async () => '0x38'
+  };
+  const holderRpcClient = {
+    rpcUrl: 'https://bsc-holder-state.example/v1',
+    request: async () => '0x38'
+  };
+  const holderLogRpcClient = {
+    rpcUrl: sharedUrl,
+    request: async () => '0x38'
+  };
+
+  await assert.rejects(
+    startBscStandaloneServer({ BSC_ALLOW_SHARED_RPC_ENDPOINT: 'true' }, {
+      monitorRpcClient,
+      holderRpcClient,
+      holderLogRpcClient
+    }),
+    /monitor and Holder log analysis must use different RPC endpoints/
+  );
+});
+
+test('rejects redundant RPC injections when a custom Holder client is authoritative', async () => {
+  const customHolderClient = {
+    async fetchTopHolders() {
+      return { token: {}, holders: [] };
+    }
+  };
+  const cases = [
+    { holderRpcClient: { request: async () => '0x38' } },
+    { holderLogRpcClient: { request: async () => '0x38' } }
+  ];
+
+  for (const options of cases) {
+    await assert.rejects(
+      startBscStandaloneServer({}, {
+        monitorRpcClient: capableBscMonitorRpc(),
+        holderClient: customHolderClient,
+        ...options
+      }),
+      /holderClient is authoritative; do not also inject/
+    );
+  }
 });
