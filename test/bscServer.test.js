@@ -216,15 +216,115 @@ test('starts an isolated BSC API, smart-wallet scanner, monitor, Bark store, and
   }
 });
 
+test('wires the default BSC token-detail and wallet-profit client through the loopback bridge', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'bsc-radar-analysis-bridge-'));
+  const dataFile = path.join(directory, 'bsc.sqlite');
+  const bridgeCalls = [];
+  const directCalls = [];
+  const fetchImpl = async (input, init = {}) => {
+    const url = String(input);
+    if (url === 'http://127.0.0.1:18118/internal/debot/request') {
+      const request = JSON.parse(init.body);
+      bridgeCalls.push(request);
+      if (request.type === 'debot.token_detail.v1') {
+        return new Response(JSON.stringify({
+          ok: true,
+          result: {
+            schema: 'debot.token_detail.raw.v1',
+            data: {
+              token: {
+                meta: {
+                  chain: 'bsc',
+                  address: bscToken,
+                  symbol: 'TEST',
+                  name: 'Bridge test'
+                }
+              },
+              pair: { chain: 'bsc', tokenAddress: bscToken }
+            }
+          }
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (request.type === 'debot.wallet_token_analysis.v1') {
+        return new Response(JSON.stringify({
+          ok: true,
+          result: {
+            schema: 'debot.wallet_token_analysis.raw.v1',
+            data: {
+              chain: 'bsc',
+              token: bscToken,
+              wallet,
+              buy_amount: 10,
+              buy_volume: 5,
+              position: 10,
+              balance: 15
+            }
+          }
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error(`Unexpected bridge job ${request.type}`);
+    }
+    directCalls.push(url);
+    return new Response(JSON.stringify({ code: 0, data: {} }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  const running = await startBscStandaloneServer({
+    BSC_HOST: '127.0.0.1',
+    BSC_PORT: '0',
+    BSC_DATA_FILE: dataFile
+  }, {
+    monitorRpcClient: capableBscMonitorRpc(),
+    holderClient: { async fetchTopHolders() { return { token: {}, holders: [] }; } },
+    fetchImpl
+  });
+  try {
+    const detail = await running.debotClient.fetchTokenDetail(bscToken);
+    const profit = await running.debotClient.fetchWalletTokenProfit(bscToken, wallet);
+    await running.debotClient.fetchTokenMetrics(bscToken);
+
+    assert.equal(running.debotClient instanceof RobinhoodDebotClient, true);
+    assert.equal(running.debotClient.chain, 'bsc');
+    assert.equal(running.debotClient.timeoutMs, running.config.debotRequestTimeoutMs);
+    assert.equal(running.service.debotClient, running.debotClient);
+    assert.equal(detail.address, bscToken);
+    assert.equal(detail.symbol, 'TEST');
+    assert.equal(profit.address, wallet);
+    assert.equal(profit.tokenAddress, bscToken);
+    assert.equal(profit.totalProfitUsd, 10);
+    assert.deepEqual(bridgeCalls, [
+      { type: 'debot.token_detail.v1', payload: { chain: 'bsc', token: bscToken } },
+      {
+        type: 'debot.wallet_token_analysis.v1',
+        payload: { chain: 'bsc', token: bscToken, wallet }
+      }
+    ]);
+    assert.deepEqual(directCalls, [
+      `https://debot.ai/api/dashboard/token/market/metrics?chain=bsc&token=${bscToken}`
+    ]);
+  } finally {
+    running.service.close();
+    running.monitor.close();
+    await new Promise((resolve) => running.server.close(resolve));
+    running.store.close();
+  }
+});
+
 test('creates a bridge-backed Holder profile client when an injected DeBot client lacks that method', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'bsc-radar-injected-debot-'));
   const dataFile = path.join(directory, 'bsc.sqlite');
+  const injectedCalls = [];
   const injectedDebotClient = {
-    async fetchTokenDetail() {
-      return {};
+    async fetchTokenDetail(address) {
+      injectedCalls.push({ type: 'detail', address });
+      return { source: 'injected-detail' };
     },
-    async fetchWalletTokenProfit() {
-      return {};
+    async fetchWalletTokenProfit(address, walletAddress) {
+      injectedCalls.push({ type: 'profit', address, wallet: walletAddress });
+      return { source: 'injected-profit' };
     },
     async fetchTokenMetrics() {
       return {};
@@ -254,12 +354,23 @@ test('creates a bridge-backed Holder profile client when an injected DeBot clien
   });
   try {
     assert.equal(running.debotClient, injectedDebotClient);
+    assert.equal(running.service.debotClient, injectedDebotClient);
     assert.equal(running.holderProfileDebotClient instanceof RobinhoodDebotClient, true);
     assert.notEqual(running.holderProfileDebotClient, injectedDebotClient);
     assert.equal(running.holderProfileDebotClient.chain, 'bsc');
     assert.equal(running.holderClient instanceof BscDebotHolderClient, true);
     assert.equal(running.holderClient.debotClient, running.holderProfileDebotClient);
     assert.equal(running.holderClient.rpcClient, running.rpcClient);
+    assert.deepEqual(await running.debotClient.fetchTokenDetail(bscToken), {
+      source: 'injected-detail'
+    });
+    assert.deepEqual(await running.debotClient.fetchWalletTokenProfit(bscToken, wallet), {
+      source: 'injected-profit'
+    });
+    assert.deepEqual(injectedCalls, [
+      { type: 'detail', address: bscToken },
+      { type: 'profit', address: bscToken, wallet }
+    ]);
     assert.deepEqual(
       await running.holderProfileDebotClient.fetchTokenHolderProfile(bscToken, { limit: 1 }),
       { chain: 'bsc', token: bscToken, total: 0, list: [] }

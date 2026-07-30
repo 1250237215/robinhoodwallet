@@ -68,7 +68,9 @@ class FakeBscRpc {
     fallbackBlock = 90,
     maxLogRange = Infinity,
     logOverride = null,
-    addressCode = new Map([[contract, '0x6000']])
+    addressCode = new Map([[contract, '0x6000']]),
+    latestTimestamp = 1_700_000_000,
+    secondsPerBlock = 3
   } = {}) {
     this.latestBlock = latestBlock;
     this.deploymentBlock = deploymentBlock;
@@ -81,9 +83,13 @@ class FakeBscRpc {
     this.maxLogRange = maxLogRange;
     this.logOverride = logOverride;
     this.addressCode = new Map(addressCode);
+    this.latestTimestamp = latestTimestamp;
+    this.secondsPerBlock = secondsPerBlock;
     this.logRequests = [];
     this.balanceChecks = [];
     this.findBlockCalls = [];
+    this.codeRequests = [];
+    this.blockSampleRequests = [];
   }
 
   async getBlockNumber() {
@@ -105,6 +111,7 @@ class FakeBscRpc {
     if (method === 'eth_getCode') {
       const [address, tag] = params;
       const block = Number(BigInt(tag));
+      this.codeRequests.push([address, block]);
       if (address === token) {
         if (this.failHistoricalCode && block < this.latestBlock) throw new Error('missing trie node');
         return block >= this.deploymentBlock ? '0x6000' : '0x';
@@ -123,12 +130,21 @@ class FakeBscRpc {
         return block >= from && block <= to;
       });
     }
+    if (method === 'eth_getBlockByNumber') {
+      const block = Number(BigInt(params[0]));
+      this.blockSampleRequests.push(block);
+      return {
+        number: quantity(block),
+        timestamp: quantity(this.latestTimestamp - ((this.latestBlock - block) * this.secondsPerBlock))
+      };
+    }
     throw new Error(`unexpected RPC method ${method}`);
   }
 
   async batchRequest(calls) {
     return Promise.all(calls.map(async (call) => {
       if (call.method === 'eth_getCode') return this.request(call.method, call.params);
+      if (call.method === 'eth_getBlockByNumber') return this.request(call.method, call.params);
       if (call.method !== 'eth_call') throw new Error(`unexpected batch method ${call.method}`);
       const data = call.params[0].data;
       const address = `0x${data.slice(-40)}`;
@@ -140,6 +156,7 @@ class FakeBscRpc {
 
 test('replays a complete BSC Transfer ledger and returns only verified wallet holders', async () => {
   const rpc = new FakeBscRpc({ maxLogRange: 50 });
+  rpc.findBlockByTimestamp = undefined;
   const client = new BscHolderClient({
     rpcClient: rpc,
     infrastructureAddresses: [infrastructure],
@@ -169,9 +186,11 @@ test('replays a complete BSC Transfer ledger and returns only verified wallet ho
   assert.equal(rpc.logRequests.some(([from, to]) => from === 100 && to === 200), true);
   assert.equal(rpc.logRequests.some(([from, to]) => to - from + 1 <= 50), true);
   assert.deepEqual(rpc.balanceChecks.sort(), [walletA, walletB].sort());
+  assert.deepEqual(rpc.blockSampleRequests, []);
+  assert.equal(rpc.codeRequests.filter(([address]) => address === token).length > 1, true);
 });
 
-test('uses a buffered DeBot creation time only when historical code is unavailable and verifies every balance', async () => {
+test('uses a buffered DeBot creation time without a historical code search and verifies every balance', async () => {
   const rpc = new FakeBscRpc({ failHistoricalCode: true, fallbackBlock: 90 });
   let detailCalls = 0;
   const client = new BscHolderClient({
@@ -192,21 +211,28 @@ test('uses a buffered DeBot creation time only when historical code is unavailab
   const result = await client.fetchTopHolders(token, { limit: 2 });
 
   assert.equal(detailCalls, 1);
-  assert.equal(result.deploymentBlock, 90);
+  assert.equal(result.deploymentBlock, 0);
   assert.equal(result.deploymentBlockSource, 'debot_creation_time_with_safety_buffer');
   assert.equal(result.historyStartReliable, false);
   assert.equal(result.historyStartValidation, 'supply_and_all_observed_balance_reconciliation');
-  assert.equal(rpc.findBlockCalls[0].timestamp, 1_699_996_400);
+  assert.deepEqual(rpc.findBlockCalls, []);
+  assert.deepEqual(rpc.blockSampleRequests, [200, 0]);
+  assert.deepEqual(
+    rpc.codeRequests.filter(([address]) => address === token),
+    [[token, 200]]
+  );
   assert.equal(rpc.balanceChecks.length, completeBalances.size + 2);
 });
 
-test('falls back to market creation time when public BSC history and DeBot detail are unavailable', async () => {
+test('prefers market creation time over DeBot and avoids timestamp and code binary searches', async () => {
   const rpc = new FakeBscRpc({ failHistoricalCode: true, fallbackBlock: 90 });
   let marketCalls = 0;
+  let detailCalls = 0;
   const client = new BscHolderClient({
     rpcClient: rpc,
     debotClient: {
       async fetchTokenDetail() {
+        detailCalls += 1;
         const error = new Error('DeBot request failed with HTTP 401');
         error.status = 401;
         throw error;
@@ -228,11 +254,196 @@ test('falls back to market creation time when public BSC history and DeBot detai
   const result = await client.fetchTopHolders(token, { limit: 2 });
 
   assert.equal(marketCalls, 1);
-  assert.equal(result.deploymentBlock, 90);
+  assert.equal(detailCalls, 0);
+  assert.equal(result.deploymentBlock, 0);
   assert.equal(result.deploymentBlockSource, 'market_creation_time_with_safety_buffer');
   assert.equal(result.historyStartReliable, false);
-  assert.equal(rpc.findBlockCalls[0].timestamp, 1_699_996_400);
+  assert.deepEqual(rpc.findBlockCalls, []);
+  assert.deepEqual(rpc.blockSampleRequests, [200, 0]);
+  assert.deepEqual(
+    rpc.codeRequests.filter(([address]) => address === token),
+    [[token, 200]]
+  );
   assert.equal(rpc.balanceChecks.length, completeBalances.size + 2);
+});
+
+test('uses the historical code boundary when market data has no creation timestamp', async () => {
+  const rpc = new FakeBscRpc();
+  const client = new BscHolderClient({
+    rpcClient: rpc,
+    creationTimeClient: {
+      fetchTokenMetrics: async () => ({ creationTimestamp: null, source: 'dexscreener_bsc_pair' })
+    }
+  });
+
+  const result = await client.fetchTopHolders(token, { limit: 2 });
+
+  assert.equal(result.deploymentBlock, 100);
+  assert.equal(result.deploymentBlockSource, 'bsc_rpc_historical_code');
+  assert.equal(result.historyStartReliable, true);
+  assert.deepEqual(rpc.blockSampleRequests, []);
+  assert.equal(rpc.codeRequests.filter(([address]) => address === token).length > 1, true);
+});
+
+test('preserves the strict unreliable-history error when creation time and archive history both fail', async () => {
+  const rpc = new FakeBscRpc({ failHistoricalCode: true });
+  const client = new BscHolderClient({
+    rpcClient: rpc,
+    creationTimeClient: {
+      fetchTokenMetrics: async () => ({ creationTimestamp: null })
+    }
+  });
+
+  await assert.rejects(
+    client.fetchTopHolders(token),
+    (error) => error instanceof BscHolderIntegrityError &&
+      error.code === 'UNRELIABLE_HISTORY_START' &&
+      /creation-time fallbacks/.test(error.message)
+  );
+});
+
+test('uses recent BSC block timestamps for a conservative fast start on a newly created token', async () => {
+  const latestBlock = 1_000_000;
+  const deploymentBlock = 999_900;
+  const latestTimestamp = 1_700_000_000;
+  const logs = [
+    transfer({ from: zero, to: walletA, amount: 1_000, block: deploymentBlock, index: 30 }),
+    transfer({ from: walletA, to: walletB, amount: 100, block: 999_950, index: 31 })
+  ];
+  const rpc = new FakeBscRpc({
+    latestBlock,
+    deploymentBlock,
+    latestTimestamp,
+    logs,
+    balances: new Map([[walletA, 900n], [walletB, 100n]]),
+    totalSupply: 1_000n
+  });
+  const client = new BscHolderClient({
+    rpcClient: rpc,
+    creationTimeClient: {
+      fetchTokenMetrics: async () => ({ creationTimestamp: latestTimestamp - 300 })
+    },
+    creationSafetySeconds: 60,
+    logWindow: 2_000
+  });
+
+  const result = await client.fetchTopHolders(token, { limit: 2 });
+
+  assert.equal(result.deploymentBlock, 998_656);
+  assert.equal(result.deploymentBlock < deploymentBlock, true);
+  assert.equal(result.deploymentBlockSource, 'market_creation_time_with_safety_buffer');
+  assert.equal(result.historyStartReliable, false);
+  assert.deepEqual(rpc.blockSampleRequests, [1_000_000, 997_952, 991_808]);
+  assert.deepEqual(
+    rpc.codeRequests.filter(([address]) => address === token),
+    [[token, latestBlock]]
+  );
+  assert.deepEqual(result.holders.map((row) => row.address), [walletA, walletB]);
+});
+
+test('caps a conservative fast estimate and succeeds without archive history when the ledger is complete', async () => {
+  const latestBlock = 1_000_000;
+  const deploymentBlock = 999_100;
+  const latestTimestamp = 1_700_000_000;
+  const rpc = new FakeBscRpc({
+    latestBlock,
+    deploymentBlock,
+    latestTimestamp,
+    failHistoricalCode: true,
+    logs: [transfer({ from: zero, to: walletA, amount: 1_000, block: deploymentBlock, index: 35 })],
+    balances: new Map([[walletA, 1_000n]]),
+    totalSupply: 1_000n
+  });
+  const client = new BscHolderClient({
+    rpcClient: rpc,
+    creationTimeClient: {
+      fetchTokenMetrics: async () => ({ creationTimestamp: latestTimestamp - 3_600 })
+    },
+    creationSafetySeconds: 60,
+    maxBlockSpan: 1_000,
+    logWindow: 2_000
+  });
+
+  const result = await client.fetchTopHolders(token, { limit: 1 });
+
+  assert.equal(result.deploymentBlock, 999_001);
+  assert.equal(result.deploymentBlockSource, 'market_creation_time_with_safety_buffer');
+  assert.equal(result.historyStartReliable, false);
+  assert.equal(result.scannedBlocks, 1_000);
+  assert.deepEqual(
+    rpc.codeRequests.filter(([address]) => address === token),
+    [[token, latestBlock]]
+  );
+  assert.deepEqual(result.holders.map((row) => row.address), [walletA]);
+});
+
+test('retries from the historical code boundary when the fast creation-time ledger is incomplete', async () => {
+  const latestBlock = 1_000_000;
+  const deploymentBlock = 990_000;
+  const latestTimestamp = 1_700_000_000;
+  const logs = [
+    transfer({ from: zero, to: walletA, amount: 1_000, block: deploymentBlock, index: 40 }),
+    transfer({ from: walletA, to: walletB, amount: 100, block: 999_900, index: 41 })
+  ];
+  const rpc = new FakeBscRpc({
+    latestBlock,
+    deploymentBlock,
+    latestTimestamp,
+    logs,
+    balances: new Map([[walletA, 900n], [walletB, 100n]]),
+    totalSupply: 1_000n
+  });
+  const client = new BscHolderClient({
+    rpcClient: rpc,
+    creationTimeClient: {
+      fetchTokenMetrics: async () => ({ creationTimestamp: latestTimestamp - 300 })
+    },
+    creationSafetySeconds: 60,
+    logWindow: 2_000
+  });
+
+  const result = await client.fetchTopHolders(token, { limit: 2 });
+
+  assert.equal(result.deploymentBlock, deploymentBlock);
+  assert.equal(result.deploymentBlockSource, 'bsc_rpc_historical_code');
+  assert.equal(result.historyStartReliable, true);
+  assert.equal(result.historyStartValidation, 'historical_code_boundary_and_supply_reconciliation');
+  assert.equal(rpc.logRequests.some(([from]) => from === 998_656), true);
+  assert.equal(rpc.logRequests.some(([from]) => from === deploymentBlock), true);
+  assert.equal(rpc.codeRequests.filter(([address]) => address === token).length > 10, true);
+  assert.deepEqual(result.holders.map((row) => row.address), [walletA, walletB]);
+});
+
+test('propagates an abort from creation-time block sampling without starting historical fallback', async () => {
+  const controller = new AbortController();
+  const reason = new Error('stop BSC Holder job');
+  reason.name = 'AbortError';
+  class AbortedSampleRpc extends FakeBscRpc {
+    async batchRequest(calls, options) {
+      if (calls.every((call) => call.method === 'eth_getBlockByNumber')) {
+        controller.abort(reason);
+        throw reason;
+      }
+      return super.batchRequest(calls, options);
+    }
+  }
+  const rpc = new AbortedSampleRpc({ latestBlock: 1_000_000 });
+  const client = new BscHolderClient({
+    rpcClient: rpc,
+    creationTimeClient: {
+      fetchTokenMetrics: async () => ({ creationTimestamp: 1_699_999_700 })
+    }
+  });
+
+  await assert.rejects(
+    client.fetchTopHolders(token, { signal: controller.signal }),
+    (error) => error === reason
+  );
+  assert.equal(
+    rpc.codeRequests.some(([address, block]) => address === token && block < rpc.latestBlock),
+    false
+  );
+  assert.deepEqual(rpc.logRequests, []);
 });
 
 test('keeps an EIP-7702 delegated EOA while excluding ordinary contracts', async () => {

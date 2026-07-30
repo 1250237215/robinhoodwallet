@@ -10,6 +10,16 @@ const DEAD_ADDRESSES = new Set([
 const DECIMALS_CALL = '0x313ce567';
 const TOTAL_SUPPLY_CALL = '0x18160ddd';
 const BALANCE_OF_CALL = '0x70a08231';
+const CREATION_BLOCK_SAMPLE_OFFSETS = Object.freeze([0, 2_048, 8_192]);
+const CREATION_RATE_SAFETY_MULTIPLIER = 1.2;
+const CREATION_ESTIMATE_PADDING_SECONDS = 3_600;
+const FAST_HISTORY_RETRY_CODES = new Set([
+  'INCOMPLETE_TRANSFER_HISTORY',
+  'SUPPLY_RECONCILIATION_FAILED',
+  'BALANCE_RECONCILIATION_FAILED',
+  'BALANCE_CHECK_LIMIT',
+  'BLOCK_SPAN_LIMIT'
+]);
 const RANGE_ERROR_PATTERN =
   /(?:too many|more than)\s+(?:results?|logs?)|query returned (?:more than|\d+)|(?:result|response) (?:size|limit).*(?:exceed|too large)|block range|range (?:is )?too (?:large|wide)|limit exceeded|exceed(?:s|ed)? (?:the )?(?:maximum|max)(?: (?:block )?range)?|(?:eth_getlogs|logs?) (?:is|are) limited to .*?(?:block )?range|please limit (?:the )?(?:query|block range)/i;
 
@@ -113,6 +123,10 @@ function rangeLimited(error) {
   return error?.code === -32005 || error?.status === 413 || RANGE_ERROR_PATTERN.test(errorMessage(error));
 }
 
+function retryableFastHistoryError(error) {
+  return error instanceof BscHolderIntegrityError && FAST_HISTORY_RETRY_CODES.has(error.code);
+}
+
 export class BscHolderIntegrityError extends Error {
   constructor(message, { code = 'BSC_HOLDER_INTEGRITY', cause } = {}) {
     super(message, cause ? { cause } : undefined);
@@ -194,6 +208,23 @@ function sortedBalances(balances) {
       : left[1] > right[1] ? -1 : 1);
 }
 
+function normalizeBlockSample(value, expectedBlock) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new BscHolderIntegrityError('BSC RPC returned an invalid sampled block', {
+      code: 'INVALID_RPC_VALUE'
+    });
+  }
+  const number = rpcInteger(String(value.number || ''), 'sampled block number');
+  const timestamp = rpcInteger(String(value.timestamp || ''), 'sampled block timestamp');
+  if (number !== expectedBlock) {
+    throw new BscHolderIntegrityError(
+      `BSC RPC returned block ${number} while sampling block ${expectedBlock}`,
+      { code: 'INVALID_RPC_VALUE' }
+    );
+  }
+  return { number, timestamp };
+}
+
 export class BscHolderClient {
   constructor({
     rpcClient,
@@ -212,7 +243,7 @@ export class BscHolderClient {
     now = Date.now
   } = {}) {
     if (!rpcClient?.request || !rpcClient?.batchRequest || !rpcClient?.getBlockNumber ||
-      !rpcClient?.findBlockByTimestamp || !rpcClient?.call) {
+      !rpcClient?.call) {
       throw new TypeError('A complete BSC RPC client is required');
     }
     if (debotClient !== null && typeof debotClient?.fetchTokenDetail !== 'function') {
@@ -248,7 +279,36 @@ export class BscHolderClient {
     throwIfAborted(signal);
     const target = boundedInteger(limit, 150, 1, 1_000);
     const latestBlock = await this.rpcClient.getBlockNumber({ signal });
-    const start = await this.#resolveHistoryStart(address, latestBlock, { signal });
+    const creationResolution = await this.#resolveCreationTimeStart(address, latestBlock, { signal });
+    const fastStart = creationResolution.start;
+    if (fastStart) {
+      try {
+        return await this.#fetchFromStart(address, target, latestBlock, fastStart, { signal });
+      } catch (fastError) {
+        throwIfAborted(signal);
+        if (!retryableFastHistoryError(fastError)) throw fastError;
+        let historicalStart;
+        try {
+          historicalStart = await this.#historicalCodeStart(address, latestBlock, { signal });
+        } catch (historicalError) {
+          throwIfAborted(signal);
+          if (historicalError?.code === 'TOKEN_HAS_NO_CODE') throw historicalError;
+          throw fastError;
+        }
+        return this.#fetchFromStart(address, target, latestBlock, historicalStart, { signal });
+      }
+    }
+
+    const historicalStart = await this.#requiredHistoricalCodeStart(
+      address,
+      latestBlock,
+      creationResolution.errors,
+      { signal }
+    );
+    return this.#fetchFromStart(address, target, latestBlock, historicalStart, { signal });
+  }
+
+  async #fetchFromStart(address, target, latestBlock, start, { signal }) {
     const scannedBlocks = latestBlock - start.block + 1;
     if (scannedBlocks > this.maxBlockSpan) {
       throw new BscHolderScanLimitError(
@@ -319,34 +379,20 @@ export class BscHolderClient {
     };
   }
 
-  async #resolveHistoryStart(address, latestBlock, { signal }) {
-    let historicalError;
-    try {
-      return await this.#historicalCodeStart(address, latestBlock, { signal });
-    } catch (error) {
-      throwIfAborted(signal);
-      if (error?.code === 'TOKEN_HAS_NO_CODE') throw error;
-      historicalError = error;
-    }
-
-    if (!this.debotClient && !this.creationTimeClient) {
-      throw new BscHolderIntegrityError(
-        `BSC deployment block is unavailable and no creation-time fallback is configured: ${errorMessage(historicalError)}`,
-        { code: 'UNRELIABLE_HISTORY_START', cause: historicalError }
-      );
-    }
+  async #resolveCreationTimeStart(address, latestBlock, { signal }) {
+    if (!this.debotClient && !this.creationTimeClient) return { start: null, errors: [] };
     const fallbackErrors = [];
     const sources = [];
-    if (this.debotClient) {
-      sources.push({
-        name: 'debot_creation_time_with_safety_buffer',
-        load: () => this.debotClient.fetchTokenDetail(address, { signal })
-      });
-    }
     if (this.creationTimeClient) {
       sources.push({
         name: 'market_creation_time_with_safety_buffer',
         load: () => this.creationTimeClient.fetchTokenMetrics(address, { signal })
+      });
+    }
+    if (this.debotClient) {
+      sources.push({
+        name: 'debot_creation_time_with_safety_buffer',
+        load: () => this.debotClient.fetchTokenDetail(address, { signal })
       });
     }
     for (const source of sources) {
@@ -357,37 +403,101 @@ export class BscHolderClient {
           throw new Error('token detail has no creation timestamp');
         }
         const safeTimestamp = Math.max(0, Math.floor(creationTimestamp) - this.creationSafetySeconds);
-        const ageSeconds = Math.max(0, Math.floor(this.now() / 1_000) - safeTimestamp);
-        const estimatedLookback = Math.min(
-          this.maxBlockSpan - 1,
-          Math.max(1_000, Math.ceil(ageSeconds * 5) + 1_000)
-        );
-        const lowBlock = Math.max(0, latestBlock - estimatedLookback);
-        const block = await this.rpcClient.findBlockByTimestamp(safeTimestamp, {
-          lowBlock,
-          highBlock: latestBlock,
-          signal
-        });
+        const [block, latestCode] = await Promise.all([
+          this.#estimateCreationStartBlock(safeTimestamp, latestBlock, { signal }),
+          this.#codeAt(address, latestBlock, { signal })
+        ]);
+        if (emptyCode(latestCode)) {
+          throw new BscHolderIntegrityError('BSC token address has no contract code at the snapshot block', {
+            code: 'TOKEN_HAS_NO_CODE'
+          });
+        }
         return {
-          block,
-          source: source.name,
-          reliable: false,
-          creationTimestamp: Math.floor(creationTimestamp),
-          fallbackSearchLowBlock: lowBlock,
-          historicalCodeError: errorMessage(historicalError),
-          fallbackErrors
+          start: {
+            block,
+            source: source.name,
+            reliable: false,
+            creationTimestamp: Math.floor(creationTimestamp),
+            fallbackErrors
+          },
+          errors: fallbackErrors
         };
       } catch (fallbackError) {
         throwIfAborted(signal);
         fallbackErrors.push(`${source.name}: ${errorMessage(fallbackError)}`);
       }
     }
-    const fallbackError = new Error(fallbackErrors.join('; ') || 'no creation timestamp source succeeded');
-    throw new BscHolderIntegrityError(
-      `BSC Holder history start is unverifiable: historical code ${errorMessage(historicalError)}; ` +
-      `creation-time fallbacks ${errorMessage(fallbackError)}`,
-      { code: 'UNRELIABLE_HISTORY_START', cause: fallbackError }
+    return { start: null, errors: fallbackErrors };
+  }
+
+  async #estimateCreationStartBlock(safeTimestamp, latestBlock, { signal }) {
+    throwIfAborted(signal);
+    if (latestBlock === 0) return 0;
+    const blockNumbers = [...new Set(CREATION_BLOCK_SAMPLE_OFFSETS.map((offset) =>
+      Math.max(0, latestBlock - Math.min(latestBlock, offset))))];
+    const values = await this.rpcClient.batchRequest(
+      blockNumbers.map((number) => ({
+        method: 'eth_getBlockByNumber',
+        params: [blockTag(number), false]
+      })),
+      { signal }
     );
+    if (!Array.isArray(values) || values.length !== blockNumbers.length) {
+      throw new BscHolderIntegrityError('BSC RPC returned an incomplete sampled block batch', {
+        code: 'INVALID_RPC_VALUE'
+      });
+    }
+    const samples = values
+      .map((value, index) => normalizeBlockSample(value, blockNumbers[index]))
+      .sort((left, right) => left.number - right.number);
+    const latestSample = samples.at(-1);
+    const rates = [];
+    for (let index = 1; index < samples.length; index += 1) {
+      const blockDelta = samples[index].number - samples[index - 1].number;
+      const timeDelta = samples[index].timestamp - samples[index - 1].timestamp;
+      if (timeDelta <= 0) {
+        throw new BscHolderIntegrityError('BSC sampled block timestamps are not monotonic', {
+          code: 'INVALID_RPC_VALUE'
+        });
+      }
+      if (blockDelta > 0 && timeDelta > 0) rates.push(blockDelta / timeDelta);
+    }
+    if (!rates.length) {
+      throw new BscHolderIntegrityError('BSC sampled blocks cannot establish a recent block rate', {
+        code: 'INVALID_RPC_VALUE'
+      });
+    }
+    const blocksPerSecond = Math.max(...rates);
+    const ageSeconds = Math.max(0, latestSample.timestamp - safeTimestamp);
+    // Pad both the observed production rate and the time range; reconciliation remains authoritative.
+    const estimate = Math.ceil(ageSeconds * blocksPerSecond * CREATION_RATE_SAFETY_MULTIPLIER);
+    const padding = Math.max(1_000, Math.ceil(blocksPerSecond * CREATION_ESTIMATE_PADDING_SECONDS));
+    const lookback = Math.min(this.maxBlockSpan - 1, estimate + padding);
+    return Math.max(0, latestBlock - lookback);
+  }
+
+  async #requiredHistoricalCodeStart(address, latestBlock, creationErrors, { signal }) {
+    try {
+      return await this.#historicalCodeStart(address, latestBlock, { signal });
+    } catch (historicalError) {
+      throwIfAborted(signal);
+      if (historicalError?.code === 'TOKEN_HAS_NO_CODE') throw historicalError;
+      if (!this.debotClient && !this.creationTimeClient) {
+        throw new BscHolderIntegrityError(
+          `BSC deployment block is unavailable and no creation-time fallback is configured: ` +
+          errorMessage(historicalError),
+          { code: 'UNRELIABLE_HISTORY_START', cause: historicalError }
+        );
+      }
+      const fallbackError = new Error(
+        creationErrors.join('; ') || 'no creation timestamp source succeeded'
+      );
+      throw new BscHolderIntegrityError(
+        `BSC Holder history start is unverifiable: historical code ${errorMessage(historicalError)}; ` +
+        `creation-time fallbacks ${errorMessage(fallbackError)}`,
+        { code: 'UNRELIABLE_HISTORY_START', cause: fallbackError }
+      );
+    }
   }
 
   async #historicalCodeStart(address, latestBlock, { signal }) {

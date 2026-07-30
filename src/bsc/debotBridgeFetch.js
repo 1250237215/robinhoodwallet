@@ -47,7 +47,7 @@ export function bscDebotBridgeRequest(input, init = {}) {
   if (chain !== 'bsc' || !ADDRESS_PATTERN.test(token)) return null;
 
   if (url.pathname === TOKEN_DETAIL_PATH && hasOnlyParameters(url, ['chain', 'token'])) {
-    return { type: 'debot.token_detail.v1', payload: { chain, token }, bridgeRequired: false };
+    return { type: 'debot.token_detail.v1', payload: { chain, token }, bridgeRequired: true };
   }
 
   const wallet = String(url.searchParams.get('wallet') || '').trim().toLowerCase();
@@ -59,7 +59,7 @@ export function bscDebotBridgeRequest(input, init = {}) {
     return {
       type: 'debot.wallet_token_analysis.v1',
       payload: { chain, token, wallet },
-      bridgeRequired: false
+      bridgeRequired: true
     };
   }
 
@@ -134,8 +134,6 @@ export function createBscDebotBridgeFetch({
   return async function bscDebotBridgeFetch(input, init = {}) {
     const request = bscDebotBridgeRequest(input, init);
     if (!request) return fetchImpl(input, init);
-    if (!request.bridgeRequired) return fetchImpl(input, init);
-
     try {
       const timeoutSignal = AbortSignal.timeout(waitMs);
       const signal = init?.signal ? AbortSignal.any([init.signal, timeoutSignal]) : timeoutSignal;
@@ -153,10 +151,10 @@ export function createBscDebotBridgeFetch({
     } catch (bridgeError) {
       if (init?.signal?.aborted || bridgeError?.name === 'AbortError') throw bridgeError;
       const error = new Error(
-        'BSC Holder analysis requires the signed-in DeBot browser bridge to be online',
+        'BSC DeBot analysis requires the signed-in browser bridge to be online',
         bridgeError instanceof Error ? { cause: bridgeError } : undefined
       );
-      error.code = 'BSC_DEBOT_HOLDER_BRIDGE_UNAVAILABLE';
+      error.code = 'BSC_DEBOT_ANALYSIS_BRIDGE_UNAVAILABLE';
       error.retryable = false;
       throw error;
     }

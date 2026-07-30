@@ -269,15 +269,15 @@ export async function startBscStandaloneServer(
     addressValidator: config.addressValidator,
     transactionNormalizer: config.transactionNormalizer
   });
-  const holderBridgeFetch = createBscDebotBridgeFetch({
+  const analysisBridgeFetch = createBscDebotBridgeFetch({
     bridgeUrl: config.debotBridgeUrl,
     fetchImpl,
     timeoutMs: config.debotBridgeTimeoutMs
   });
   const activeDebotClient = debotClient || new RobinhoodDebotClient({
     chain: 'bsc',
-    timeoutMs: config.requestTimeoutMs,
-    fetchImpl,
+    timeoutMs: config.debotRequestTimeoutMs,
+    fetchImpl: analysisBridgeFetch,
     addressNormalizer: config.addressNormalizer,
     addressValidator: config.addressValidator
   });
@@ -286,7 +286,7 @@ export async function startBscStandaloneServer(
     : new RobinhoodDebotClient({
         chain: 'bsc',
         timeoutMs: config.debotRequestTimeoutMs,
-        fetchImpl: holderBridgeFetch,
+        fetchImpl: analysisBridgeFetch,
         addressNormalizer: config.addressNormalizer,
         addressValidator: config.addressValidator
       });
