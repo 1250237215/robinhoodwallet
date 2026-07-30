@@ -14,8 +14,8 @@ readonly health_connect_timeout_seconds="${DEPLOY_HEALTH_CONNECT_TIMEOUT_SECONDS
 readonly health_request_timeout_seconds="${DEPLOY_HEALTH_REQUEST_TIMEOUT_SECONDS:-5}"
 readonly monitor_ready_timeout_seconds="${DEPLOY_MONITOR_READY_TIMEOUT_SECONDS:-30}"
 readonly solana_monitor_ready_timeout_seconds="${SOLANA_MONITOR_READY_TIMEOUT_SECONDS:-120}"
-readonly services=("robinhood-radar" "base-radar" "solana-radar")
-readonly chains=("robinhood" "base" "solana")
+readonly services=("robinhood-radar" "base-radar" "bsc-radar" "solana-radar")
+readonly chains=("robinhood" "base" "bsc" "solana")
 
 rollback_needed=0
 caddy_changed=0
@@ -207,9 +207,11 @@ verify_release_manifest() {
     REVISION \
     robinhood-server.mjs \
     base-server.mjs \
+    bsc-server.mjs \
     solana-server.mjs \
     robinhood-radar.service \
     base-radar.service \
+    bsc-radar.service \
     solana-radar.service \
     public.tar.gz; do
     manifest_contains_file "$manifest" "$required" || {
@@ -232,7 +234,7 @@ rollback() {
   rm -f "${caddy_candidate:-}"
 
   if [[ $exit_code -ne 0 ]]; then
-    echo "Deployment failed; restoring the previous three-chain release." >&2
+    echo "Deployment failed; restoring the previous release." >&2
     if [[ $rollback_needed -eq 1 && -d "$release_backup" ]]; then
       for service in "${services[@]}"; do
         systemctl stop "$service.service" 2>/dev/null || true
@@ -300,9 +302,11 @@ verify_release_manifest "$staging_dir"
 for file in \
   "$staging_dir/robinhood-server.mjs" \
   "$staging_dir/base-server.mjs" \
+  "$staging_dir/bsc-server.mjs" \
   "$staging_dir/solana-server.mjs" \
   "$staging_dir/robinhood-radar.service" \
   "$staging_dir/base-radar.service" \
+  "$staging_dir/bsc-radar.service" \
   "$staging_dir/solana-radar.service" \
   "$staging_dir/public.tar.gz" \
   "$staging_dir/REVISION" \
@@ -381,7 +385,7 @@ for service in "${services[@]}"; do
   systemctl start "$service.service"
 done
 
-declare -A ports=([robinhood]=18118 [base]=18119 [solana]=18120)
+declare -A ports=([robinhood]=18118 [base]=18119 [bsc]=18122 [solana]=18120)
 for chain in "${chains[@]}"; do
   health_file="$(mktemp)"
   for attempt in $(seq 1 30); do

@@ -1894,11 +1894,15 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         return { state: 'created', job };
       });
     },
-    claimDeBotJobs({ limit = 4, leaseMs = 120_000, createClaimToken } = {}) {
+    claimDeBotJobs({ limit = 4, leaseMs = 120_000, createClaimToken, types = null } = {}) {
       if (typeof createClaimToken !== 'function') throw new TypeError('A DeBot claim-token factory is required');
       const timestamp = now();
       const boundedLimit = Math.min(32, Math.max(1, Math.floor(Number(limit) || 4)));
       const lease = Math.max(1_000, Math.floor(Number(leaseMs) || 120_000));
+      const allowedTypes = types === null
+        ? null
+        : [...new Set((Array.isArray(types) ? types : []).map((type) => String(type || '').trim()).filter(Boolean))];
+      if (allowedTypes !== null && !allowedTypes.length) return [];
       return transaction(db, () => {
         db.prepare(`
           UPDATE debot_bridge_jobs
@@ -1912,12 +1916,15 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
               claim_token = '', updated_at = ?
           WHERE status = 'claimed' AND lease_expires_at <= ? AND deadline_at > ?
         `).run(timestamp, timestamp, timestamp);
+        const typeFilter = allowedTypes === null
+          ? ''
+          : ` AND job_type IN (${allowedTypes.map(() => '?').join(', ')})`;
         const rows = db.prepare(`
           SELECT * FROM debot_bridge_jobs
-          WHERE status = 'pending' AND deadline_at > ?
+          WHERE status = 'pending' AND deadline_at > ?${typeFilter}
           ORDER BY id
           LIMIT ?
-        `).all(timestamp, boundedLimit);
+        `).all(timestamp, ...(allowedTypes || []), boundedLimit);
         const claimed = [];
         const claim = db.prepare(`
           UPDATE debot_bridge_jobs

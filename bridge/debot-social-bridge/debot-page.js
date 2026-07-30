@@ -1,7 +1,7 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const BRIDGE_VERSION = '1.8.1';
+  const BRIDGE_VERSION = '1.9.0';
   const BRIDGE_SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
@@ -23,13 +23,18 @@
   const PAGE_PENDING_MAX_POSTS = 100;
   const PAGE_PENDING_MAX_BYTES = 2 * 1024 * 1024;
   const ERROR_TYPES = new Set(['AUTH', 'TIMEOUT', 'NETWORK', 'DEBOT']);
-  const ANALYSIS_JOB_TYPES = new Set(['debot.token_detail.v1', 'debot.wallet_token_analysis.v1']);
+  const ANALYSIS_JOB_TYPES = new Set([
+    'debot.token_detail.v1',
+    'debot.wallet_token_analysis.v1',
+    'debot.token_holders.v1'
+  ]);
   const ANALYSIS_CONCURRENCY = 4;
   const ANALYSIS_QUEUE_LIMIT = 32;
   const MAX_ANALYSIS_RESULT_BYTES = 256 * 1024;
   const WATCHLIST_PAGE_SIZE = 500;
   const WATCHLIST_MAX_PAGES = 10;
   const EVM_ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
+  const ZERO_EVM_ADDRESS = '0x0000000000000000000000000000000000000000';
   const MAX_DIAGNOSTIC_COUNTER = 1_000_000_000;
   const MAX_SOCKET_PAYLOADS_PER_FRAME = 24;
   const PERSONAL_TWITTER_PAYLOAD_CHANNELS = new Set([
@@ -1357,6 +1362,7 @@
       'commands',
       'debot-session',
       'debot-analysis-v1',
+      'debot-token-holders-v1',
       ...(timelineCatchUpTruncated ? ['catchup-truncated'] : [])
     ];
   }
@@ -1566,7 +1572,7 @@
     return {
       token: {
         meta: compact({
-          chain: 'robinhood',
+          chain: payload.chain,
           address,
           creator_address: normalizeEvmAddress(meta.creator_address),
           symbol: limitedText(meta.symbol, 120),
@@ -1578,7 +1584,7 @@
         social: compact({ logo_cache: limitedText(social.logo_cache, 2_000) })
       },
       pair: compact({
-        chain: 'robinhood',
+        chain: payload.chain,
         tokenPairAddress: normalizeEvmAddress(pair.tokenPairAddress),
         pair: normalizeEvmAddress(pair.pair),
         tokenAddress: normalizeEvmAddress(pair.tokenAddress) || address,
@@ -1668,7 +1674,7 @@
       throw new AnalysisJobError('DEBOT');
     }
     const { wallet, token } = payload;
-    const result = { chain: 'robinhood', wallet, token };
+    const result = { chain: payload.chain, wallet, token };
     for (const field of WALLET_PROFIT_NUMERIC_FIELDS) {
       const parsed = optionalNumber(raw[field]);
       if (parsed !== undefined) result[field] = parsed;
@@ -1677,6 +1683,201 @@
       result.first_funding = compact(Object.fromEntries(
         FIRST_FUNDING_FIELDS.map((field) => [field, limitedText(raw.first_funding[field], 200)])
       ));
+    }
+    return result;
+  }
+
+  const HOLDER_AMOUNT_FIELDS = [
+    'position',
+    'hold_amount',
+    'holding_amount',
+    'holder_amount',
+    'token_amount',
+    'current_amount',
+    'amount'
+  ];
+
+  const HOLDER_VALUE_FIELDS = [
+    'holding_value_usd',
+    'position_value_usd',
+    'balance_usd',
+    'current_value_usd',
+    'value_usd',
+    'usd_value'
+  ];
+
+  const HOLDER_SHARE_FIELDS = [
+    'percentage',
+    'share',
+    'share_percent',
+    'holding_percentage',
+    'holding_share_percent'
+  ];
+
+  const HOLDER_PROFIT_NUMERIC_FIELDS = [
+    ...WALLET_PROFIT_NUMERIC_FIELDS,
+    'total_profit',
+    'total_profit_rate',
+    'pnl',
+    'pnl_rate',
+    'win_rate',
+    'token_count',
+    'winning_token_count'
+  ];
+
+  function firstPresent(value, fields) {
+    for (const field of fields) {
+      if (value?.[field] !== null && value?.[field] !== undefined && value[field] !== '') {
+        return value[field];
+      }
+    }
+    return undefined;
+  }
+
+  function limitedNumericScalar(value) {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+    if (typeof value !== 'string') return undefined;
+    const candidate = value.trim();
+    if (!candidate || candidate.length > 120
+      || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(candidate)) return undefined;
+    return candidate;
+  }
+
+  function limitedNonNegativeNumericScalar(value) {
+    const parsed = limitedNumericScalar(value);
+    if (parsed === undefined) return undefined;
+    return (typeof parsed === 'number' ? parsed < 0 : parsed.startsWith('-')) ? undefined : parsed;
+  }
+
+  function optionalBooleanFlag(value) {
+    if (value === true || value === 1 || value === '1' || String(value || '').toLowerCase() === 'true') {
+      return true;
+    }
+    if (value === false || value === 0 || value === '0' || String(value || '').toLowerCase() === 'false') {
+      return false;
+    }
+    return undefined;
+  }
+
+  function sanitizeHolderTags(...values) {
+    const tags = [];
+    const seen = new Set();
+    const add = (value) => {
+      const tag = limitedText(value, 80).trim();
+      const key = tag.toLowerCase();
+      if (!tag || seen.has(key) || tags.length >= 12) return;
+      seen.add(key);
+      tags.push(tag);
+    };
+    const visit = (value, depth = 0) => {
+      if (value === null || value === undefined || depth > 2 || tags.length >= 12) return;
+      if (['string', 'number', 'boolean'].includes(typeof value)) {
+        add(value);
+        return;
+      }
+      if (Array.isArray(value)) {
+        for (const item of value.slice(0, 24)) visit(item, depth + 1);
+        return;
+      }
+      if (typeof value !== 'object') return;
+      const named = value.name ?? value.label ?? value.tag ?? value.value;
+      if (['string', 'number'].includes(typeof named)) {
+        add(named);
+        return;
+      }
+      for (const [key, item] of Object.entries(value).slice(0, 24)) {
+        if (/(?:auth|cookie|password|secret|session|token)/i.test(key)) continue;
+        if (item === true || item === 1) add(key);
+        else if (typeof item === 'string') add(item);
+      }
+    };
+    for (const value of values) visit(value);
+    return tags;
+  }
+
+  function sanitizeHolderProfit(row) {
+    const nested = [row.profit_info, row.profitInfo, row.wallet_profit, row.walletProfit, row.profit]
+      .find((value) => value && typeof value === 'object' && !Array.isArray(value));
+    const source = nested || row;
+    const result = {};
+    for (const field of HOLDER_PROFIT_NUMERIC_FIELDS) {
+      const parsed = optionalNumber(source[field]);
+      if (parsed !== undefined) result[field] = parsed;
+    }
+    return result;
+  }
+
+  function sanitizeTokenHolders(rawValue, payload) {
+    if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
+      throw new AnalysisJobError('DEBOT');
+    }
+    const raw = rawValue;
+    const explicitChain = typeof raw.chain === 'string' ? raw.chain.trim().toLowerCase() : '';
+    const explicitTokenValue = [raw.token, raw.token_address, raw.tokenAddress]
+      .find((value) => typeof value === 'string' && value.trim());
+    const explicitToken = explicitTokenValue ? normalizeEvmAddress(explicitTokenValue) : '';
+    if ((explicitChain && explicitChain !== payload.chain)
+      || (explicitTokenValue && (!explicitToken || explicitToken !== payload.token))) {
+      throw new AnalysisJobError('DEBOT');
+    }
+    const rows = [raw.list, raw.holders, raw.wallets, raw.holder_list, raw.holderList]
+      .find((value) => Array.isArray(value));
+    if (!rows) throw new AnalysisJobError('DEBOT');
+
+    const holders = [];
+    const seen = new Set();
+    for (const value of rows) {
+      if (holders.length >= payload.pageSize) break;
+      const row = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+      const address = normalizeEvmAddress(
+        row.address || row.wallet || row.wallet_address || row.walletAddress || row.holder || row.owner_address
+      );
+      if (!address || address === ZERO_EVM_ADDRESS || seen.has(address)) continue;
+      seen.add(address);
+      const rawRank = optionalNumber(firstPresent(row, ['rank', 'holder_rank', 'holderRank']));
+      const rank = Number.isSafeInteger(rawRank) && rawRank > 0 ? rawRank : undefined;
+      const holdAmount = limitedNonNegativeNumericScalar(firstPresent(row, HOLDER_AMOUNT_FIELDS));
+      const holdingValueUsd = limitedNonNegativeNumericScalar(
+        row.balance ?? firstPresent(row, HOLDER_VALUE_FIELDS)
+      );
+      const ratioPercent = optionalNumber(row.percent);
+      const rawPercentage = ratioPercent === undefined
+        ? optionalNumber(firstPresent(row, HOLDER_SHARE_FIELDS))
+        : ratioPercent * 100;
+      const percentage = rawPercentage !== undefined && rawPercentage >= 0 && rawPercentage <= 100
+        ? rawPercentage
+        : undefined;
+      const tags = sanitizeHolderTags(row.tags, row.tag, row.tag_list, row.tagList, row.tag_map, row.tagMap, row.labels);
+      const profit = sanitizeHolderProfit(row);
+      holders.push(compact({
+        address,
+        rank,
+        holding_amount: holdAmount,
+        holding_value_usd: holdingValueUsd,
+        holding_share_percent: percentage,
+        is_contract: optionalBooleanFlag(row.is_contract ?? row.isContract),
+        is_pair: optionalBooleanFlag(row.is_pair ?? row.isPair),
+        is_pool: optionalBooleanFlag(row.is_pool ?? row.isPool),
+        is_lp: optionalBooleanFlag(row.is_lp ?? row.isLp),
+        is_burn: optionalBooleanFlag(row.is_burn ?? row.isBurn),
+        type: limitedText(row.type, 120),
+        wallet_type: limitedText(row.wallet_type ?? row.walletType, 120),
+        label: limitedText(row.label, 120),
+        name: limitedText(row.name, 120),
+        tags: tags.length ? tags : undefined,
+        profit: Object.keys(profit).length ? profit : undefined
+      }));
+    }
+
+    const result = compact({
+      chain: payload.chain,
+      token: payload.token,
+      total: optionalNumber(raw.total ?? raw.count ?? raw.holder_count ?? raw.holderCount),
+      list: holders
+    });
+    while (holders.length && utf8Bytes(JSON.stringify(result)) > MAX_ANALYSIS_RESULT_BYTES) holders.pop();
+    if (utf8Bytes(JSON.stringify(result)) > MAX_ANALYSIS_RESULT_BYTES) {
+      throw new AnalysisJobError('RESULT_TOO_LARGE');
     }
     return result;
   }
@@ -1694,14 +1895,39 @@
     };
   }
 
+  function exactAnalysisPayloadKeys(value, expected) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const keys = Object.keys(value).sort();
+    const allowed = [...expected].sort();
+    return keys.length === allowed.length && keys.every((key, index) => key === allowed[index]);
+  }
+
   function validatedAnalysisPayload(job) {
     if (!ANALYSIS_JOB_TYPES.has(job.type)) throw new AnalysisJobError('INVALID_JOB');
+    const validShape = job.type === 'debot.wallet_token_analysis.v1'
+      ? exactAnalysisPayloadKeys(job.payload, ['chain', 'token', 'wallet'])
+      : job.type === 'debot.token_holders.v1'
+        ? exactAnalysisPayloadKeys(job.payload, ['chain', 'token'])
+          || exactAnalysisPayloadKeys(job.payload, ['chain', 'pageSize', 'token'])
+        : exactAnalysisPayloadKeys(job.payload, ['chain', 'token']);
+    if (!validShape) throw new AnalysisJobError('INVALID_JOB');
     const chain = String(job.payload.chain || '').trim().toLowerCase();
     const token = normalizeEvmAddress(job.payload.token);
-    if (chain !== 'robinhood' || !token) throw new AnalysisJobError('INVALID_JOB');
+    if (!['robinhood', 'bsc'].includes(chain) || !token || token === ZERO_EVM_ADDRESS) {
+      throw new AnalysisJobError('INVALID_JOB');
+    }
+    if (job.type === 'debot.token_holders.v1') {
+      if (chain !== 'bsc') throw new AnalysisJobError('INVALID_JOB');
+      const requestedPageSize = job.payload.pageSize ?? 100;
+      const pageSize = Number(requestedPageSize);
+      if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+        throw new AnalysisJobError('INVALID_JOB');
+      }
+      return { chain, token, pageSize };
+    }
     if (job.type === 'debot.token_detail.v1') return { chain, token };
     const wallet = normalizeEvmAddress(job.payload.wallet);
-    if (!wallet) throw new AnalysisJobError('INVALID_JOB');
+    if (!wallet || wallet === ZERO_EVM_ADDRESS) throw new AnalysisJobError('INVALID_JOB');
     return { chain, token, wallet };
   }
 
@@ -1711,10 +1937,18 @@
     let result;
     if (job.type === 'debot.token_detail.v1') {
       result = sanitizeTokenDetail(await api(`dashboard/token/detail?${params}`), payload);
-    } else {
+    } else if (job.type === 'debot.wallet_token_analysis.v1') {
       params.set('wallet', payload.wallet);
       result = sanitizeWalletTokenAnalysis(
         await api(`dex/profit/wallet_token_analysis?${params}`),
+        payload
+      );
+    } else {
+      params.set('page_size', String(payload.pageSize));
+      params.set('sort_field', 'position');
+      params.set('sort_order', 'desc');
+      result = sanitizeTokenHolders(
+        await api(`token/profiler/tokenHolderList?${params}`),
         payload
       );
     }
@@ -2022,7 +2256,7 @@
           bridgeId: 'debot-browser-extension',
           version: BRIDGE_VERSION,
           sessionId: BRIDGE_SESSION_ID,
-          capabilities: ['debot-analysis-v1', 'error'],
+          capabilities: ['debot-analysis-v1', 'debot-token-holders-v1', 'error'],
           error: errorType,
           diagnostics: bridgeDiagnosticsSnapshot()
         });

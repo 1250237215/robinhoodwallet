@@ -15,8 +15,9 @@
   "scripts": {
     "build:robinhood": "esbuild src/robinhood/main.js --bundle --platform=node --format=esm --minify --legal-comments=external --outfile=dist/robinhood-server.mjs",
     "build:base": "esbuild src/base/server.js --bundle --platform=node --format=esm --minify --legal-comments=external --outfile=dist/base-server.mjs",
+    "build:bsc": "esbuild src/bsc/server.js --bundle --platform=node --format=esm --minify --legal-comments=external --outfile=dist/bsc-server.mjs",
     "build:solana": "esbuild src/solana/server.js --bundle --platform=node --format=esm --minify --legal-comments=external --outfile=dist/solana-server.mjs",
-    "build:all": "npm run build:robinhood && npm run build:base && npm run build:solana",
+    "build:all": "npm run build:robinhood && npm run build:base && npm run build:bsc && npm run build:solana",
     "release:prepare": "node scripts/prepare-release.mjs",
     "classify:wallets": "node scripts/classify-robinhood-wallets.mjs",
     "verify:monitor:rpc": "node scripts/verify-robinhood-monitor-latency.mjs",
@@ -24,6 +25,7 @@
     "start:legacy": "node src/server.js",
     "start:robinhood": "node src/robinhood/main.js",
     "start:base": "node src/base/server.js",
+    "start:bsc": "node src/bsc/server.js",
     "start:solana": "node src/solana/server.js",
     "test": "node --test"
   },

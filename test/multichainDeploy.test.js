@@ -14,9 +14,11 @@ const caddy = fs.readFileSync(new URL('../deploy/Caddyfile.example', import.meta
 const installer = fs.readFileSync(new URL('../deploy/install-remote.sh', import.meta.url), 'utf8');
 const robinhoodUnit = fs.readFileSync(new URL('../deploy/robinhood-radar.service', import.meta.url), 'utf8');
 const baseUnit = fs.readFileSync(new URL('../deploy/base-radar.service', import.meta.url), 'utf8');
+const bscUnit = fs.readFileSync(new URL('../deploy/bsc-radar.service', import.meta.url), 'utf8');
 const solanaUnit = fs.readFileSync(new URL('../deploy/solana-radar.service', import.meta.url), 'utf8');
 const robinhoodEnv = fs.readFileSync(new URL('../deploy/robinhood.env.example', import.meta.url), 'utf8');
 const baseEnv = fs.readFileSync(new URL('../deploy/base.env.example', import.meta.url), 'utf8');
+const bscEnv = fs.readFileSync(new URL('../deploy/bsc.env.example', import.meta.url), 'utf8');
 const solanaEnv = fs.readFileSync(new URL('../deploy/solana.env.example', import.meta.url), 'utf8');
 const socialEnv = fs.readFileSync(new URL('../deploy/social.env.example', import.meta.url), 'utf8');
 const bootstrap = fs.readFileSync(new URL('../deploy/bootstrap-host.sh', import.meta.url), 'utf8');
@@ -48,25 +50,28 @@ function runInstallerHelperRaw(helper, ...args) {
 }
 
 test('builds one standalone bundle for every isolated chain runtime', () => {
-  assert.match(packageJson.scripts['build:all'], /build:robinhood.*build:base.*build:solana/);
+  assert.match(packageJson.scripts['build:all'], /build:robinhood.*build:base.*build:bsc.*build:solana/);
   assert.match(packageJson.scripts['build:robinhood'], /src\/robinhood\/main\.js.*dist\/robinhood-server\.mjs/);
   assert.match(packageJson.scripts['build:base'], /src\/base\/server\.js.*dist\/base-server\.mjs/);
+  assert.match(packageJson.scripts['build:bsc'], /src\/bsc\/server\.js.*dist\/bsc-server\.mjs/);
   assert.match(packageJson.scripts['build:solana'], /src\/solana\/server\.js.*dist\/solana-server\.mjs/);
   assert.equal(packageJson.scripts.start, 'node src/robinhood/main.js');
   assert.equal(packageJson.scripts['start:legacy'], 'node src/server.js');
   assert.equal(packageJson.scripts['start:robinhood'], 'node src/robinhood/main.js');
   assert.equal(packageJson.scripts['start:base'], 'node src/base/server.js');
+  assert.equal(packageJson.scripts['start:bsc'], 'node src/bsc/server.js');
   assert.equal(packageJson.scripts['start:solana'], 'node src/solana/server.js');
   assert.equal(packageJson.scripts['release:prepare'], 'node scripts/prepare-release.mjs');
 });
 
-test('Base and Solana production bundles cannot execute the Robinhood entrypoint', async () => {
+test('Base, BSC, and Solana production bundles cannot execute the Robinhood entrypoint', async () => {
   const robinhoodServer = fs.readFileSync(new URL('../src/robinhoodServer.js', import.meta.url), 'utf8');
   assert.doesNotMatch(robinhoodServer, /Robinhood smart money radar:/);
   assert.doesNotMatch(robinhoodServer, /pathToFileURL/);
 
   for (const [entryPoint, ownBanner] of [
     ['src/base/server.js', 'Base smart money radar API:'],
+    ['src/bsc/server.js', 'BSC smart money radar API:'],
     ['src/solana/server.js', 'Solana smart money API:']
   ]) {
     const result = await build({
@@ -89,7 +94,11 @@ test('reverse proxy routes each chain API to its own process', () => {
   assert.match(caddy, /\{\$RADAR_SITE_ADDRESS:http:\/\/localhost\}/);
   assert.match(caddy, /\/api\/robinhood\/\*[\s\S]*127\.0\.0\.1:18118/);
   assert.match(caddy, /\/api\/base\/\*[\s\S]*127\.0\.0\.1:18119/);
+  assert.match(caddy, /\/api\/bsc\/\*[\s\S]*127\.0\.0\.1:18122/);
   assert.match(caddy, /\/api\/solana\/\*[\s\S]*127\.0\.0\.1:18120/);
+  assert.match(caddy, /\/api\/social\/stream[\s\S]*127\.0\.0\.1:18118[\s\S]*flush_interval -1/);
+  assert.match(caddy, /\/api\/bsc\/monitor\/stream[\s\S]*127\.0\.0\.1:18122[\s\S]*flush_interval -1/);
+  assert.match(caddy, /handle \/robinhood-radar\/internal\/\*[\s\S]*respond "Not found" 404/);
   assert.match(caddy, /@solanaWebhook[\s\S]*monitor\/webhook[\s\S]*127\.0\.0\.1:18120/);
   assert.doesNotMatch(caddy, /basic_?auth|basicauth|RADAR_BASIC_AUTH_HASH/);
   assert.doesNotMatch(caddy, /217\.116\.171\.250|sslip\.io/);
@@ -101,13 +110,19 @@ test('chain systemd units bind independent ports, databases, and private environ
   assert.match(baseUnit, /Environment=BASE_DATA_FILE=\/var\/lib\/robinhood-radar\/base\.sqlite/);
   assert.match(baseUnit, /EnvironmentFile=-\/etc\/robinhood-radar\/base\.env/);
   assert.match(baseUnit, /ExecStart=.*base-server\.mjs/);
+  assert.match(bscUnit, /Environment=BSC_PORT=18122/);
+  assert.match(bscUnit, /Environment=BSC_DATA_FILE=\/var\/lib\/robinhood-radar\/bsc\.sqlite/);
+  assert.match(bscUnit, /EnvironmentFile=-\/etc\/robinhood-radar\/bsc\.env/);
+  assert.match(bscUnit, /^Environment=BSC_MONITOR_MAX_BLOCK_SPAN=10$/m);
+  assert.match(bscUnit, /ExecStart=.*bsc-server\.mjs/);
+  assert.doesNotMatch(bscUnit, /SOCIAL_|HELIUS_|(?:KEY|TOKEN|SECRET|PASSWORD)=/);
   assert.match(solanaUnit, /Environment=SOLANA_PORT=18120/);
   assert.match(solanaUnit, /Environment=SOLANA_DATA_FILE=\/var\/lib\/robinhood-radar\/solana\.sqlite/);
   assert.match(solanaUnit, /EnvironmentFile=-\/etc\/robinhood-radar\/solana\.env/);
   assert.match(solanaUnit, /ExecStart=.*solana-server\.mjs/);
   assert.doesNotMatch(solanaUnit, /HELIUS_API_KEY=/);
   assert.doesNotMatch(solanaUnit, /SOLANA_HELIUS_AUTH_HEADER=/);
-  for (const unit of [robinhoodUnit, baseUnit, solanaUnit]) {
+  for (const unit of [robinhoodUnit, baseUnit, bscUnit, solanaUnit]) {
     assert.match(unit, /ExecStart=\/usr\/bin\/env node /);
     assert.doesNotMatch(unit, /ExecStart=\/usr\/local\/bin\/node/);
   }
@@ -127,13 +142,19 @@ test('environment templates expose production overrides without embedding creden
   assert.match(robinhoodEnv, /^ROBINHOOD_BLOCKSCOUT_API_URL=$/m);
   assert.match(baseEnv, /^BASE_RPC_URL=$/m);
   assert.match(baseEnv, /^BASE_BLOCKSCOUT_API_URL=$/m);
+  assert.match(bscEnv, /^BSC_RPC_URL=$/m);
+  assert.match(bscEnv, /^BSC_HOLDER_RPC_URL=$/m);
+  assert.match(bscEnv, /^BSC_MONITOR_MAX_BLOCK_SPAN=10$/m);
+  assert.doesNotMatch(bscEnv, /BSC_BLOCKSCOUT_API_URL/);
+  assert.match(bscEnv, /^BSC_HOLDER_LOG_WINDOW=2000$/m);
+  assert.match(bscEnv, /^BSC_HOLDER_MAX_TRANSFER_LOGS=100000$/m);
   assert.match(solanaEnv, /^SOLANA_RPC_URL=$/m);
   assert.match(solanaEnv, /^HELIUS_API_KEY=$/m);
   assert.match(solanaEnv, /^SOLANA_HELIUS_WEBHOOK_URL=$/m);
   assert.match(solanaEnv, /^SOLANA_HELIUS_AUTH_HEADER=$/m);
   assert.match(socialEnv, /^SOCIAL_BRIDGE_TOKEN=$/m);
   assert.match(socialEnv, /^SOCIAL_X_FAST_HANDLES=$/m);
-  for (const example of [robinhoodEnv, baseEnv, solanaEnv, socialEnv]) {
+  for (const example of [robinhoodEnv, baseEnv, bscEnv, solanaEnv, socialEnv]) {
     assert.doesNotMatch(example, /217\.116\.171\.250|sslip\.io|api\.day\.app/);
     assert.doesNotMatch(example, /^\s*[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)=.+$/m);
   }
@@ -144,13 +165,15 @@ test('fresh-host bootstrap is idempotent and never overwrites operator environme
   assert.match(bootstrap, /if id "\$service_user"/);
   assert.match(bootstrap, /if \[\[ ! -e "\$destination" \]\]/);
   assert.match(bootstrap, /install -o root -g root -m 0600 "\$example" "\$destination"/);
+  assert.match(bootstrap, /for name in robinhood base bsc solana social/);
   assert.match(bootstrap, /Node\.js 22\.13\.0 or newer is required/);
   assert.doesNotMatch(bootstrap, /apt(?:-get)? install|dnf install|yum install|curl[^\n]*\|[^\n]*(?:sh|bash)/);
 });
 
 test('release preparer builds a complete checksummed installer staging directory', () => {
   assert.match(releasePreparer, /npm[\s\S]*run[\s\S]*build:all/);
-  assert.match(releasePreparer, /\['robinhood', 'base', 'solana'\]/);
+  assert.match(releasePreparer, /\['robinhood', 'base', 'bsc', 'solana'\]/);
+  assert.match(releasePreparer, /\['robinhood', 'base', 'bsc', 'solana', 'social'\]/);
   assert.match(releasePreparer, /public\.tar\.gz/);
   assert.match(releasePreparer, /REVISION/);
   assert.match(releasePreparer, /SHA256SUMS/);
@@ -159,8 +182,10 @@ test('release preparer builds a complete checksummed installer staging directory
   assert.match(releasePreparer, /the Git worktree is dirty/);
 });
 
-test('remote installer backs up, checks, deploys, and validates all four databases', () => {
-  assert.match(installer, /readonly chains=\("robinhood" "base" "solana"\)/);
+test('remote installer backs up, checks, deploys, and validates all five databases', () => {
+  assert.match(installer, /readonly services=\("robinhood-radar" "base-radar" "bsc-radar" "solana-radar"\)/);
+  assert.match(installer, /readonly chains=\("robinhood" "base" "bsc" "solana"\)/);
+  assert.match(installer, /declare -A ports=\(\[robinhood\]=18118 \[base\]=18119 \[bsc\]=18122 \[solana\]=18120\)/);
   assert.match(installer, /PRAGMA quick_check/);
   assert.match(installer, /database_backup_path/);
   assert.match(installer, /social_database_backup_path/);
@@ -257,9 +282,11 @@ test('remote installer accepts a complete manifest and rejects a changed release
     'REVISION',
     'robinhood-server.mjs',
     'base-server.mjs',
+    'bsc-server.mjs',
     'solana-server.mjs',
     'robinhood-radar.service',
     'base-radar.service',
+    'bsc-radar.service',
     'solana-radar.service',
     'public.tar.gz'
   ];
@@ -291,7 +318,7 @@ test('SQLite deployment backup and restore preserve committed WAL rows for every
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
-  for (const name of ['robinhood', 'base', 'solana', 'social']) {
+  for (const name of ['robinhood', 'base', 'bsc', 'solana', 'social']) {
     const livePath = path.join(directory, `${name}.sqlite`);
     const mainFileOnlyPath = path.join(directory, `${name}-main-only.sqlite`);
     const backupPath = path.join(directory, `${name}-backup.sqlite`);

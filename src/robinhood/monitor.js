@@ -128,6 +128,38 @@ function addressFromTopic(topic) {
   return ADDRESS_PATTERN.test(address) ? address : null;
 }
 
+function addressFromDataWord(data, wordIndex) {
+  const normalized = String(data || '').toLowerCase();
+  const index = Number(wordIndex);
+  if (!/^0x(?:[0-9a-f]{64})+$/.test(normalized) || !Number.isSafeInteger(index) || index < 0) return null;
+  const start = 2 + index * 64;
+  if (start + 64 > normalized.length) return null;
+  return addressFromTopic(`0x${normalized.slice(start, start + 64)}`);
+}
+
+function normalizeLaunchProfile(profile) {
+  const address = normalizeAddress(profile?.address);
+  const topic = String(profile?.topic || '').toLowerCase();
+  const platform = normalizeText(profile?.platform, 'launchpad', 40);
+  const tokenTopic = parseInteger(profile?.tokenTopic);
+  const walletTopic = parseInteger(profile?.walletTopic);
+  const tokenDataWord = parseInteger(profile?.tokenDataWord);
+  const walletDataWord = parseInteger(profile?.walletDataWord);
+  const tokenLocationValid = tokenTopic !== null || tokenDataWord !== null;
+  const walletLocationValid = walletTopic !== null || walletDataWord !== null;
+  if (!ADDRESS_PATTERN.test(address) || !HASH_PATTERN.test(topic) ||
+    !tokenLocationValid || !walletLocationValid) return null;
+  return {
+    address,
+    topic,
+    platform,
+    tokenTopic,
+    walletTopic,
+    tokenDataWord,
+    walletDataWord
+  };
+}
+
 function rawAmountFromLog(log) {
   const data = String(log?.data || '').toLowerCase();
   if (!/^0x[0-9a-f]{64,}$/.test(data)) return null;
@@ -187,11 +219,14 @@ function decodeDecimals(value) {
   }
 }
 
-function receiptHasSwap(receipt) {
+function receiptHasSwap(receipt, swapTopics) {
   if (!receiptSucceeded(receipt)) return false;
+  const topics = swapTopics instanceof Set
+    ? swapTopics
+    : new Set([V2_SWAP_TOPIC, V3_SWAP_TOPIC]);
   return (Array.isArray(receipt?.logs) ? receipt.logs : []).some((log) => {
     const topic = String(log?.topics?.[0] || '').toLowerCase();
-    return topic === V2_SWAP_TOPIC || topic === V3_SWAP_TOPIC;
+    return topics.has(topic);
   });
 }
 
@@ -523,10 +558,32 @@ export class RobinhoodWalletMonitor {
     this.tokenRiskHistoryLookups = new Map();
     this.tokenRiskHistoryActive = 0;
     this.quoteTokenAddresses = new Set(quoteTokenAddresses.map(normalizeAddress).filter((value) => ADDRESS_PATTERN.test(value)));
+    this.swapTopics = new Set([
+      V2_SWAP_TOPIC,
+      V3_SWAP_TOPIC,
+      ...(Array.isArray(this.chainProfile.swapTopics) ? this.chainProfile.swapTopics : [])
+    ].map((topic) => String(topic || '').toLowerCase()).filter((topic) => HASH_PATTERN.test(topic)));
     this.noxaLaunchFactory = noxaLaunchFactory ? normalizeAddress(noxaLaunchFactory) : '';
     if (this.noxaLaunchFactory && !ADDRESS_PATTERN.test(this.noxaLaunchFactory)) {
       throw new TypeError('A valid Noxa launch factory address is required');
     }
+    const launchProfiles = [];
+    if (this.noxaLaunchFactory) {
+      launchProfiles.push({
+        address: this.noxaLaunchFactory,
+        topic: NOXA_TOKEN_LAUNCHED_TOPIC,
+        platform: 'noxa',
+        tokenTopic: 1,
+        walletTopic: 2
+      });
+    }
+    if (Array.isArray(this.chainProfile.launchProfiles)) {
+      launchProfiles.push(...this.chainProfile.launchProfiles);
+    }
+    this.launchProfiles = [...new Map(launchProfiles
+      .map(normalizeLaunchProfile)
+      .filter(Boolean)
+      .map((profile) => [`${profile.address}:${profile.topic}`, profile])).values()];
     this.settings = {
       enabled: this.store.getMeta(MONITOR_ENABLED_KEY) !== 'false',
       threshold: Math.max(1, Math.min(1_000, parseInteger(this.store.getMeta(MONITOR_THRESHOLD_KEY), 3))),
@@ -1436,7 +1493,7 @@ export class RobinhoodWalletMonitor {
     const trackedLogs = await this.#getTrackedLogs(fromBlock, toBlock, {
       buyWallets: [...buyWallets],
       outboundWallets: [...outboundWallets],
-      watchNoxa: tokenCreateWallets.size > 0
+      watchLaunches: tokenCreateWallets.size > 0
     }, signal);
 
     const transferCandidates = [
@@ -1445,11 +1502,11 @@ export class RobinhoodWalletMonitor {
     ].filter((candidate) => candidate && wallets.has(candidate.walletAddress) &&
       candidate.blockNumber >= (this.fastWalletStarts.get(candidate.walletAddress) ?? fromBlock) &&
       !(candidate.direction === 'incoming' && this.quoteTokenAddresses.has(candidate.tokenAddress)));
-    const noxaCandidates = trackedLogs.noxa
-      .map((log) => this.#noxaCandidateFromLog(log))
+    const launchCandidates = trackedLogs.launch
+      .map((row) => this.#launchCandidateFromLog(row.log, row.profile))
       .filter((candidate) => candidate && tokenCreateWallets.has(candidate.walletAddress) &&
         candidate.blockNumber >= (this.fastWalletStarts.get(candidate.walletAddress) ?? fromBlock));
-    const rawCandidates = [...transferCandidates, ...noxaCandidates];
+    const rawCandidates = [...transferCandidates, ...launchCandidates];
     if (!rawCandidates.length) return [];
 
     const transactionHashes = [...new Set(transferCandidates.map((candidate) => candidate.txHash))];
@@ -1468,13 +1525,13 @@ export class RobinhoodWalletMonitor {
     for (const candidate of rawCandidates) {
       const annotation = wallets.get(candidate.walletAddress);
       if (!annotation || annotation.status === 'excluded') continue;
-      if (candidate.source === 'noxa') {
+      if (candidate.source === 'launchpad') {
         if (hasEnabledRule(annotation, 'token_create')) {
           prepared.push({
             ...candidate,
             eventType: 'token_create',
             assetType: 'erc20',
-            platform: 'noxa',
+            platform: candidate.platform,
             requireCompleteMetadata: false
           });
         }
@@ -1484,7 +1541,7 @@ export class RobinhoodWalletMonitor {
       const receipt = receiptByHash.get(candidate.txHash);
       if (!receiptSucceeded(receipt)) continue;
       if (normalizeAddress(transaction?.from) !== candidate.walletAddress) continue;
-      const swap = receiptHasSwap(receipt);
+      const swap = receiptHasSwap(receipt, this.swapTopics);
       if (candidate.direction === 'incoming' && swap && !this.quoteTokenAddresses.has(candidate.tokenAddress) &&
         hasEnabledRule(annotation, 'buy')) {
         prepared.push({
@@ -1637,14 +1694,16 @@ export class RobinhoodWalletMonitor {
       .map(([address]) => address));
   }
 
-  async #getTrackedLogs(fromBlock, toBlock, { buyWallets, outboundWallets, watchNoxa }, signal) {
+  async #getTrackedLogs(fromBlock, toBlock, { buyWallets, outboundWallets, watchLaunches }, signal) {
     const tasks = [];
     for (const [kind, addresses] of [['incoming', buyWallets], ['outgoing', outboundWallets]]) {
       for (let index = 0; index < addresses.length; index += this.walletTopicChunkSize) {
         tasks.push({ kind, wallets: addresses.slice(index, index + this.walletTopicChunkSize) });
       }
     }
-    if (watchNoxa && this.noxaLaunchFactory) tasks.push({ kind: 'noxa', wallets: [] });
+    if (watchLaunches) {
+      for (const profile of this.launchProfiles) tasks.push({ kind: 'launch', profile, wallets: [] });
+    }
     const taskRows = new Array(tasks.length);
     let nextIndex = 0;
     let firstError = null;
@@ -1655,8 +1714,9 @@ export class RobinhoodWalletMonitor {
         if (index >= tasks.length) return;
         try {
           const task = tasks[index];
-          taskRows[index] = task.kind === 'noxa'
-            ? await this.#getNoxaLaunchLogs(fromBlock, toBlock, signal)
+          taskRows[index] = task.kind === 'launch'
+            ? (await this.#getLaunchLogs(task.profile, fromBlock, toBlock, signal))
+                .map((log) => ({ log, profile: task.profile }))
             : await this.#getTransferChunk(fromBlock, toBlock, task.wallets, task.kind, signal);
         } catch (error) {
           firstError ||= error;
@@ -1667,14 +1727,15 @@ export class RobinhoodWalletMonitor {
     await Promise.all(Array.from({ length: concurrency }, () => worker()));
     if (firstError) throw firstError;
 
-    const result = { incoming: [], outgoing: [], noxa: [] };
-    const seen = { incoming: new Set(), outgoing: new Set(), noxa: new Set() };
+    const result = { incoming: [], outgoing: [], launch: [] };
+    const seen = { incoming: new Set(), outgoing: new Set(), launch: new Set() };
     tasks.forEach((task, index) => {
-      for (const log of taskRows[index] || []) {
-        const key = eventKey(log);
-        if (seen[task.kind].has(key)) continue;
-        seen[task.kind].add(key);
-        result[task.kind].push(log);
+      const kind = task.kind === 'launch' ? 'launch' : task.kind;
+      for (const row of taskRows[index] || []) {
+        const key = eventKey(kind === 'launch' ? row.log : row);
+        if (seen[kind].has(key)) continue;
+        seen[kind].add(key);
+        result[kind].push(row);
       }
     });
     return result;
@@ -1714,12 +1775,12 @@ export class RobinhoodWalletMonitor {
     }
   }
 
-  #getNoxaLaunchLogs(fromBlock, toBlock, signal) {
+  #getLaunchLogs(profile, fromBlock, toBlock, signal) {
     return this.rpcClient.getLogs({
-      address: this.noxaLaunchFactory,
+      address: profile.address,
       fromBlock,
       toBlock,
-      topics: [NOXA_TOKEN_LAUNCHED_TOPIC]
+      topics: [profile.topic]
     }, {
       signal,
       initialWindow: Math.max(1, toBlock - fromBlock + 1),
@@ -1754,11 +1815,15 @@ export class RobinhoodWalletMonitor {
     };
   }
 
-  #noxaCandidateFromLog(log) {
-    if (log?.removed || normalizeAddress(log?.address) !== this.noxaLaunchFactory ||
-      String(log?.topics?.[0] || '').toLowerCase() !== NOXA_TOKEN_LAUNCHED_TOPIC) return null;
-    const tokenAddress = addressFromTopic(log?.topics?.[1]);
-    const walletAddress = addressFromTopic(log?.topics?.[2]);
+  #launchCandidateFromLog(log, profile) {
+    if (log?.removed || normalizeAddress(log?.address) !== profile.address ||
+      String(log?.topics?.[0] || '').toLowerCase() !== profile.topic) return null;
+    const tokenAddress = profile.tokenTopic !== null
+      ? addressFromTopic(log?.topics?.[profile.tokenTopic])
+      : addressFromDataWord(log?.data, profile.tokenDataWord);
+    const walletAddress = profile.walletTopic !== null
+      ? addressFromTopic(log?.topics?.[profile.walletTopic])
+      : addressFromDataWord(log?.data, profile.walletDataWord);
     const txHash = String(log?.transactionHash || '').toLowerCase();
     const logIndex = rpcInteger(log?.logIndex);
     const blockNumber = rpcInteger(log?.blockNumber);
@@ -1768,12 +1833,13 @@ export class RobinhoodWalletMonitor {
     return {
       walletAddress,
       tokenAddress,
-      counterpartyAddress: this.noxaLaunchFactory,
+      counterpartyAddress: profile.address,
       rawTokenAmount: '0',
       txHash,
       logIndex,
       blockNumber,
-      source: 'noxa'
+      source: 'launchpad',
+      platform: profile.platform
     };
   }
 

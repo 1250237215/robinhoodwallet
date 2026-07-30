@@ -123,6 +123,19 @@ function abortReason(signal, error) {
   return error?.name === 'AbortError' ? error : null;
 }
 
+async function allWithSiblingCancellation(loaders, parentSignal) {
+  const controller = new AbortController();
+  const signal = parentSignal
+    ? AbortSignal.any([parentSignal, controller.signal])
+    : controller.signal;
+  try {
+    return await Promise.all(loaders.map((load) => load(signal)));
+  } catch (error) {
+    if (!controller.signal.aborted) controller.abort(error);
+    throw error;
+  }
+}
+
 function failedCandidate(holder) {
   return {
     ...holder,
@@ -132,6 +145,36 @@ function failedCandidate(holder) {
     profitState: 'failed',
     confidence: 'low'
   };
+}
+
+function reusableEmbeddedProfit(holder, tokenAddress, chainProfile, adapter) {
+  const profit = holder?.walletTokenProfit;
+  if (!profit || typeof profit !== 'object' || Array.isArray(profit)) return null;
+  const expectedChain = String(
+    chainProfile?.debotChain || chainProfile?.key || chainProfile?.id || chainProfile?.name || ''
+  ).trim().toLowerCase();
+  const actualChain = String(profit.chain || '').trim().toLowerCase();
+  const wallet = adapter.normalize(holder.address);
+  const profitWallet = adapter.normalize(profit.address || profit.wallet);
+  const profitToken = adapter.normalize(profit.tokenAddress || profit.token);
+  if (!expectedChain || actualChain !== expectedChain || profitWallet !== wallet || profitToken !== tokenAddress) {
+    return null;
+  }
+  const meaningful = [
+    profit.buyVolumeUsd,
+    profit.sellVolumeUsd,
+    profit.buyAmount,
+    profit.sellAmount,
+    profit.buyTimes,
+    profit.sellTimes,
+    profit.realizedProfitUsd,
+    profit.unrealizedProfitUsd,
+    profit.totalProfitUsd
+  ].some((value) => {
+    const parsed = number(value);
+    return parsed !== null && parsed !== 0;
+  });
+  return meaningful && profit.profitState === 'complete' ? profit : null;
 }
 
 function mergeCandidate(holder, profit, tokenDetail, minimumEntryUsd, minimumHitMultiple, normalize = normalizeAddress) {
@@ -206,13 +249,13 @@ export async function scanTokenHolders({
   }
 
   onProgress({ stage: 'holder_sources', percent: 5 });
-  const [tokenDetail, holderSnapshot] = await Promise.all([
-    debotClient.fetchTokenDetail(tokenAddress, { signal }),
-    holderClient.fetchTopHolders(tokenAddress, {
+  const [tokenDetail, holderSnapshot] = await allWithSiblingCancellation([
+    (sourceSignal) => debotClient.fetchTokenDetail(tokenAddress, { signal: sourceSignal }),
+    (sourceSignal) => holderClient.fetchTopHolders(tokenAddress, {
       limit: Math.max(config.holderCandidateLimit, config.holderFetchLimit),
-      signal
+      signal: sourceSignal
     })
-  ]);
+  ], signal);
   const holderSource = String(
     providedHolderSource || holderSnapshot?.source || chainProfile?.holderSource || 'blockscout'
   ).trim() || 'blockscout';
@@ -248,7 +291,8 @@ export async function scanTokenHolders({
   });
   let completed = 0;
   const analyzeHolder = async (holder) => {
-    const profit = await debotClient.fetchWalletTokenProfit(tokenAddress, holder.address, { signal });
+    const profit = reusableEmbeddedProfit(holder, tokenAddress, chainProfile, adapter) ||
+      await debotClient.fetchWalletTokenProfit(tokenAddress, holder.address, { signal });
     return mergeCandidate(
       holder,
       profit,
@@ -341,7 +385,11 @@ export async function scanTokenHolders({
     : []);
   const eligible = analyzed.filter((candidate) => candidate.eligible);
   const peakResult = await peakMarketCapPromise;
-  const complete = failures.length === 0;
+  const denominatorPartial = holderSnapshot?.denominatorPartial === true ||
+    holderSnapshot?.holderUniverseComplete === false || holderSnapshot?.partial === true ||
+    holderSnapshot?.complete === false;
+  const profitComplete = failures.length === 0;
+  const complete = profitComplete && !denominatorPartial;
   const updatedAt = Math.floor(Date.now() / 1000);
   const highestLiquidity = Math.max(
     number(tokenDetail.liquidityUsd) ?? 0,
@@ -418,6 +466,9 @@ export async function scanTokenHolders({
     failedWallets: failures.length,
     minimumEntryUsd,
     snapshotAt: holderSnapshot.snapshotAt,
+    denominatorPartial,
+    holderUniverseComplete: !denominatorPartial,
+    profitComplete,
     complete,
     debotAccessBlocked,
     debotAccessBlockedReason: debotAccessBlocked ? debotAccessBlockedReason : null,
@@ -466,6 +517,9 @@ export async function scanTokenHolders({
       eligibleWallets: eligible.length,
       ignoredBelowEntry: holderAnalysis.ignoredBelowEntry,
       failedWallets: failures.length,
+      denominatorPartial,
+      holderUniverseComplete: !denominatorPartial,
+      profitComplete,
       debotAccessBlocked,
       debotAccessBlockedReason: debotAccessBlocked ? debotAccessBlockedReason : null,
       minimumEntryUsd,

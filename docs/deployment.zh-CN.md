@@ -1,7 +1,7 @@
 # 1874catch 完整部署手册
 
 本文面向第一次接触本项目的部署者，目标是在一台全新的
-Ubuntu/Debian VPS 上运行 Robinhood、Base、Solana 三个独立服务，并通过
+Ubuntu/Debian VPS 上运行 Robinhood、Base、BSC、Solana 四个独立服务，并通过
 Caddy 暴露统一 HTTPS 网站。命令中的域名、服务器地址和密钥都是占位符，
 必须替换成部署者自己的值。
 
@@ -11,17 +11,19 @@ Caddy 暴露统一 HTTPS 网站。命令中的域名、服务器地址和密钥�
 | --- | --- | --- | --- |
 | Robinhood、网页、社媒 API | `robinhood-radar` | `127.0.0.1:18118` | `robinhood.sqlite`、`social.sqlite` |
 | Base | `base-radar` | `127.0.0.1:18119` | `base.sqlite` |
+| BSC | `bsc-radar` | `127.0.0.1:18122` | `bsc.sqlite` |
 | Solana | `solana-radar` | `127.0.0.1:18120` | `solana.sqlite` |
 | HTTPS 和反向代理 | `caddy` | `80`、`443` | 无 |
 
-三个链的钱包、CA、监控规则、去重状态和 Bark 目标完全隔离。Robinhood
-进程负责网页和社媒 API；Caddy 把同一域名下的三组 API 转发到对应进程。
+四个链的钱包、CA、监控规则、去重状态和 Bark 目标完全隔离。Robinhood
+进程负责网页和唯一共享的社媒 API；Caddy 把同一域名下的四组链上 API 转发到
+对应进程。切换链不会切换或复制社媒监控数据。
 
 生产目录：
 
 ```text
 /opt/robinhood-radar/          程序 bundle 和网页静态文件
-/var/lib/robinhood-radar/      四个运行数据库
+/var/lib/robinhood-radar/      五个运行数据库
 /etc/robinhood-radar/          私有环境变量
 /var/backups/robinhood-radar/  安装器生成的数据库和版本备份
 ```
@@ -41,7 +43,7 @@ Caddy 暴露统一 HTTPS 网站。命令中的域名、服务器地址和密钥�
   DeBot 账号
 - 要启用手机推送时，需要 Bark 应用提供的设备 Key
 
-Robinhood 和 Base 默认使用公开 RPC，可以启动和体验。大量钱包的长期生产
+Robinhood、Base 和 BSC 默认使用公开 RPC，可以启动和体验。大量钱包的长期生产
 监控建议配置自己的稳定 RPC。Solana 公共 RPC 只用于人工 Holder 查询，不能
 代替 Helius 实时 Webhook。
 
@@ -129,13 +131,16 @@ npm run release:prepare -- --caddy deploy/Caddyfile.example
 ```text
 robinhood-server.mjs
 base-server.mjs
+bsc-server.mjs
 solana-server.mjs
 public.tar.gz
 robinhood-radar.service
 base-radar.service
+bsc-radar.service
 solana-radar.service
 robinhood.env.example
 base.env.example
+bsc.env.example
 solana.env.example
 social.env.example
 Caddyfile.example
@@ -222,6 +227,63 @@ BASE_MARKET_REQUEST_TIMEOUT_MS=5000
 BASE_MONITOR_POLL_INTERVAL_MS=500
 BASE_MONITOR_LOG_CONCURRENCY=2
 ```
+
+### BSC
+
+编辑 `/etc/robinhood-radar/bsc.env`：
+
+```dotenv
+BSC_RPC_URL=
+BSC_DEBOT_BRIDGE_URL=http://127.0.0.1:18118/internal/debot/request
+BSC_DEBOT_BRIDGE_TIMEOUT_MS=90000
+BSC_DEBOT_REQUEST_TIMEOUT_MS=95000
+
+# 可选：填写后切换到严格的完整 Transfer 账本模式
+BSC_HOLDER_RPC_URL=
+BSC_ALLOW_SHARED_RPC_ENDPOINT=false
+BSC_REQUEST_TIMEOUT_MS=20000
+BSC_MARKET_REQUEST_TIMEOUT_MS=5000
+BSC_MONITOR_POLL_INTERVAL_MS=500
+BSC_MONITOR_LOG_CONCURRENCY=2
+BSC_MONITOR_MAX_BLOCK_SPAN=10
+BSC_HOLDER_LOG_WINDOW=2000
+BSC_HOLDER_LOG_CONCURRENCY=2
+BSC_HOLDER_MAX_TRANSFER_LOGS=100000
+BSC_HOLDER_MAX_BLOCK_SPAN=5000000
+```
+
+BSC 服务监听 `127.0.0.1:18122`，只读写 `bsc.sqlite`。实时监控使用
+`BSC_RPC_URL`，未填写时使用 Blast 的免密公共入口；该入口限制单次日志查询最多
+10 个区块，所以 BSC 默认日志窗口也是 10。生产环境仍建议填写支持完整实时查询的
+独立 RPC。服务启动时会校验实时入口严格返回 `eth_chainId 0x38`，并能批量返回
+近期已确认交易和回执。错链或回执能力不足时会在创建数据库前拒绝启动，避免服务
+假在线但买入、卖出流水无法验证。
+
+BSC 手工金狗 CA 和聪明钱包分析默认不需要 `BSC_HOLDER_RPC_URL`。默认模式通过
+`BSC_DEBOT_BRIDGE_URL`连接 Robinhood 进程提供的本机内部入口，再由已登录 DeBot 的
+Chrome 扩展读取按持仓量倒序排列的前 100 个当前 Holder。VPS 会验证返回的链、CA、
+地址、数量和数据大小，并用 BSC 实时 RPC 的最新 `eth_getCode`排除合约地址；已知
+池子、交易所、桥、工厂、锁仓和销毁地址也不会进入钱包评分。DeBot 超过 100 个
+Holder 时结果会如实标记为部分样本，不会声称覆盖完整 Holder 总体。内部入口只能
+使用 `127.0.0.1`、`localhost`或 `::1`，Caddy 必须拒绝公网 `/internal/*`请求。
+
+`BSC_DEBOT_BRIDGE_TIMEOUT_MS`是等待浏览器完成任务的最长时间；外层的
+`BSC_DEBOT_REQUEST_TIMEOUT_MS`必须更长，示例使用 `90000`和 `95000`毫秒。扩展离线
+或版本过旧时，BSC 实时流水仍会继续运行，但手工 CA 分析会明确失败。
+
+只有需要严格完整的当前 Holder 账本时才填写 `BSC_HOLDER_RPC_URL`。填写后会改用
+独立归档 RPC，从经历史合约代码确认的部署块开始分窗重放 ERC-20 `Transfer`日志，
+再用 `totalSupply`和链上 `balanceOf`核对。这个入口必须支持历史 `eth_getCode`和完整
+大范围 `eth_getLogs`，并在启动时通过 BSC `0x38`链校验。实时与严格 Holder 的 URL
+必须不同；`BSC_ALLOW_SHARED_RPC_ENDPOINT=true`只用于隔离的本地开发，生产环境
+不要开启。任何起点、日志或余额无法完整验证时，严格模式都会明确失败。不要把
+供应商密钥写进仓库内的 `bsc.env.example`。
+
+BSC 实时判断除 PancakeSwap V2/V3 外，也识别 Four.meme 当前 TokenManager 的
+bonding-curve 买入、卖出和创建代币事件；WBNB、USDT、USDC、BUSD、FDUSD、DAI、
+TUSD、USDD 被当作
+报价资产，不会误报成买入目标。社媒监控仍是共享 `/api/social`，切换 BSC 不会
+复制、清空或切换社媒名单。
 
 ### 社媒桥接
 
@@ -342,7 +404,7 @@ RADAR_PUBLIC_BASE_URL=https://radar.example.com/robinhood-radar \
 
 本地和公网健康请求默认使用 `2`秒连接超时、`5`秒单次请求总超时；可分别通过
 `DEPLOY_HEALTH_CONNECT_TIMEOUT_SECONDS`和
-`DEPLOY_HEALTH_REQUEST_TIMEOUT_SECONDS`调整。Robinhood、Base 的 monitor 默认
+`DEPLOY_HEALTH_REQUEST_TIMEOUT_SECONDS`调整。Robinhood、Base、BSC 的 monitor 默认
 等待 `30`秒，可通过 `DEPLOY_MONITOR_READY_TIMEOUT_SECONDS`调整。上述值都必须是
 正整数秒；不要用延长窗口掩盖无效的 Helius Key、错误的 Webhook URL 或网络故障。
 
@@ -357,12 +419,12 @@ RADAR_PUBLIC_BASE_URL=https://radar.example.com/robinhood-radar \
 
 安装器会在停止服务前验证 `SHA256SUMS`，随后：
 
-1. 记录三个服务原来的启停状态。
-2. 对四个 SQLite 数据库执行 WAL checkpoint、事务一致备份和
+1. 记录四个服务原来的启停状态。
+2. 对五个 SQLite 数据库执行 WAL checkpoint、事务一致备份和
    `PRAGMA quick_check`。
 3. 备份现有 bundle、网页、systemd unit、版本标记和可选 Caddy 配置。
-4. 安装新文件并启动三项服务。
-5. 检查三个 dashboard、三个实时 monitor、Social API 和四个数据库。
+4. 安装新文件并启动四项服务。
+5. 检查四个 dashboard、四个实时 monitor、Social API 和五个数据库。
 6. 失败时自动恢复上一个程序、数据库、网页、服务状态和本次修改的 Caddy。
 
 成功输出中的数据库备份路径和 `release_backup`应保存到运维记录。安装成功后
@@ -373,11 +435,12 @@ staging 目录会被删除，避免旧发布包被误用。
 在 VPS 上检查：
 
 ```bash
-systemctl --no-pager --full status robinhood-radar base-radar solana-radar caddy
-journalctl -u robinhood-radar -u base-radar -u solana-radar --since '10 minutes ago' --no-pager
+systemctl --no-pager --full status robinhood-radar base-radar bsc-radar solana-radar caddy
+journalctl -u robinhood-radar -u base-radar -u bsc-radar -u solana-radar --since '10 minutes ago' --no-pager
 
 curl --fail http://127.0.0.1:18118/api/robinhood/dashboard?tab=all >/dev/null
 curl --fail http://127.0.0.1:18119/api/base/dashboard?tab=all >/dev/null
+curl --fail http://127.0.0.1:18122/api/bsc/dashboard?tab=all >/dev/null
 curl --fail http://127.0.0.1:18120/api/solana/dashboard?tab=all >/dev/null
 curl --fail http://127.0.0.1:18118/api/social?postLimit=1 >/dev/null
 ```
@@ -387,12 +450,13 @@ curl --fail http://127.0.0.1:18118/api/social?postLimit=1 >/dev/null
 ```bash
 curl --fail --location https://radar.example.com/robinhood-radar/ >/dev/null
 curl --fail --location 'https://radar.example.com/robinhood-radar/api/robinhood/monitor' >/dev/null
+curl --fail --location 'https://radar.example.com/robinhood-radar/api/bsc/monitor' >/dev/null
 curl --fail --location 'https://radar.example.com/robinhood-radar/api/social?postLimit=1' >/dev/null
 ```
 
-浏览器打开 `https://radar.example.com/robinhood-radar/`，确认三链切换后数据互不
-串联。SSE 路由在 Caddy 中明确禁用压缩并使用 `flush_interval -1`，不要把它们
-改成带缓冲的普通代理。
+浏览器打开 `https://radar.example.com/robinhood-radar/`，确认四链切换后链上数据
+互不串联，且社媒面板始终相同。SSE 路由在 Caddy 中明确禁用压缩并使用
+`flush_interval -1`，不要把它们改成带缓冲的普通代理。
 
 ## 10. 配置 DeBot 社媒桥接
 
@@ -414,6 +478,33 @@ curl --fail --location 'https://radar.example.com/robinhood-radar/api/social?pos
    `SOCIAL_BRIDGE_TOKEN`。
 7. Chrome 会请求访问这个明确配置的 Radar HTTPS 主机；只批准自己的域名。
 8. 打开并登录 `https://debot.ai/`。扩展第一次成功心跳后角标显示 `ON`。
+
+现有部署升级到 BSC Holder 支持时，扩展必须是 `1.9.0`。拉取新代码后打开
+`chrome://extensions`，找到 **Radar DeBot Social Bridge** 并点击“重新加载”；然后
+重新打开或刷新已登录的 DeBot 标签页，再刷新 Radar 页面。只更新 VPS 而没有重新
+加载本地扩展时，旧扩展不会领取 BSC Holder 任务。
+
+在 VPS 上确认版本、在线状态和 Holder capability：
+
+```bash
+curl --fail --silent http://127.0.0.1:18118/api/social/status | node -e "
+const status = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const bridge = status.bridge || {};
+const ready = bridge.version === '1.9.0' &&
+  bridge.holderAnalysisOnline === true &&
+  Array.isArray(bridge.capabilities) &&
+  bridge.capabilities.includes('debot-token-holders-v1');
+if (!ready) {
+  console.error(JSON.stringify(bridge, null, 2));
+  process.exit(1);
+}
+console.log('DeBot Holder bridge 1.9.0 ready');
+"
+```
+
+成功输出必须是 `DeBot Holder bridge 1.9.0 ready`。失败时打印的 bridge JSON 应同时
+检查 `version`、`holderAnalysisOnline`和 `capabilities`；列表里必须包含
+`debot-token-holders-v1`。
 
 扩展固定拥有的主机权限只有 DeBot。Radar 权限是在设置时针对部署者填写的
 HTTPS origin 单独申请；HTTP 仅允许 `localhost`和 `127.0.0.1`开发地址。
@@ -653,25 +744,27 @@ Caddy 配置也进入 `SHA256SUMS`并随版本一起回退。
 ### 跨数据库 schema 的主动回滚
 
 数据库 schema 可能只保证向前迁移。安装器成功后打印的
-`robinhood_database_backup`、`base_database_backup`、`solana_database_backup`、
-`social_database_backup`和 `release_backup`描述的是“本次安装之前”的完整状态。
-例如要撤销版本 B 的安装并回到版本 A，必须使用安装 B 成功时打印的这五条路径。
-五条路径必须具有完全相同的 UTC 时间戳；不要分别使用 `ls -t`挑选“最新”文件，
+`robinhood_database_backup`、`base_database_backup`、`bsc_database_backup`、
+`solana_database_backup`、`social_database_backup`和 `release_backup`描述的是
+“本次安装之前”的完整状态。
+例如要撤销版本 B 的安装并回到版本 A，必须使用安装 B 成功时打印的这六条路径。
+六条路径必须具有完全相同的 UTC 时间戳；不要分别使用 `ls -t`挑选“最新”文件，
 也不要把另一次安装的程序备份和数据库备份混用。安装器会删除 staging，所以应把
 每次成功输出保存在独立的运维记录中。若旧版本还没有某个数据库，安装器会创建
 `<输出路径>.missing`空标记而不是 `.sqlite`文件；下面的命令会保留这个语义，先
 删除对应实时库及 WAL/SHM，再由旧版本服务按旧 schema 创建空库。
 
-下面是完整的四库主动回滚流程。先把示例的五条赋值替换为同一次安装器输出的原始
+下面是完整的五库主动回滚流程。先把示例的六条赋值替换为同一次安装器输出的原始
 值。只有被撤销的发布包使用了 `--caddy`并由安装器替换整份 Caddy 配置时，才把
 `RESTORE_CADDY`设为 `1`；共享 Caddy 主机必须保持 `0`并人工管理站点块。
 
 ```bash
 set -Eeuo pipefail
 
-# 必须从同一次成功的 install-remote.sh 输出原样复制这五条路径。
+# 必须从同一次成功的 install-remote.sh 输出原样复制这六条路径。
 robinhood_database_backup=/var/backups/robinhood-radar/robinhood-20260101T000000Z.sqlite
 base_database_backup=/var/backups/robinhood-radar/base-20260101T000000Z.sqlite
+bsc_database_backup=/var/backups/robinhood-radar/bsc-20260101T000000Z.sqlite
 solana_database_backup=/var/backups/robinhood-radar/solana-20260101T000000Z.sqlite
 social_database_backup=/var/backups/robinhood-radar/social-20260101T000000Z.sqlite
 release_backup=/var/backups/robinhood-radar/release-20260101T000000Z
@@ -680,16 +773,18 @@ RESTORE_CADDY=0
 BACKUP_ROOT=/var/backups/robinhood-radar
 APP_DIR=/opt/robinhood-radar
 DATA_DIR=/var/lib/robinhood-radar
-SERVICES=(robinhood-radar base-radar solana-radar)
+SERVICES=(robinhood-radar base-radar bsc-radar solana-radar)
 LIVE_DATABASES=(
   "$DATA_DIR/robinhood.sqlite"
   "$DATA_DIR/base.sqlite"
+  "$DATA_DIR/bsc.sqlite"
   "$DATA_DIR/solana.sqlite"
   "$DATA_DIR/social.sqlite"
 )
 TARGET_DATABASES=(
   "$robinhood_database_backup"
   "$base_database_backup"
+  "$bsc_database_backup"
   "$solana_database_backup"
   "$social_database_backup"
 )
@@ -751,6 +846,7 @@ rollback_stamp="${release_backup##*/release-}"
 test "$release_backup" = "$BACKUP_ROOT/release-$rollback_stamp"
 test "$robinhood_database_backup" = "$BACKUP_ROOT/robinhood-$rollback_stamp.sqlite"
 test "$base_database_backup" = "$BACKUP_ROOT/base-$rollback_stamp.sqlite"
+test "$bsc_database_backup" = "$BACKUP_ROOT/bsc-$rollback_stamp.sqlite"
 test "$solana_database_backup" = "$BACKUP_ROOT/solana-$rollback_stamp.sqlite"
 test "$social_database_backup" = "$BACKUP_ROOT/social-$rollback_stamp.sqlite"
 
@@ -765,13 +861,13 @@ for backup in "${TARGET_DATABASES[@]}"; do
   fi
 done
 for required in \
-  robinhood-server.mjs base-server.mjs solana-server.mjs \
-  robinhood-radar.service base-radar.service solana-radar.service; do
+  robinhood-server.mjs base-server.mjs bsc-server.mjs solana-server.mjs \
+  robinhood-radar.service base-radar.service bsc-radar.service solana-radar.service; do
   test -f "$release_backup/$required"
 done
 test -d "$release_backup/public"
 test -f "$release_backup/REVISION" || test -f "$release_backup/REVISION.missing"
-for chain in robinhood base solana; do
+for chain in robinhood base bsc solana; do
   test -f "$release_backup/$chain-server.mjs.LEGAL.txt" || \
     test -f "$release_backup/$chain-server.mjs.LEGAL.txt.missing"
 done
@@ -812,7 +908,7 @@ recover_manual_rollback() {
   echo "Manual rollback failed; restoring the pre-rollback safety copy." >&2
 
   if [[ $ROLLBACK_CHANGED -eq 1 ]]; then
-    if ! systemctl stop robinhood-radar.service base-radar.service solana-radar.service; then
+    if ! systemctl stop robinhood-radar.service base-radar.service bsc-radar.service solana-radar.service; then
       recovery_failed=1
       safe_to_restore=0
     fi
@@ -892,9 +988,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
-# 三个进程可能分别持有四个数据库；必须全部停止并确认都是 inactive。
+# 四个进程可能分别持有五个数据库；必须全部停止并确认都是 inactive。
 SERVICES_STOPPED=1
-systemctl stop robinhood-radar.service base-radar.service solana-radar.service
+systemctl stop robinhood-radar.service base-radar.service bsc-radar.service solana-radar.service
 for service in "${SERVICES[@]}"; do
   test "$(systemctl show --property=ActiveState --value "$service.service")" = inactive
 done
@@ -923,15 +1019,15 @@ fi
 
 ROLLBACK_CHANGED=1
 
-# 清理每一个实时库的 WAL/SHM，再恢复同一时间戳的四个目标数据库。
+# 清理每一个实时库的 WAL/SHM，再恢复同一时间戳的五个目标数据库。
 for index in "${!LIVE_DATABASES[@]}"; do
   live="${LIVE_DATABASES[$index]}"
   backup="${TARGET_DATABASES[$index]}"
   restore_database_entry "$backup" "$live"
 done
 
-# 恢复与四个数据库配对的 bundle、网页、unit 和版本标记。
-for chain in robinhood base solana; do
+# 恢复与五个数据库配对的 bundle、网页、unit 和版本标记。
+for chain in robinhood base bsc solana; do
   install -m 0644 "$release_backup/$chain-server.mjs" "$APP_DIR/$chain-server.mjs"
   restore_optional_release_file \
     "$release_backup/$chain-server.mjs.LEGAL.txt" \
@@ -955,7 +1051,7 @@ if [[ $RESTORE_CADDY -eq 1 ]]; then
 fi
 
 systemctl daemon-reload
-systemctl start robinhood-radar.service base-radar.service solana-radar.service
+systemctl start robinhood-radar.service base-radar.service bsc-radar.service solana-radar.service
 for service in "${SERVICES[@]}"; do
   systemctl is-active --quiet "$service.service"
 done
@@ -965,23 +1061,27 @@ if [[ $RESTORE_CADDY -eq 1 ]]; then
 fi
 
 # 服务启动后等待每个本地入口；任一失败会触发上面的安全恢复。
-# Robinhood/Base 最多等待 30 秒，Solana 初始化 Helius 最多等待 120 秒。
+# Robinhood/Base/BSC 最多等待 30 秒，Solana 初始化 Helius 最多等待 120 秒。
 wait_for_endpoint robinhood-dashboard \
   'http://127.0.0.1:18118/api/robinhood/dashboard?tab=all' 30
 wait_for_endpoint base-dashboard \
   'http://127.0.0.1:18119/api/base/dashboard?tab=all' 30
+wait_for_endpoint bsc-dashboard \
+  'http://127.0.0.1:18122/api/bsc/dashboard?tab=all' 30
 wait_for_endpoint solana-dashboard \
   'http://127.0.0.1:18120/api/solana/dashboard?tab=all' 120
 wait_for_endpoint robinhood-monitor \
   'http://127.0.0.1:18118/api/robinhood/monitor' 30
 wait_for_endpoint base-monitor \
   'http://127.0.0.1:18119/api/base/monitor' 30
+wait_for_endpoint bsc-monitor \
+  'http://127.0.0.1:18122/api/bsc/monitor' 30
 wait_for_endpoint solana-monitor \
   'http://127.0.0.1:18120/api/solana/monitor' 120
 wait_for_endpoint social-api \
   'http://127.0.0.1:18118/api/social?postLimit=1' 30
 
-# 入口就绪后，旧服务也应已创建原来标记为 .missing 的空库；再检查全部四库。
+# 入口就绪后，旧服务也应已创建原来标记为 .missing 的空库；再检查全部五库。
 for live in "${LIVE_DATABASES[@]}"; do
   test -f "$live"
   quick_check "$live"
@@ -993,8 +1093,8 @@ echo "Cross-schema rollback completed; safety copy retained at: $SAFETY_DIR"
 ```
 
 成功后继续执行“验证部署”中的公网检查，并保留 `SAFETY_DIR`直到观察期结束。若
-命令中途失败，trap 会恢复执行回滚前的程序、网页、unit、四个数据库、可选 Caddy
-和三个服务原来的启停状态；它提示自动恢复不完整时，不要再次启动发布，应保持
+命令中途失败，trap 会恢复执行回滚前的程序、网页、unit、五个数据库、可选 Caddy
+和四个服务原来的启停状态；它提示自动恢复不完整时，不要再次启动发布，应保持
 现场并使用打印的 `SAFETY_DIR`手工恢复。
 
 ## 14. 常见问题
@@ -1025,7 +1125,7 @@ echo "Cross-schema rollback completed; safety copy retained at: $SAFETY_DIR"
 
 ### Caddy 后面的 SSE 延迟或批量出现
 
-确认四个 `/monitor/stream`或 `/social/stream`路由没有压缩和代理缓冲，且
+确认五个 `/monitor/stream`或 `/social/stream`路由没有压缩和代理缓冲，且
 `flush_interval -1`仍然存在。修改 Caddy 后先 validate，再 reload。
 
 ## 15. 安全和许可证

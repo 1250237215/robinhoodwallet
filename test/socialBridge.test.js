@@ -289,7 +289,7 @@ function timelineFailure(errorType) {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.8.1');
+  assert.equal(manifest.version, '1.9.0');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms', 'scripting']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -444,7 +444,9 @@ test('transient timeline failures require count and duration without a healthy p
     harness.advance(4_000);
     assert.equal((await harness.forcePoll(`${termination}-failure-3`)).ok, false);
     const failedHeartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
-    assert.deepEqual(Array.from(failedHeartbeat.payload.capabilities), ['debot-analysis-v1', 'error']);
+    assert.deepEqual(Array.from(failedHeartbeat.payload.capabilities), [
+      'debot-analysis-v1', 'debot-token-holders-v1', 'error'
+    ]);
     assert.equal(failedHeartbeat.payload.error, 'NETWORK');
 
     mode = 'healthy';
@@ -478,7 +480,9 @@ test('authentication failures report immediately without changing the page-sessi
   assert.equal(result.ok, false);
   assert.equal(result.errorType, 'AUTH');
   const heartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.deepEqual(Array.from(heartbeat.payload.capabilities), ['debot-analysis-v1', 'error']);
+  assert.deepEqual(Array.from(heartbeat.payload.capabilities), [
+    'debot-analysis-v1', 'debot-token-holders-v1', 'error'
+  ]);
   assert.equal(heartbeat.payload.error, 'AUTH');
   assert.equal(heartbeat.payload.sessionId, sessionId);
 
@@ -976,9 +980,9 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.requestId === 'page-personal-probe'
       && message.payload.ok === true)));
   const personalHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.equal(personalHeartbeat.payload.version, '1.8.1');
+  assert.equal(personalHeartbeat.payload.version, '1.9.0');
   assert.deepEqual(Array.from(personalHeartbeat.payload.capabilities), [
-    'posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1'
+    'posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1', 'debot-token-holders-v1'
   ]);
   assert.equal(personalHeartbeat.payload.error, undefined);
   const personalDelivery = window.messages.find((message) =>
@@ -1910,7 +1914,9 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.ok === false
       && message.payload.errorType === 'AUTH')));
   const authHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.deepEqual(Array.from(authHeartbeat.payload.capabilities), ['debot-analysis-v1', 'error']);
+  assert.deepEqual(Array.from(authHeartbeat.payload.capabilities), [
+    'debot-analysis-v1', 'debot-token-holders-v1', 'error'
+  ]);
   assert.equal(authHeartbeat.payload.error, 'AUTH');
   assert.equal(JSON.stringify(authHeartbeat).includes('must-not-leave-the-page'), false);
 
@@ -1928,7 +1934,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const recoveredHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
   assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
   assert.equal(Object.hasOwn(recoveredHeartbeat.payload, 'error'), false);
-  assert.equal(recoveredHeartbeat.payload.version, '1.8.1');
+  assert.equal(recoveredHeartbeat.payload.version, '1.9.0');
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.accountCount >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.rawRows >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.normalizedRows >= 0, true);
@@ -3114,6 +3120,179 @@ test('DeBot page bridge executes fixed analysis jobs with sanitized results and 
     message.type === 'analysis-result' && message.payload.jobId >= 200 && message.payload.jobId <= 204).length, 5));
 });
 
+test('DeBot page bridge executes bounded BSC token, wallet and Holder jobs', async () => {
+  const window = new FakeWindow('https://debot.ai');
+  const calls = [];
+  const token = '0x1111111111111111111111111111111111111111';
+  const otherToken = '0x9999999999999999999999999999999999999999';
+  const wallet = '0x2222222222222222222222222222222222222222';
+  let holderMode = 'ok';
+  const holderRows = [{
+    wallet: wallet.toUpperCase().replace('0X', '0x'),
+    holder_rank: '7',
+    position: '123456789012345678901234567890.25',
+    balance: '98765.43',
+    percent: '0.0425',
+    tags: ['Smart Money', { name: 'Whale', authorization: 'must-not-leave' }],
+    tag_map: { cex: true },
+    profit: {
+      realized_profit: '4567.89',
+      profit_rate: '12.5',
+      win_rate: '0.75',
+      authorization: 'analysis-auth-must-not-leave'
+    },
+    cookie: 'analysis-cookie-must-not-leave',
+    arbitraryRaw: { private: true }
+  }, {
+    wallet: 'not-an-address',
+    balance: 100
+  }, {
+    address: wallet,
+    balance: 200
+  }, {
+    address: '0x0000000000000000000000000000000000000000',
+    balance: 300
+  }];
+  for (let index = 10; index < 125; index += 1) {
+    holderRows.push({
+      address: `0x${index.toString(16).padStart(40, '0')}`,
+      rank: index,
+      position: String(index * 1_000),
+      balance: String(index * 10),
+      percent: String(index / 10_000),
+      profit: { realized_profit: index, profit_rate: index / 10 },
+      tags: [`tag-${index}`]
+    });
+  }
+
+  const fetchImpl = async (url, options = {}) => {
+    const requestUrl = String(url);
+    calls.push({ url: requestUrl, options });
+    if (requestUrl.startsWith('/api/social/subscribe/list?')) return jsonResponse({ list: [] });
+    if (requestUrl.startsWith('/api/social/twitter/')) return jsonResponse({ feeds: [] });
+    if (requestUrl === `/api/dashboard/token/detail?chain=bsc&token=${token}`) {
+      return jsonResponse({
+        token: { meta: { chain: 'bsc', address: token, symbol: 'BSC' } },
+        pair: { chain: 'bsc', tokenAddress: token, market_cap: 123_456 }
+      });
+    }
+    if (requestUrl === `/api/dex/profit/wallet_token_analysis?chain=bsc&token=${token}&wallet=${wallet}`) {
+      return jsonResponse({ chain: 'bsc', token, wallet, realized_profit: '88.5', profit_rate: '2.5' });
+    }
+    if (requestUrl.startsWith('/api/token/profiler/tokenHolderList?')) {
+      const raw = holderMode === 'chain-mismatch'
+        ? { chain: 'robinhood', token, list: holderRows }
+        : holderMode === 'token-mismatch'
+          ? { chain: 'bsc', token: otherToken, list: holderRows }
+          : { chain: 'bsc', token, total: 250, list: holderRows };
+      return jsonResponse(raw);
+    }
+    throw new Error(`Unexpected DeBot endpoint: ${requestUrl}`);
+  };
+
+  vm.runInNewContext(bridgeSource('debot-page.js'), {
+    window,
+    document: { visibilityState: 'hidden' },
+    fetch: fetchImpl,
+    setInterval: () => 1,
+    setTimeout,
+    clearTimeout,
+    URLSearchParams,
+    URL,
+    console
+  }, { filename: 'debot-page.js' });
+  await eventually(() => assert.ok(window.messages.some((message) => message.type === 'heartbeat')));
+  window.messages.length = 0;
+  calls.length = 0;
+
+  const dispatch = (id, type, payload) => window.dispatchMessage({
+    source: 'debot-social-relay',
+    type: 'analysis-job',
+    job: { id, type, claimToken: `claim-${id}`, payload }
+  });
+  const resultFor = (id) => window.messages.find((message) =>
+    message.type === 'analysis-result' && message.payload.jobId === id);
+
+  dispatch(401, 'debot.token_detail.v1', { chain: 'bsc', token });
+  dispatch(402, 'debot.wallet_token_analysis.v1', { chain: 'bsc', token, wallet });
+  dispatch(403, 'debot.token_holders.v1', { chain: 'bsc', token, pageSize: 100 });
+  await eventually(() => {
+    assert.ok(resultFor(401));
+    assert.ok(resultFor(402));
+    assert.ok(resultFor(403));
+  });
+
+  assert.equal(resultFor(401).payload.success, true);
+  assert.equal(resultFor(401).payload.result.token.meta.chain, 'bsc');
+  assert.equal(resultFor(402).payload.success, true);
+  assert.equal(resultFor(402).payload.result.chain, 'bsc');
+  assert.equal(resultFor(402).payload.result.realized_profit, 88.5);
+
+  const holderCall = calls.find((call) => call.url.startsWith('/api/token/profiler/tokenHolderList?'));
+  const holderUrl = new URL(holderCall.url, 'https://debot.ai');
+  assert.equal(holderUrl.pathname, '/api/token/profiler/tokenHolderList');
+  assert.deepEqual([...holderUrl.searchParams.entries()], [
+    ['chain', 'bsc'],
+    ['token', token],
+    ['page_size', '100'],
+    ['sort_field', 'position'],
+    ['sort_order', 'desc']
+  ]);
+  assert.equal(holderCall.options.credentials, 'include');
+  assert.equal(holderCall.options.method ?? 'GET', 'GET');
+
+  const holderResult = resultFor(403).payload;
+  assert.equal(holderResult.success, true);
+  assert.equal(holderResult.result.chain, 'bsc');
+  assert.equal(holderResult.result.token, token);
+  assert.equal(holderResult.result.total, 250);
+  assert.equal(holderResult.result.list.length, 100);
+  assert.deepEqual(JSON.parse(JSON.stringify(holderResult.result.list[0])), {
+    address: wallet,
+    rank: 7,
+    holding_amount: '123456789012345678901234567890.25',
+    holding_value_usd: '98765.43',
+    holding_share_percent: 4.25,
+    tags: ['Smart Money', 'Whale', 'cex'],
+    profit: {
+      realized_profit: 4567.89,
+      profit_rate: 12.5,
+      win_rate: 0.75
+    }
+  });
+  assert.equal(new Set(holderResult.result.list.map((row) => row.address)).size, 100);
+  assert.equal(Buffer.byteLength(JSON.stringify(holderResult.result), 'utf8') <= 256 * 1024, true);
+  assert.equal(/analysis-(?:cookie|auth)-must-not-leave/.test(JSON.stringify(holderResult)), false);
+  assert.equal(JSON.stringify(holderResult).includes('arbitraryRaw'), false);
+
+  holderMode = 'chain-mismatch';
+  dispatch(404, 'debot.token_holders.v1', { chain: 'bsc', token });
+  await eventually(() => assert.ok(resultFor(404)));
+  assert.equal(resultFor(404).payload.success, false);
+  assert.equal(resultFor(404).payload.errorType, 'DEBOT');
+
+  holderMode = 'token-mismatch';
+  dispatch(405, 'debot.token_holders.v1', { chain: 'bsc', token, pageSize: 50 });
+  await eventually(() => assert.ok(resultFor(405)));
+  assert.equal(resultFor(405).payload.success, false);
+  assert.equal(resultFor(405).payload.errorType, 'DEBOT');
+
+  const analysisCallsBeforeInvalidJobs = calls.filter((call) => !call.url.startsWith('/api/social/')).length;
+  dispatch(406, 'debot.token_holders.v1', { chain: 'robinhood', token });
+  dispatch(407, 'debot.token_holders.v1', { chain: 'bsc', token, pageSize: 101 });
+  dispatch(408, 'debot.token_holders.v1', { chain: 'bsc', token, unexpected: true });
+  await eventually(() => {
+    assert.ok(resultFor(406));
+    assert.ok(resultFor(407));
+    assert.ok(resultFor(408));
+  });
+  assert.equal([406, 407, 408].every((id) => resultFor(id).payload.errorType === 'INVALID_JOB'), true);
+  assert.equal(
+    calls.filter((call) => !call.url.startsWith('/api/social/')).length,
+    analysisCallsBeforeInvalidJobs
+  );
+});
+
 test('relay transports only supported page events and delivers claimed commands to the page world', async () => {
   const window = new FakeWindow('https://debot.ai');
   const runtimeMessages = [];
@@ -3280,6 +3459,15 @@ test('relay claims at most four analysis jobs, validates claim tokens and refill
     },
     leaseExpiresAt: Date.now() + 60_000
   }));
+  jobs[4] = {
+    ...jobs[4],
+    type: 'debot.token_holders.v1',
+    payload: {
+      chain: 'bsc',
+      token: '0x1111111111111111111111111111111111111111',
+      pageSize: 100
+    }
+  };
   const staleJob = {
     ...jobs[0],
     id: 299,
@@ -3359,6 +3547,10 @@ test('relay claims at most four analysis jobs, validates claim tokens and refill
       && message.payload.claimToken === jobs[0].claimToken)));
   await eventually(() => assert.ok(window.messages.some((message) =>
     message.type === 'analysis-job' && message.job.id === jobs[4].id)));
+  assert.equal(
+    window.messages.find((message) => message.type === 'analysis-job' && message.job.id === jobs[4].id).job.type,
+    'debot.token_holders.v1'
+  );
   const claims = runtimeMessages.filter((message) => message.type === 'poll-analysis-jobs');
   assert.equal(claims.length >= 2, true);
   assert.equal(claims[1].payload.limit, 1);
@@ -3924,6 +4116,72 @@ test('background uses the bridge secret only as authorization and submits allowl
   assert.equal(resultBody.result.token.meta.address, analysisJob.payload.token);
   assert.equal(/analysis-(?:cookie|auth|session)-must-not-leave/.test(resultUpload.options.body), false);
   assert.equal(resultUpload.options.body.includes('arbitraryRaw'), false);
+
+  const holderWallet = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const queuedHolderAnalysis = await send({
+    source: 'debot-social-relay',
+    type: 'analysis-result',
+    payload: {
+      jobId: 903,
+      claimToken: 'background-holder-claim',
+      success: true,
+      result: {
+        chain: 'bsc',
+        token: analysisJob.payload.token,
+        total: 200,
+        list: [{
+          address: holderWallet,
+          rank: 1,
+          holding_amount: '12345678901234567890.5',
+          holding_value_usd: '50000.25',
+          holding_share_percent: 5.5,
+          is_pair: '1',
+          label: 'Pancake pool',
+          tags: ['pool'],
+          profit: {
+            realized_profit: 900,
+            profit_rate: 4.5,
+            authorization: 'analysis-auth-must-not-leave'
+          },
+          cookie: 'analysis-cookie-must-not-leave'
+        }, {
+          address: 'not-an-address',
+          holding_amount: 100
+        }, {
+          address: holderWallet,
+          holding_amount: 200
+        }],
+        arbitraryRaw: { private: true }
+      },
+      error: '',
+      errorType: ''
+    }
+  }, { tab: { id: 17 } });
+  assert.equal(queuedHolderAnalysis.ok, true);
+  assert.equal(queuedHolderAnalysis.payload.durable, true);
+  await eventually(() => assert.ok(requests.some((request) =>
+    /\/bridge\/debot\/jobs\/903\/result$/.test(request.url))));
+  const holderResultUpload = requests.findLast((request) =>
+    /\/bridge\/debot\/jobs\/903\/result$/.test(request.url));
+  const holderResultBody = JSON.parse(holderResultUpload.options.body);
+  assert.deepEqual(holderResultBody.result, {
+    chain: 'bsc',
+    token: analysisJob.payload.token,
+    total: 200,
+    list: [{
+      address: holderWallet,
+      rank: 1,
+      holding_amount: '12345678901234567890.5',
+      holding_value_usd: '50000.25',
+      holding_share_percent: 5.5,
+      is_pair: true,
+      label: 'Pancake pool',
+      tags: ['pool'],
+      profit: { realized_profit: 900, profit_rate: 4.5 }
+    }]
+  });
+  assert.equal(/analysis-(?:cookie|auth)-must-not-leave/.test(holderResultUpload.options.body), false);
+  assert.equal(holderResultUpload.options.body.includes('arbitraryRaw'), false);
 
   analysisResultResponseStatus = 400;
   const invalidResultRequestCount = requests.filter((request) =>

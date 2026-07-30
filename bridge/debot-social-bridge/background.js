@@ -319,6 +319,11 @@ function validEvmAddress(value) {
   return /^0x[0-9a-f]{40}$/.test(String(value || '').toLowerCase());
 }
 
+function validWalletAddress(value) {
+  const address = String(value || '').toLowerCase();
+  return validEvmAddress(address) && address !== '0x0000000000000000000000000000000000000000';
+}
+
 function safeTokenDetailResult(value) {
   const raw = value && typeof value === 'object' ? value : {};
   const token = raw.token && typeof raw.token === 'object' ? raw.token : {};
@@ -329,7 +334,9 @@ function safeTokenDetailResult(value) {
   const market = raw.market_metrics && typeof raw.market_metrics === 'object' ? raw.market_metrics : {};
   const address = text(meta.address || pair.tokenAddress, 100).toLowerCase();
   const chain = text(meta.chain || pair.chain || 'robinhood', 20).toLowerCase();
-  if (chain !== 'robinhood' || !validEvmAddress(address)) throw new Error('Invalid token detail result');
+  if (!['robinhood', 'bsc'].includes(chain) || !validWalletAddress(address)) {
+    throw new Error('Invalid token detail result');
+  }
   const pools = (Array.isArray(raw.pools?.list) ? raw.pools.list : []).slice(0, 32).map((entry) => {
     const pool = entry && typeof entry === 'object' ? entry : {};
     const baseToken = pool.base_token && typeof pool.base_token === 'object' ? pool.base_token : {};
@@ -442,7 +449,7 @@ function safeWalletProfitResult(value) {
   const chain = text(raw.chain || 'robinhood', 20).toLowerCase();
   const wallet = text(raw.wallet, 100).toLowerCase();
   const token = text(raw.token, 100).toLowerCase();
-  if (chain !== 'robinhood' || !validEvmAddress(wallet) || !validEvmAddress(token)) {
+  if (!['robinhood', 'bsc'].includes(chain) || !validWalletAddress(wallet) || !validWalletAddress(token)) {
     throw new Error('Invalid wallet profit result');
   }
   const result = { chain, wallet, token };
@@ -458,13 +465,125 @@ function safeWalletProfitResult(value) {
   return result;
 }
 
+const HOLDER_PROFIT_NUMERIC_FIELDS = Object.freeze([
+  ...WALLET_PROFIT_NUMERIC_FIELDS,
+  'total_profit',
+  'total_profit_rate',
+  'pnl',
+  'pnl_rate',
+  'win_rate',
+  'token_count',
+  'winning_token_count'
+]);
+
+function safeNumericScalar(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== 'string') return undefined;
+  const candidate = value.trim();
+  if (!candidate || candidate.length > 120
+    || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(candidate)) return undefined;
+  return candidate;
+}
+
+function safeNonNegativeNumericScalar(value) {
+  const parsed = safeNumericScalar(value);
+  if (parsed === undefined) return undefined;
+  return (typeof parsed === 'number' ? parsed < 0 : parsed.startsWith('-')) ? undefined : parsed;
+}
+
+function safeHolderTags(value) {
+  const tags = [];
+  const seen = new Set();
+  for (const item of (Array.isArray(value) ? value : []).slice(0, 12)) {
+    if (!['string', 'number', 'boolean'].includes(typeof item)) continue;
+    const tag = text(item, 80).trim();
+    const key = tag.toLowerCase();
+    if (!tag || seen.has(key)) continue;
+    seen.add(key);
+    tags.push(tag);
+  }
+  return tags;
+}
+
+function safeBooleanFlag(value) {
+  if (value === true || value === 1 || value === '1' || String(value || '').toLowerCase() === 'true') {
+    return true;
+  }
+  if (value === false || value === 0 || value === '0' || String(value || '').toLowerCase() === 'false') {
+    return false;
+  }
+  return undefined;
+}
+
+function safeTokenHoldersResult(value) {
+  const raw = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const chain = text(raw.chain, 20).toLowerCase();
+  const token = text(raw.token, 100).toLowerCase();
+  if (chain !== 'bsc' || !validWalletAddress(token) || !Array.isArray(raw.list)) {
+    throw new Error('Invalid token Holder result');
+  }
+  const list = [];
+  const seen = new Set();
+  for (const valueRow of raw.list) {
+    if (list.length >= 100) break;
+    const row = valueRow && typeof valueRow === 'object' && !Array.isArray(valueRow) ? valueRow : {};
+    const address = text(row.address, 100).toLowerCase();
+    if (!validWalletAddress(address) || seen.has(address)) continue;
+    seen.add(address);
+    const profitRaw = row.profit && typeof row.profit === 'object' && !Array.isArray(row.profit)
+      ? row.profit
+      : {};
+    const profit = {};
+    for (const field of HOLDER_PROFIT_NUMERIC_FIELDS) {
+      const parsed = optionalNumber(profitRaw[field]);
+      if (parsed !== undefined) profit[field] = parsed;
+    }
+    const tags = safeHolderTags(row.tags);
+    const rawRank = optionalNumber(row.rank);
+    const rank = Number.isSafeInteger(rawRank) && rawRank > 0 ? rawRank : undefined;
+    const rawShare = optionalNumber(row.holding_share_percent);
+    const holdingSharePercent = rawShare !== undefined && rawShare >= 0 && rawShare <= 100
+      ? rawShare
+      : undefined;
+    list.push(compact({
+      address,
+      rank,
+      holding_amount: safeNonNegativeNumericScalar(row.holding_amount),
+      holding_value_usd: safeNonNegativeNumericScalar(row.holding_value_usd),
+      holding_share_percent: holdingSharePercent,
+      is_contract: safeBooleanFlag(row.is_contract),
+      is_pair: safeBooleanFlag(row.is_pair),
+      is_pool: safeBooleanFlag(row.is_pool),
+      is_lp: safeBooleanFlag(row.is_lp),
+      is_burn: safeBooleanFlag(row.is_burn),
+      type: text(row.type, 120) || undefined,
+      wallet_type: text(row.wallet_type, 120) || undefined,
+      label: text(row.label, 120) || undefined,
+      name: text(row.name, 120) || undefined,
+      tags: tags.length ? tags : undefined,
+      profit: Object.keys(profit).length ? profit : undefined
+    }));
+  }
+  const result = compact({
+    chain,
+    token,
+    total: optionalNumber(raw.total),
+    list
+  });
+  while (list.length && jsonBytes(result) > MAX_ANALYSIS_RESULT_BYTES) list.pop();
+  if (jsonBytes(result) > MAX_ANALYSIS_RESULT_BYTES) throw new Error('Analysis result is too large');
+  return result;
+}
+
 function safeAnalysisResult(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Analysis result must be an object');
   }
   const result = value.token && typeof value.token === 'object'
     ? safeTokenDetailResult(value)
-    : safeWalletProfitResult(value);
+    : Array.isArray(value.list)
+      ? safeTokenHoldersResult(value)
+      : safeWalletProfitResult(value);
   if (jsonBytes(result) > MAX_ANALYSIS_RESULT_BYTES) throw new Error('Analysis result is too large');
   return result;
 }

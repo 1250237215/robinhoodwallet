@@ -229,7 +229,7 @@ fs.rmSync(temporaryDirectory, { recursive: true, force: true });
 fs.mkdirSync(temporaryDirectory, { recursive: true, mode: 0o755 });
 
 try {
-  for (const chain of ['robinhood', 'base', 'solana']) {
+  for (const chain of ['robinhood', 'base', 'bsc', 'solana']) {
     copyFile(
       path.join(repoRoot, 'dist', `${chain}-server.mjs`),
       path.join(temporaryDirectory, `${chain}-server.mjs`)
@@ -244,7 +244,7 @@ try {
     );
   }
 
-  for (const name of ['robinhood', 'base', 'solana', 'social']) {
+  for (const name of ['robinhood', 'base', 'bsc', 'solana', 'social']) {
     copyFile(
       path.join(repoRoot, 'deploy', `${name}.env.example`),
       path.join(temporaryDirectory, `${name}.env.example`)

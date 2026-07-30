@@ -773,7 +773,7 @@ test('DeBot analysis bridge uses bearer-only claims, inflight dedupe and short r
   assert.throws(() => socialService.requestDeBot('debot.token_detail.v1', {
     chain: 'base',
     token: tokenAddress
-  }), /Robinhood chain/);
+  }), /Robinhood and BSC chains/);
   assert.throws(() => socialService.requestDeBot('debot.token_detail.v1', {
     chain: 'robinhood',
     token: '0x1234'
@@ -874,6 +874,199 @@ test('DeBot analysis bridge uses bearer-only claims, inflight dedupe and short r
     headers: { authorization: `Bearer ${token}` }
   })).json();
   assert.deepEqual(empty.jobs, []);
+});
+
+test('DeBot analysis bridge capability-gates and validates bounded BSC Holder results', async (t) => {
+  const bridgeToken = 'bsc-holder-device-token';
+  const token = '0x1111111111111111111111111111111111111111';
+  const otherToken = '0x9999999999999999999999999999999999999999';
+  const walletA = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const walletB = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const { baseUrl, socialService } = await withSocialServer(t, { token: bridgeToken });
+
+  await fetch(`${baseUrl}/api/social/bridge/heartbeat`, {
+    method: 'POST',
+    headers: auth(bridgeToken),
+    body: JSON.stringify({ capabilities: ['posts', 'debot-analysis-v1'] })
+  });
+  assert.equal(socialService.getConnection().analysisOnline, true);
+  assert.equal(socialService.getConnection().holderAnalysisOnline, false);
+  await assert.rejects(
+    socialService.requestDeBot('debot.token_holders.v1', { chain: 'bsc', token }),
+    { code: 'DEBOT_BRIDGE_UNAVAILABLE' }
+  );
+
+  await fetch(`${baseUrl}/api/social/bridge/heartbeat`, {
+    method: 'POST',
+    headers: auth(bridgeToken),
+    body: JSON.stringify({
+      bridgeId: 'chrome-bsc-holder',
+      version: '1.9.0',
+      capabilities: ['posts', 'debot-analysis-v1', 'debot-token-holders-v1']
+    })
+  });
+  assert.equal(socialService.getConnection().holderAnalysisOnline, true);
+
+  await fetch(`${baseUrl}/api/social/bridge/heartbeat`, {
+    method: 'POST',
+    headers: auth(bridgeToken),
+    body: JSON.stringify({
+      bridgeId: 'chrome-bsc-holder',
+      version: '1.9.0',
+      capabilities: ['debot-analysis-v1', 'debot-token-holders-v1', 'error']
+    })
+  });
+  const degradedConnection = socialService.getConnection();
+  assert.equal(degradedConnection.state, 'error');
+  assert.equal(degradedConnection.online, false);
+  assert.equal(degradedConnection.analysisOnline, true);
+  assert.equal(degradedConnection.holderAnalysisOnline, true);
+  const degradedPending = socialService.requestDeBot('debot.token_holders.v1', {
+    chain: 'bsc',
+    token: otherToken,
+    pageSize: 1
+  });
+  const degradedJob = socialService.claimDeBotJobs({ limit: 1 }).jobs[0];
+  assert.equal(degradedJob.type, 'debot.token_holders.v1');
+  socialService.submitDeBotResult(degradedJob.id, {
+    claimToken: degradedJob.claimToken,
+    success: true,
+    result: { chain: 'bsc', token: otherToken, total: 0, list: [] }
+  });
+  assert.deepEqual(await degradedPending, {
+    schema: 'debot.token_holders.raw.v1',
+    data: { chain: 'bsc', token: otherToken, total: 0, list: [] }
+  });
+
+  await fetch(`${baseUrl}/api/social/bridge/heartbeat`, {
+    method: 'POST',
+    headers: auth(bridgeToken),
+    body: JSON.stringify({
+      bridgeId: 'chrome-bsc-holder',
+      version: '1.9.0',
+      capabilities: ['posts', 'debot-analysis-v1', 'debot-token-holders-v1']
+    })
+  });
+  assert.throws(() => socialService.requestDeBot('debot.token_holders.v1', {
+    chain: 'robinhood',
+    token
+  }), /only supports the BSC chain/);
+  assert.throws(() => socialService.requestDeBot('debot.token_holders.v1', {
+    chain: 'bsc',
+    token,
+    pageSize: 0
+  }), /pageSize/);
+  assert.throws(() => socialService.requestDeBot('debot.token_holders.v1', {
+    chain: 'bsc',
+    token,
+    extra: true
+  }), /Invalid DeBot analysis payload/);
+
+  const pending = socialService.requestDeBot('debot.token_holders.v1', {
+    chain: 'BSC',
+    token: token.toUpperCase().replace('0X', '0x'),
+    pageSize: 2
+  });
+  const tokenPending = socialService.requestDeBot('debot.token_detail.v1', { chain: 'bsc', token });
+  await fetch(`${baseUrl}/api/social/bridge/heartbeat`, {
+    method: 'POST',
+    headers: auth(bridgeToken),
+    body: JSON.stringify({ capabilities: ['posts', 'debot-analysis-v1'] })
+  });
+  const tokenJob = socialService.claimDeBotJobs({ limit: 4 }).jobs[0];
+  assert.equal(tokenJob.type, 'debot.token_detail.v1');
+  const tokenResult = { token: { meta: { chain: 'bsc', address: token, symbol: 'TEST' } } };
+  socialService.submitDeBotResult(tokenJob.id, {
+    claimToken: tokenJob.claimToken,
+    success: true,
+    result: tokenResult
+  });
+  assert.deepEqual(await tokenPending, { schema: 'debot.token_detail.raw.v1', data: tokenResult });
+  await fetch(`${baseUrl}/api/social/bridge/heartbeat`, {
+    method: 'POST',
+    headers: auth(bridgeToken),
+    body: JSON.stringify({
+      bridgeId: 'chrome-bsc-holder',
+      version: '1.9.0',
+      capabilities: ['posts', 'debot-analysis-v1', 'debot-token-holders-v1']
+    })
+  });
+  const job = socialService.claimDeBotJobs({ limit: 1 }).jobs[0];
+  assert.equal(job.type, 'debot.token_holders.v1');
+  assert.deepEqual(job.payload, { chain: 'bsc', token, pageSize: 2 });
+
+  assert.throws(() => socialService.submitDeBotResult(job.id, {
+    claimToken: job.claimToken,
+    success: true,
+    result: { chain: 'robinhood', token, total: 1, list: [{ address: walletA }] }
+  }), /does not match/);
+  assert.throws(() => socialService.submitDeBotResult(job.id, {
+    claimToken: job.claimToken,
+    success: true,
+    result: { chain: 'bsc', token: otherToken, total: 1, list: [{ address: walletA }] }
+  }), /does not match/);
+  assert.throws(() => socialService.submitDeBotResult(job.id, {
+    claimToken: job.claimToken,
+    success: true,
+    result: {
+      chain: 'bsc',
+      token,
+      total: 2,
+      list: [{ address: walletA }, { address: walletA }]
+    }
+  }), /invalid wallet row/);
+  assert.throws(() => socialService.submitDeBotResult(job.id, {
+    claimToken: job.claimToken,
+    success: true,
+    result: {
+      chain: 'bsc',
+      token,
+      total: 3,
+      list: [{ address: walletA }, { address: walletB }, { address: otherToken }]
+    }
+  }), /does not match/);
+
+  const rawResult = {
+    chain: 'bsc',
+    token,
+    total: 250,
+    list: [{
+      address: walletA,
+      rank: 1,
+      holding_amount: '12345678901234567890.25',
+      holding_share_percent: 4.5,
+      tags: ['smart-money'],
+      profit: { realized_profit: 400, profit_rate: 8 }
+    }, {
+      address: walletB,
+      rank: 2,
+      holding_amount: '9000',
+      holding_share_percent: 2.25
+    }]
+  };
+  assert.deepEqual(socialService.submitDeBotResult(job.id, {
+    claimToken: job.claimToken,
+    success: true,
+    result: rawResult
+  }), { ok: true });
+  assert.deepEqual(await pending, { schema: 'debot.token_holders.raw.v1', data: rawResult });
+
+  const walletPending = socialService.requestDeBot('debot.wallet_token_analysis.v1', {
+    chain: 'bsc',
+    token,
+    wallet: walletA
+  });
+  const walletJob = socialService.claimDeBotJobs({ limit: 1 }).jobs[0];
+  const walletResult = { chain: 'bsc', token, wallet: walletA, realized_profit: 12 };
+  socialService.submitDeBotResult(walletJob.id, {
+    claimToken: walletJob.claimToken,
+    success: true,
+    result: walletResult
+  });
+  assert.deepEqual(await walletPending, {
+    schema: 'debot.wallet_token_analysis.raw.v1',
+    data: walletResult
+  });
 });
 
 test('DeBot result endpoint enforces payload limits and stores only coarse remote errors', async (t) => {

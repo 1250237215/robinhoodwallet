@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { BASE_CHAIN } from '../src/base/config.js';
+import { BSC_CHAIN } from '../src/bsc/config.js';
 import { scanTokenHolders } from '../src/robinhood/holderScanner.js';
 
 const token = '0x1111111111111111111111111111111111111111';
@@ -10,6 +11,9 @@ const pool = '0x3333333333333333333333333333333333333333';
 const walletA = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const walletB = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const walletC = '0xcccccccccccccccccccccccccccccccccccccccc';
+const walletD = '0xdddddddddddddddddddddddddddddddddddddddd';
+const walletE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+const walletF = '0xffffffffffffffffffffffffffffffffffffffff';
 
 function holder(address, holderRank, patch = {}) {
   return {
@@ -441,6 +445,152 @@ test('propagates an abort raised during a wallet-profit retry', async () => {
     }
   }), (error) => error?.name === 'AbortError');
   assert.equal(calls, 2);
+});
+
+test('cancels the Holder source when token detail fails first', async () => {
+  let holderStarted = false;
+  let holderAborted = false;
+  await assert.rejects(scanTokenHolders({
+    token: { address: token, manual: true },
+    config: config(),
+    holderClient: {
+      fetchTopHolders: async (_address, { signal }) => {
+        holderStarted = true;
+        return new Promise((resolve, reject) => {
+          const aborted = () => {
+            holderAborted = true;
+            reject(signal.reason);
+          };
+          if (signal.aborted) aborted();
+          else signal.addEventListener('abort', aborted, { once: true });
+        });
+      }
+    },
+    debotClient: {
+      fetchTokenDetail: async () => { throw new Error('token detail unavailable'); },
+      fetchWalletTokenProfit: async () => profit(walletA)
+    }
+  }), /token detail unavailable/);
+  assert.equal(holderStarted, true);
+  assert.equal(holderAborted, true);
+});
+
+test('reuses a matching BSC embedded profit while keeping a top-100 Holder snapshot partial', async () => {
+  let profitCalls = 0;
+  const embedded = profit(walletA, {
+    chain: 'bsc',
+    tokenAddress: token,
+    buyAmount: 100,
+    sellAmount: 20,
+    buyTimes: 2,
+    sellTimes: 1
+  });
+  const result = await scanTokenHolders({
+    token: { address: token, manual: true },
+    chainProfile: BSC_CHAIN,
+    config: config({ holderCandidateLimit: 1, holderFetchLimit: 1 }),
+    holderClient: {
+      fetchTopHolders: async () => ({
+        holders: [holder(walletA, 1, { walletTokenProfit: embedded })],
+        token: { holders: 500 },
+        snapshotAt: '2026-07-30T00:00:00.000Z',
+        denominatorPartial: true,
+        holderUniverseComplete: false,
+        complete: false
+      })
+    },
+    debotClient: {
+      fetchTokenDetail: async () => tokenDetail(),
+      fetchWalletTokenProfit: async () => {
+        profitCalls += 1;
+        throw new Error('matching embedded profit should be reused');
+      }
+    }
+  });
+
+  assert.equal(profitCalls, 0);
+  assert.equal(result.holderAnalysis.candidates[0].address, walletA);
+  assert.equal(result.holderAnalysis.candidates[0].buyVolumeUsd, 800);
+  assert.equal(result.holderAnalysis.profitComplete, true);
+  assert.equal(result.holderAnalysis.holderUniverseComplete, false);
+  assert.equal(result.holderAnalysis.denominatorPartial, true);
+  assert.equal(result.holderAnalysis.complete, false);
+  assert.equal(result.scan.complete, false);
+  assert.equal(result.scan.partial, true);
+});
+
+test('fetches wallet profit when embedded Holder profit is missing, empty, incomplete, or mismatched', async () => {
+  const directCalls = [];
+  const invalidEmbedded = [
+    holder(walletA, 1),
+    holder(walletB, 2, { walletTokenProfit: {} }),
+    holder(walletC, 3, {
+      walletTokenProfit: profit(walletC, { chain: 'base', tokenAddress: token })
+    }),
+    holder(walletD, 4, {
+      walletTokenProfit: profit(walletD, {
+        chain: 'bsc',
+        tokenAddress: '0x9999999999999999999999999999999999999999'
+      })
+    }),
+    holder(walletE, 5, {
+      walletTokenProfit: profit(walletA, { chain: 'bsc', tokenAddress: token })
+    }),
+    holder(walletF, 6, {
+      walletTokenProfit: profit(walletF, { chain: 'bsc', tokenAddress: token, profitState: 'partial' })
+    })
+  ];
+  const result = await scanTokenHolders({
+    token: { address: token, manual: true },
+    chainProfile: BSC_CHAIN,
+    config: config({ holderCandidateLimit: 6, holderFetchLimit: 6, holderProfitConcurrency: 2 }),
+    holderClient: {
+      fetchTopHolders: async () => ({
+        holders: invalidEmbedded,
+        token: { holders: 500 },
+        snapshotAt: '2026-07-30T00:00:00.000Z',
+        holderUniverseComplete: true,
+        complete: true
+      })
+    },
+    debotClient: {
+      fetchTokenDetail: async () => tokenDetail(),
+      fetchWalletTokenProfit: async (_tokenAddress, address) => {
+        directCalls.push(address);
+        return profit(address);
+      }
+    }
+  });
+
+  assert.deepEqual(directCalls.sort(), [walletA, walletB, walletC, walletD, walletE, walletF].sort());
+  assert.equal(result.holderAnalysis.candidates.length, 6);
+  assert.equal(result.holderAnalysis.profitComplete, true);
+  assert.equal(result.holderAnalysis.holderUniverseComplete, true);
+  assert.equal(result.holderAnalysis.complete, true);
+});
+
+test('honors an explicit incomplete Holder universe even without generic partial flags', async () => {
+  const result = await scanTokenHolders({
+    token: { address: token, manual: true },
+    config: config({ holderCandidateLimit: 1 }),
+    holderClient: {
+      fetchTopHolders: async () => ({
+        holders: [holder(walletA, 1)],
+        token: { holders: 500 },
+        snapshotAt: '2026-07-30T00:00:00.000Z',
+        holderUniverseComplete: false
+      })
+    },
+    debotClient: {
+      fetchTokenDetail: async () => tokenDetail(),
+      fetchWalletTokenProfit: async () => profit(walletA)
+    }
+  });
+
+  assert.equal(result.scan.denominatorPartial, true);
+  assert.equal(result.scan.holderUniverseComplete, false);
+  assert.equal(result.scan.profitComplete, true);
+  assert.equal(result.scan.complete, false);
 });
 
 test('uses a Base chain profile to exclude chain infrastructure and label holder evidence', async () => {

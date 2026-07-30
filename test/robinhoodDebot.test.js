@@ -369,7 +369,7 @@ test('routes Base requests through the same client without changing EVM address 
 
   const metrics = await client.fetchTokenMetrics(tokenAddress.toUpperCase().replace('0X', '0x'));
 
-  assert.deepEqual(DEBOT_CHAINS, ['robinhood', 'base', 'solana']);
+  assert.deepEqual(DEBOT_CHAINS, ['robinhood', 'base', 'bsc', 'solana']);
   assert.equal(metrics.chain, 'base');
   assert.equal(metrics.address, tokenAddress);
   assert.equal(metrics.marketCapUsd, 5_000_000);
@@ -377,6 +377,49 @@ test('routes Base requests through the same client without changing EVM address 
   assert.equal(requests[0].searchParams.get('token'), tokenAddress);
   await assert.rejects(client.fetchTokenMetrics('0x1234'), /Invalid Base token address/);
   assert.equal(requests.length, 1);
+});
+
+test('routes public BSC token detail and wallet profit requests through chain=bsc', async () => {
+  const requests = [];
+  const client = new RobinhoodDebotClient({
+    baseUrl: 'https://debot.test/api',
+    chain: 'bsc',
+    fetchImpl: async (input) => {
+      const url = new URL(input);
+      requests.push(url);
+      if (url.pathname.endsWith('/dashboard/token/detail')) {
+        return Response.json({
+          code: 0,
+          data: {
+            token: { meta: { chain: 'bsc', address: tokenAddress, symbol: 'BSC', creation_timestamp: 100 } },
+            market_metrics: { price: 1 }
+          }
+        });
+      }
+      return Response.json({
+        code: 0,
+        data: {
+          chain: 'bsc',
+          wallet: walletAddress,
+          token: tokenAddress,
+          buy_volume: 600,
+          profit_rate: 4
+        }
+      });
+    }
+  });
+
+  const detail = await client.fetchTokenDetail(tokenAddress);
+  const profit = await client.fetchWalletTokenProfit(tokenAddress, walletAddress);
+
+  assert.equal(detail.chain, 'bsc');
+  assert.equal(profit.chain, 'bsc');
+  assert.equal(profit.totalMultiple, 5);
+  assert.equal(requests[0].searchParams.get('chain'), 'bsc');
+  assert.equal(requests[1].searchParams.get('chain'), 'bsc');
+  assert.equal(requests[1].searchParams.get('wallet'), walletAddress);
+  await assert.rejects(client.fetchTokenDetail('0x1234'), /Invalid BSC token address/);
+  assert.equal(requests.length, 2);
 });
 
 test('surfaces a DeBot 403 as non-retryable without repeating the blocked request', async () => {

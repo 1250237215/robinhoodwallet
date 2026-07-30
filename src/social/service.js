@@ -5,9 +5,15 @@ import { createXProfileMonitor } from './xProfileMonitor.js';
 import { createXReplyEnricher, referenceContextNeedsEnrichment } from './xReplyEnricher.js';
 
 const DEBOT_ANALYSIS_CAPABILITY = 'debot-analysis-v1';
+const DEBOT_HOLDER_CAPABILITY = 'debot-token-holders-v1';
 const DEBOT_TOKEN_DETAIL = 'debot.token_detail.v1';
 const DEBOT_WALLET_TOKEN_ANALYSIS = 'debot.wallet_token_analysis.v1';
-const DEBOT_TYPES = new Set([DEBOT_TOKEN_DETAIL, DEBOT_WALLET_TOKEN_ANALYSIS]);
+const DEBOT_TOKEN_HOLDERS = 'debot.token_holders.v1';
+const DEBOT_TYPES = new Set([
+  DEBOT_TOKEN_DETAIL,
+  DEBOT_WALLET_TOKEN_ANALYSIS,
+  DEBOT_TOKEN_HOLDERS
+]);
 const DEBOT_REMOTE_ERRORS = new Set([
   'AUTH',
   'TIMEOUT',
@@ -53,16 +59,30 @@ function evmAddress(value, name) {
 function normalizeDeBotRequest(type, payload) {
   const normalizedType = String(type || '').trim();
   if (!DEBOT_TYPES.has(normalizedType)) throw new TypeError('Unsupported DeBot analysis request type');
-  const expectedKeys = normalizedType === DEBOT_TOKEN_DETAIL
-    ? ['chain', 'token']
-    : ['chain', 'token', 'wallet'];
-  if (!exactKeys(payload, expectedKeys)) throw new TypeError('Invalid DeBot analysis payload');
+  const validPayloadShape = normalizedType === DEBOT_WALLET_TOKEN_ANALYSIS
+    ? exactKeys(payload, ['chain', 'token', 'wallet'])
+    : normalizedType === DEBOT_TOKEN_HOLDERS
+      ? exactKeys(payload, ['chain', 'token']) || exactKeys(payload, ['chain', 'pageSize', 'token'])
+      : exactKeys(payload, ['chain', 'token']);
+  if (!validPayloadShape) throw new TypeError('Invalid DeBot analysis payload');
   const chain = String(payload.chain || '').trim().toLowerCase();
-  if (chain !== 'robinhood') throw new TypeError('DeBot analysis only supports the Robinhood chain');
+  if (!['robinhood', 'bsc'].includes(chain)) {
+    throw new TypeError('DeBot analysis only supports the Robinhood and BSC chains');
+  }
+  if (normalizedType === DEBOT_TOKEN_HOLDERS && chain !== 'bsc') {
+    throw new TypeError('DeBot Holder analysis only supports the BSC chain');
+  }
   const normalized = {
     chain,
     token: evmAddress(payload.token, 'token')
   };
+  if (normalizedType === DEBOT_TOKEN_HOLDERS && payload.pageSize !== undefined) {
+    const pageSize = Number(payload.pageSize);
+    if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+      throw new TypeError('DeBot Holder pageSize must be an integer between 1 and 100');
+    }
+    normalized.pageSize = pageSize;
+  }
   if (normalizedType === DEBOT_WALLET_TOKEN_ANALYSIS) {
     normalized.wallet = evmAddress(payload.wallet, 'wallet');
   }
@@ -74,10 +94,13 @@ function deBotRequestKey(type, payload) {
 }
 
 function deBotResultEnvelope(type, result) {
+  const schema = type === DEBOT_TOKEN_DETAIL
+    ? 'debot.token_detail.raw.v1'
+    : type === DEBOT_TOKEN_HOLDERS
+      ? 'debot.token_holders.raw.v1'
+      : 'debot.wallet_token_analysis.raw.v1';
   return {
-    schema: type === DEBOT_TOKEN_DETAIL
-      ? 'debot.token_detail.raw.v1'
-      : 'debot.wallet_token_analysis.raw.v1',
+    schema,
     data: result
   };
 }
@@ -89,15 +112,33 @@ function validateDeBotResult(job, result) {
   if (job.type === DEBOT_TOKEN_DETAIL) {
     const chain = String(result.token?.meta?.chain || result.pair?.chain || '').trim().toLowerCase();
     const token = String(result.token?.meta?.address || result.pair?.tokenAddress || '').trim().toLowerCase();
-    if (chain !== 'robinhood' || token !== job.payload.token) {
+    if (chain !== job.payload.chain || token !== job.payload.token) {
       throw new TypeError('DeBot token-detail result does not match the claimed job');
     }
     return;
   }
   const chain = String(result.chain || '').trim().toLowerCase();
   const token = String(result.token || '').trim().toLowerCase();
+  if (job.type === DEBOT_TOKEN_HOLDERS) {
+    const holders = Array.isArray(result.list) ? result.list : null;
+    const expectedLimit = Number(job.payload.pageSize || 100);
+    if (chain !== job.payload.chain || token !== job.payload.token
+      || !holders || holders.length > expectedLimit || holders.length > 100) {
+      throw new TypeError('DeBot Holder result does not match the claimed job');
+    }
+    const seen = new Set();
+    for (const holder of holders) {
+      const address = String(holder?.address || '').trim().toLowerCase();
+      if (!holder || typeof holder !== 'object' || Array.isArray(holder)
+        || !EVM_ADDRESS_PATTERN.test(address) || address === ZERO_ADDRESS || seen.has(address)) {
+        throw new TypeError('DeBot Holder result contains an invalid wallet row');
+      }
+      seen.add(address);
+    }
+    return;
+  }
   const wallet = String(result.wallet || '').trim().toLowerCase();
-  if (chain !== 'robinhood' || token !== job.payload.token || wallet !== job.payload.wallet) {
+  if (chain !== job.payload.chain || token !== job.payload.token || wallet !== job.payload.wallet) {
     throw new TypeError('DeBot wallet result does not match the claimed job');
   }
 }
@@ -120,8 +161,10 @@ function timingSafeStringEqual(left, right) {
   return crypto.timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-function hasDeBotAnalysisCapability(connection) {
-  return connection.analysisOnline === true;
+function hasDeBotAnalysisCapability(connection, type = '') {
+  return type === DEBOT_TOKEN_HOLDERS
+    ? connection.holderAnalysisOnline === true
+    : connection.analysisOnline === true;
 }
 
 function connectionState(config, bridge, now) {
@@ -135,11 +178,16 @@ function connectionState(config, bridge, now) {
   const reportedError = fresh && (capabilities.includes('error') || !capabilities.includes('posts'));
   const online = paired && fresh && !reportedError;
   const analysisOnline = paired && fresh && capabilities.includes(DEBOT_ANALYSIS_CAPABILITY);
+  const holderAnalysisOnline = paired
+    && fresh
+    && capabilities.includes(DEBOT_ANALYSIS_CAPABILITY)
+    && capabilities.includes(DEBOT_HOLDER_CAPABILITY);
   return {
     state: !paired ? 'unpaired' : reportedError ? 'error' : online ? 'online' : 'offline',
     paired,
     online,
     analysisOnline,
+    holderAnalysisOnline,
     fresh,
     readOnly: !paired,
     lastSeenAt,
@@ -541,7 +589,7 @@ export function createSocialService({
       const cached = activeStore.getCachedDeBotResult(requestKey);
       if (cached) return Promise.resolve(cached.result);
       const connection = service.getConnection();
-      if (!hasDeBotAnalysisCapability(connection)) return Promise.reject(bridgeUnavailable());
+      if (!hasDeBotAnalysisCapability(connection, request.type)) return Promise.reject(bridgeUnavailable());
 
       const waitMs = timeoutMs === undefined
         ? debotConfig.requestTimeoutMs
@@ -549,7 +597,7 @@ export function createSocialService({
       if (!Number.isSafeInteger(waitMs) || waitMs < 1 || waitMs > 2 * 60_000) {
         throw new RangeError('DeBot request timeout is outside the allowed range');
       }
-      const defaultCacheTtl = request.type === DEBOT_TOKEN_DETAIL
+      const defaultCacheTtl = [DEBOT_TOKEN_DETAIL, DEBOT_TOKEN_HOLDERS].includes(request.type)
         ? debotConfig.tokenCacheTtlMs
         : debotConfig.walletCacheTtlMs;
       const ttlMs = cacheTtlMs === undefined ? defaultCacheTtl : Math.floor(Number(cacheTtlMs));
@@ -575,10 +623,15 @@ export function createSocialService({
       return waitForDeBotJob(queued.job, { signal, timeoutMs: waitMs });
     },
     claimDeBotJobs({ limit = 4 } = {}) {
-      if (!hasDeBotAnalysisCapability(service.getConnection())) throw bridgeUnavailable();
+      const connection = service.getConnection();
+      if (!hasDeBotAnalysisCapability(connection)) throw bridgeUnavailable();
+      const allowedTypes = connection.holderAnalysisOnline
+        ? [...DEBOT_TYPES]
+        : [DEBOT_TOKEN_DETAIL, DEBOT_WALLET_TOKEN_ANALYSIS];
       const jobs = activeStore.claimDeBotJobs({
         limit,
         leaseMs: debotConfig.jobLeaseMs,
+        types: allowedTypes,
         createClaimToken: () => crypto.randomBytes(24).toString('base64url')
       });
       return {

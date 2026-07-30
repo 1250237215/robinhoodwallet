@@ -1,0 +1,82 @@
+[Unit]
+Description=BSC Smart Money Radar
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=robinhood-radar
+Group=robinhood-radar
+WorkingDirectory=/opt/robinhood-radar
+Environment=NODE_ENV=production
+Environment=BSC_HOST=127.0.0.1
+Environment=BSC_PORT=18122
+Environment=BSC_DATA_FILE=/var/lib/robinhood-radar/bsc.sqlite
+Environment=BSC_MIN_ENTRY_USD=500
+Environment=BSC_SIGNIFICANT_PROFIT_RATE=0.002
+Environment=BSC_SMART_BASE_MULTIPLE=5
+Environment=BSC_STRICT_MULTIPLE=10
+Environment=BSC_REPEAT_MIN_HITS=2
+Environment=BSC_STRONG_HOLDER_RANK=30
+Environment=BSC_RELATED_CLUSTER_PENALTY=0.9
+Environment=BSC_LOW_FREQUENCY_REASON_THRESHOLD=0.8
+Environment=BSC_HOLDER_CANDIDATE_LIMIT=100
+Environment=BSC_HOLDER_FETCH_LIMIT=150
+Environment=BSC_HOLDER_PROFIT_CONCURRENCY=6
+# Default Holder scans fetch DeBot's position-sorted top 100 through Robinhood's
+# loopback-only internal endpoint. Extension 1.9.0 must report the
+# debot-token-holders-v1 capability. An optional archive RPC in bsc.env switches
+# to strict full-ledger reconstruction instead.
+Environment=BSC_DEBOT_BRIDGE_URL=http://127.0.0.1:18118/internal/debot/request
+Environment=BSC_DEBOT_BRIDGE_TIMEOUT_MS=90000
+# The outer request deadline must remain above the browser-bridge deadline.
+Environment=BSC_DEBOT_REQUEST_TIMEOUT_MS=95000
+# The following reconstruction limits are used only when BSC_HOLDER_RPC_URL is
+# configured in bsc.env.
+Environment=BSC_HOLDER_LOG_WINDOW=2000
+Environment=BSC_HOLDER_LOG_CONCURRENCY=2
+Environment=BSC_HOLDER_LOG_RESULT_GUARD=1000
+Environment=BSC_HOLDER_MAX_TRANSFER_LOGS=100000
+Environment=BSC_HOLDER_MAX_BLOCK_SPAN=5000000
+Environment=BSC_HOLDER_CREATION_SAFETY_SECONDS=86400
+Environment=BSC_HOLDER_RPC_BATCH_SIZE=20
+Environment=BSC_HOLDER_MAX_BALANCE_CHECKS=20000
+Environment=BSC_HOLDER_MAX_CONTRACT_CHECKS=1000
+Environment=BSC_REQUEST_TIMEOUT_MS=20000
+Environment=BSC_SCAN_CONCURRENCY=1
+Environment=BSC_RPC_MAX_RETRIES=6
+Environment=BSC_RPC_RETRY_DELAY_MS=500
+Environment=BSC_RPC_MAX_RETRY_DELAY_MS=15000
+Environment=BSC_RPC_BATCH_SIZE=10
+Environment=BSC_RPC_BATCH_DELAY_MS=1000
+Environment=BSC_MONITOR_POLL_INTERVAL_MS=500
+Environment=BSC_MONITOR_DEGRADED_POLL_INTERVAL_MS=1000
+Environment=BSC_MONITOR_MAX_BLOCK_SPAN=10
+Environment=BSC_MONITOR_WALLET_TOPIC_CHUNK_SIZE=100
+Environment=BSC_MONITOR_LOG_CONCURRENCY=2
+Environment=BSC_MONITOR_RECOVERY_SUCCESSES=20
+Environment=BSC_MONITOR_FAST_LIVE_BLOCK_SPAN=50
+Environment=BSC_MONITOR_FAST_GAP_BLOCK_SPAN=100
+Environment=BSC_MONITOR_FAST_GAP_POLL_INTERVAL_MS=5000
+Environment=BSC_MONITOR_DEEP_POLL_INTERVAL_MS=500
+Environment=BSC_MONITOR_DEEP_DEGRADED_POLL_INTERVAL_MS=1500
+Environment=BSC_MONITOR_DEEP_LIVE_BLOCK_SPAN=20
+Environment=BSC_MONITOR_DEEP_GAP_BLOCK_SPAN=20
+Environment=BSC_MONITOR_DEEP_GAP_POLL_INTERVAL_MS=5000
+Environment=BSC_MONITOR_TOKEN_METADATA_BUDGET_MS=1500
+Environment=BSC_MARKET_DEBOT_BUDGET_MS=1500
+Environment=BSC_MARKET_REQUEST_TIMEOUT_MS=5000
+EnvironmentFile=-/etc/robinhood-radar/bsc.env
+ExecStart=/usr/bin/env node /opt/robinhood-radar/bsc-server.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/robinhood-radar
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

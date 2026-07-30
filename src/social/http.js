@@ -128,7 +128,27 @@ function positiveInteger(value, fallback) {
 }
 
 function loopbackAddress(value) {
-  return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(String(value || '').toLowerCase());
+  const normalized = String(value || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return ['127.0.0.1', 'localhost', '::1', '::ffff:127.0.0.1'].includes(normalized);
+}
+
+function directLoopbackRequest(req) {
+  if (!loopbackAddress(req.socket?.remoteAddress)) return false;
+  for (const name of ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip']) {
+    if (req.headers[name] !== undefined) return false;
+  }
+  try {
+    return loopbackAddress(new URL(`http://${String(req.headers.host || '')}`).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function exactObjectKeys(value, expected) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
 }
 
 function streamClientKey(req) {
@@ -384,8 +404,44 @@ export function createSocialApiHandler({
   const pendingEventLimit = positiveInteger(maxPendingEvents, SOCIAL_SSE_MAX_PENDING_EVENTS);
   const pendingByteLimit = positiveInteger(maxPendingBytes, SOCIAL_SSE_MAX_PENDING_BYTES);
   async function handleSocialApi(req, res, url) {
-    if (url.pathname !== '/api/social' && !url.pathname.startsWith('/api/social/')) return false;
+    const internalDeBotRequest = url.pathname === '/internal/debot/request';
+    if (!internalDeBotRequest && url.pathname !== '/api/social' && !url.pathname.startsWith('/api/social/')) {
+      return false;
+    }
     try {
+      if (internalDeBotRequest) {
+        method(req, ['POST']);
+        if (!directLoopbackRequest(req)) {
+          throw new SocialHttpError(404, 'Route not found', 'NOT_FOUND');
+        }
+        const body = await readJson(req, 64 * 1024);
+        if (!exactObjectKeys(body, ['payload', 'type'])) {
+          throw new SocialHttpError(400, 'Invalid internal DeBot request', 'INVALID_DEBOT_REQUEST');
+        }
+        const controller = new AbortController();
+        const abort = () => {
+          if (!controller.signal.aborted) controller.abort();
+        };
+        const abortOnClose = () => {
+          if (!res.writableEnded) abort();
+        };
+        req.once('aborted', abort);
+        res.once('close', abortOnClose);
+        try {
+          const result = await service.requestDeBot(body.type, body.payload, {
+            signal: controller.signal
+          });
+          if (!controller.signal.aborted) sendJson(res, 200, { ok: true, result });
+        } catch (error) {
+          if (controller.signal.aborted) return true;
+          throw error;
+        } finally {
+          req.off('aborted', abort);
+          res.off('close', abortOnClose);
+        }
+        return true;
+      }
+
       if (url.pathname === '/api/social' || url.pathname === '/api/social/snapshot') {
         method(req, ['GET']);
         const postLimit = integerParam(url.searchParams, 'postLimit', 50, 1, 100);

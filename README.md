@@ -1,7 +1,8 @@
 # 1874catch - Multi-chain Wallet Radar
 
 This project is a smart-money research and real-time wallet monitor for
-Robinhood Chain, Base, and Solana. A segmented control switches the active chain,
+Robinhood Chain, Base, BSC, and Solana. A segmented control switches the active
+chain,
 while every chain keeps its own SQLite database, address library, token queue,
 scan jobs, monitor events, alert threshold, deduplication state, and Bark targets.
 No wallet, token, event, setting, or notification destination is copied between
@@ -11,10 +12,10 @@ chains.
 
 1874catch 是一个可自行部署的多链聪明钱研究与实时钱包监控系统，支持：
 
-- Robinhood Chain、Base、Solana 三链独立数据库和独立监控配置
+- Robinhood Chain、Base、BSC、Solana 四链独立数据库和独立监控配置
 - 钱包买入、卖出、转账、直接创建代币及平台发币事件
 - 每个钱包分别设置监控事件、网页声音和 Bark 推送
-- Robinhood Holder 分析、人工金狗、钱包命中次数与买币频率排序
+- 四链 Holder 分析、人工金狗、钱包命中次数与买币频率排序
 - 实时市值、币龄，以及 Robinhood 专属的流动性、持仓和合约风险补全
 - 通过本地 Chrome 扩展同步已登录 DeBot 的个人社媒监控名单
 
@@ -29,7 +30,7 @@ npm start
 ```
 
 默认地址是 `http://127.0.0.1:18118/`。`npm start`适合本地开发，完整的
-Robinhood、Base、Solana、Caddy、systemd 和 DeBot Bridge 生产部署请阅读
+Robinhood、Base、BSC、Solana、Caddy、systemd 和 DeBot Bridge 生产部署请阅读
 [中文部署手册](docs/deployment.zh-CN.md)。
 
 ### 文档入口
@@ -53,7 +54,7 @@ SQLite 数据库不会提交到 Git。`dist/`也不会提交，生产 bundle 由
 
 - Node.js 22.13.0 or newer
 - npm
-- Robinhood and Base JSON-RPC endpoints (public RPCs are used by default)
+- Robinhood, Base, and BSC JSON-RPC endpoints (public RPCs are used by default)
 - A Solana JSON-RPC endpoint for manual Holder scans
 - A Helius Enhanced Webhook for production Solana real-time monitoring
 
@@ -73,17 +74,20 @@ npm start
 The older combined DeBot signal development entry point remains available as
 `npm run start:legacy`; it is not used by the production systemd services.
 
-Build all three standalone services:
+Build all four standalone services:
 
 ```bash
 npm run build:all
 HOST=127.0.0.1 PORT=18118 node dist/robinhood-server.mjs
 BASE_HOST=127.0.0.1 BASE_PORT=18119 node dist/base-server.mjs
+BSC_HOST=127.0.0.1 BSC_PORT=18122 node dist/bsc-server.mjs
 SOLANA_HOST=127.0.0.1 SOLANA_PORT=18120 node dist/solana-server.mjs
 ```
 
-The Robinhood process serves the UI. A reverse proxy routes `/api/robinhood`,
-`/api/base`, and `/api/solana` to ports `18118`, `18119`, and `18120`.
+The Robinhood process serves the UI and the single shared social API. A reverse
+proxy routes `/api/robinhood`, `/api/base`, `/api/bsc`, and `/api/solana` to
+ports `18118`, `18119`, `18122`, and `18120` respectively. Switching chains
+never changes or duplicates `/api/social`.
 
 ## Main configuration
 
@@ -127,6 +131,64 @@ Base uses the same bounded tuning names with a `BASE_` prefix. Its database is
 configured with `BASE_DATA_FILE`, and its real-time market enrichment falls back
 to DexScreener when DeBot is blocked or incomplete.
 
+BSC uses the same bounded EVM tuning names with a `BSC_` prefix. Its database is
+configured with `BSC_DATA_FILE`, its API is served independently on port `18122`,
+and its latency-sensitive monitor RPC can be overridden with `BSC_RPC_URL`.
+The no-key default is Blast's BSC endpoint, so BSC log windows default to ten
+blocks. Production deployments should provide a dedicated full endpoint.
+
+By default, BSC manual-CA and smart-wallet analysis asks the signed-in local
+DeBot extension for the largest 100 current Holders, ordered by token position.
+The BSC process reaches that browser through Robinhood's loopback-only internal
+endpoint at `BSC_DEBOT_BRIDGE_URL`; the endpoint must never be exposed by the
+public reverse proxy. The result is deliberately marked partial when DeBot has
+more than 100 Holders, and the server independently rejects invalid addresses,
+known service addresses, and contracts before wallet scoring.
+
+`BSC_HOLDER_RPC_URL` is optional. Setting it switches Holder discovery to the
+strict mode, which reconstructs the complete current Holder ledger from ERC-20
+`Transfer` history and verifies it against `totalSupply` and on-chain balances.
+This separate endpoint must be a BSC archive RPC that supports historical
+`eth_getCode` and complete large-range `eth_getLogs` queries. The live and
+strict-Holder URLs must be different in production; the shared-endpoint override
+is only for isolated development. The live endpoint always has to report
+`eth_chainId` `0x38` and return a recent confirmed transaction plus receipt in
+one JSON-RPC batch before the BSC database is opened. A configured strict Holder
+endpoint is also chain-checked at startup.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `BSC_DEBOT_BRIDGE_URL` | `http://127.0.0.1:18118/internal/debot/request` | Loopback bridge for the default top-100 Holder request |
+| `BSC_DEBOT_BRIDGE_TIMEOUT_MS` | `90000` | Maximum time the server waits for the signed-in browser |
+| `BSC_DEBOT_REQUEST_TIMEOUT_MS` | `95000` | Outer request deadline; it must remain above the bridge timeout |
+| `BSC_HOLDER_RPC_URL` | Empty | Optional archive RPC that enables strict full-ledger Holder reconstruction |
+
+The default BSC Holder path requires DeBot Bridge extension version `1.9.0` and
+the `debot-token-holders-v1` capability. After updating the repository, open
+`chrome://extensions`, click **Reload** on **Radar DeBot Social Bridge**, keep a
+signed-in DeBot tab open, and reload Radar. Verify the active bridge on the VPS:
+
+```bash
+curl --fail --silent http://127.0.0.1:18118/api/social/status | node -e "
+const status = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const bridge = status.bridge || {};
+const ready = bridge.version === '1.9.0' &&
+  bridge.holderAnalysisOnline === true &&
+  Array.isArray(bridge.capabilities) &&
+  bridge.capabilities.includes('debot-token-holders-v1');
+if (!ready) {
+  console.error(JSON.stringify(bridge, null, 2));
+  process.exit(1);
+}
+console.log('DeBot Holder bridge 1.9.0 ready');
+"
+```
+
+An older or offline extension cannot claim BSC Holder jobs, so BSC manual CA
+analysis fails explicitly while the BSC real-time monitor continues running.
+Start from `deploy/bsc.env.example`; never place provider credentials in the
+committed template.
+
 Solana settings use the `SOLANA_` prefix. The important production settings are:
 
 | Variable | Purpose |
@@ -160,7 +222,9 @@ Bark delivery. Existing wallets migrate with buy detection enabled and every new
 alert channel disabled.
 
 Buys and sells are classified from ERC-20 `Transfer` logs only after validating
-the originating wallet, successful receipt, and a V2 or V3 swap event. Outbound
+the originating wallet, successful receipt, and a recognized trade event. The
+default EVM events are V2 and V3 swaps; BSC additionally recognizes Four.meme
+TokenManager bonding-curve buy and sell events before PancakeSwap migration. Outbound
 ERC-20 transfers without a swap are classified as transfers; full blocks cover
 plain native-coin transfers and direct ERC-20 deployments. Noxa launches are
 attributed from the official factory's indexed `TokenLaunched.deployer` event.
@@ -168,8 +232,10 @@ Events are deduplicated by transaction hash and log index. The existing same-CA
 cluster alert counts only distinct-wallet buy events within the configured
 window.
 
-Base reuses the verified EVM receipt and swap-log model with Base-specific RPC,
-quote tokens, explorer links, and no Noxa listener. Solana consumes Helius
+Base and BSC reuse the verified EVM receipt and swap-log model with chain-specific
+RPCs, quote tokens, explorer links, and no Noxa listener. BSC recognizes WBNB,
+USDT, USDC, BUSD, FDUSD, DAI, TUSD, and USDD as quote assets and attributes Four.meme creation
+events to the creator encoded by its active TokenManager. Solana consumes Helius
 Enhanced Transactions, derives buy and sell events from signed wallet token
 balance changes, handles SPL/native transfers, and recognizes SPL
 `InitializeMint`/`InitializeMint2` creation. Solana signatures are preserved as
@@ -183,18 +249,19 @@ marked partial.
 ## Deployment
 
 - `npm run release:prepare` builds a reproducible `dist/release` staging
-  directory with all three bundles, static assets, systemd units, environment
+  directory with all four bundles, static assets, systemd units, environment
   templates, `REVISION`, and `SHA256SUMS`. A dirty worktree is rejected by
   default.
 - `deploy/bootstrap-host.sh` idempotently creates the unprivileged service
   account, production directories, and missing environment files on a fresh
   host. It never overwrites populated configuration.
-- `deploy/robinhood-radar.service`, `deploy/base-radar.service`, and
-  `deploy/solana-radar.service` are the isolated systemd units. Start from the
-  four committed `deploy/*.env.example` templates and keep populated files in
+- `deploy/robinhood-radar.service`, `deploy/base-radar.service`,
+  `deploy/bsc-radar.service`, and `deploy/solana-radar.service` are the isolated
+  systemd units. Start from the five committed `deploy/*.env.example` templates
+  and keep populated files in
   `/etc/robinhood-radar/` with mode `0600`.
 - `deploy/install-remote.sh` installs a prepared release with backup and rollback
-  checks for all three binaries, their databases, the independent social
+  checks for all four binaries, their databases, the independent social
   database, and all service units. It verifies the complete checksum manifest
   before stopping a service.
 - `deploy/dqdai-prediction-backup-retention.sh` is installed separately with its
@@ -227,7 +294,7 @@ Robinhood real-time ERC-20 events are enriched asynchronously with sellability,
 liquidity, top-10 holder concentration, creator holdings, mintability, and
 creator launch history. These fields are cached per token and patched into the
 live feed after the event is emitted, so upstream risk services do not delay
-buy, sell, transfer, or launch detection. Base and Solana do not request or
+buy, sell, transfer, or launch detection. Base, BSC, and Solana do not request or
 render this Robinhood-only enrichment. Creator "dead" history means a token is
 at least 24 hours old and either has no DexScreener pair or has less than
 `$1,000` of primary-pool liquidity; partial history is displayed as a lower

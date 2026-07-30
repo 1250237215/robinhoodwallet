@@ -75,7 +75,11 @@ function normalizedAnalysisJob(value) {
   const claimToken = String(job.claimToken || '').slice(0, 240);
   const type = String(job.type || '');
   if (!Number.isSafeInteger(id) || id <= 0 || !claimToken) return null;
-  if (!['debot.token_detail.v1', 'debot.wallet_token_analysis.v1'].includes(type)) return null;
+  if (![
+    'debot.token_detail.v1',
+    'debot.wallet_token_analysis.v1',
+    'debot.token_holders.v1'
+  ].includes(type)) return null;
   const now = Date.now();
   const advertisedExpiry = [Number(job.deadlineAt), Number(job.leaseExpiresAt)]
     .filter((value) => Number.isFinite(value) && value > 0);

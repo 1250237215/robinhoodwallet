@@ -104,7 +104,7 @@ svg {
 
 .chain-switcher {
   display: inline-grid;
-  grid-template-columns: repeat(3, minmax(82px, auto));
+  grid-template-columns: repeat(4, minmax(72px, auto));
   align-items: center;
   padding: 3px;
   border: 1px solid var(--line-strong);
@@ -153,6 +153,10 @@ svg {
 
 .chain-switch-dot.base {
   background: #175cd3;
+}
+
+.chain-switch-dot.bsc {
+  background: #d99f00;
 }
 
 .chain-switch-dot.solana {
@@ -5024,11 +5028,14 @@ select:hover {
 
   .chain-switcher {
     width: 100%;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .chain-switcher button {
-    padding: 0 6px;
+    gap: 4px;
+    padding: 0 4px;
+    font-size: 10px;
+    letter-spacing: 0;
   }
 
   .brand-logo {

@@ -4,7 +4,7 @@ const DEBOT_BASE_URL = 'https://debot.ai/api';
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 const SOLANA_ADDRESS_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
-export const DEBOT_CHAINS = Object.freeze(['robinhood', 'base', 'solana']);
+export const DEBOT_CHAINS = Object.freeze(['robinhood', 'base', 'bsc', 'solana']);
 const DEBOT_CHAIN_SET = new Set(DEBOT_CHAINS);
 
 function normalizeChain(value, fallback = 'robinhood') {
@@ -42,6 +42,7 @@ function normalizationOptions(rawChain, options = {}) {
 
 function chainLabel(chain) {
   if (chain === 'base') return 'Base';
+  if (chain === 'bsc') return 'BSC';
   if (chain === 'solana') return 'Solana';
   return 'Robinhood';
 }
@@ -234,9 +235,13 @@ export function normalizeWalletTokenProfit(raw = {}, requestedWallet = '', optio
     0,
     asNumber(raw.position ?? raw.hold_amount ?? raw.actual_buy_amount) ?? 0
   );
-  const currentPriceUsd = asNumber(raw.price);
   const explicitHoldingValueUsd = asNumber(
     raw.balance ?? raw.holding_value_usd ?? raw.position_value_usd ?? raw.balance_usd
+  );
+  const currentPriceUsd = asNumber(raw.price) ?? (
+    explicitHoldingValueUsd !== null && holdingTokenAmount > 0
+      ? explicitHoldingValueUsd / holdingTokenAmount
+      : null
   );
   const computedHoldingValueUsd = currentPriceUsd !== null
     ? holdingTokenAmount * currentPriceUsd
@@ -245,9 +250,14 @@ export function normalizeWalletTokenProfit(raw = {}, requestedWallet = '', optio
     0,
     explicitHoldingValueUsd ?? computedHoldingValueUsd ?? 0
   );
-  const averageBuyPriceUsd = asNumber(raw.avg_buy_price);
   const rawRemainingCostUsd = asNumber(raw.actual_buy_cost);
   const remainingCostUsd = Math.max(0, rawRemainingCostUsd ?? 0);
+  const actualBuyAmount = Math.abs(asNumber(raw.actual_buy_amount) ?? 0);
+  const averageBuyPriceUsd = asNumber(raw.avg_buy_price) ?? (
+    rawRemainingCostUsd !== null && actualBuyAmount > 0
+      ? rawRemainingCostUsd / actualBuyAmount
+      : null
+  );
   const estimatedSoldCostUsd = averageBuyPriceUsd > 0 && sellAmount > 0
     ? averageBuyPriceUsd * sellAmount
     : null;
@@ -274,7 +284,7 @@ export function normalizeWalletTokenProfit(raw = {}, requestedWallet = '', optio
   const unrealizedProfitUsd = explicitUnrealizedProfitUsd ?? (
     currentPriceUsd === null ? null : holdingValueUsd - remainingCostUsd
   );
-  const totalProfitUsd = asNumber(raw.profit) ?? (
+  const totalProfitUsd = asNumber(raw.total_profit ?? raw.profit) ?? (
     buyVolumeUsd > 0 ? sellVolumeUsd + holdingValueUsd - buyVolumeUsd : null
   );
   const costBasis = assessWalletTokenCostBasis({ buyAmount, sellAmount, holdingTokenAmount });
@@ -468,6 +478,17 @@ export class RobinhoodDebotClient {
       { timeoutMs: this.timeoutMs, signal, fetchImpl: this.fetchImpl }
     );
     return normalizeTokenDetail(raw, this.normalizationOptions());
+  }
+
+  async fetchTokenHolderProfile(tokenAddress, { limit = 100, signal } = {}) {
+    const address = this.requireAddress(tokenAddress, 'token');
+    const pageSize = Math.max(1, Math.min(100, Math.floor(Number(limit) || 100)));
+    return requestObject(
+      `${this.baseUrl}/token/profiler/tokenHolderList?chain=${encodeURIComponent(this.chain)}` +
+        `&token=${encodeURIComponent(address)}&page_size=${pageSize}` +
+        '&sort_field=position&sort_order=desc',
+      { timeoutMs: this.timeoutMs, signal, fetchImpl: this.fetchImpl }
+    );
   }
 
   async fetchTokenPeakMarketCap(tokenAddress, detail, { signal } = {}) {

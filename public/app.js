@@ -37,6 +37,24 @@ const CHAIN_CONFIGS = Object.freeze({
     tokenPlaceholder: '0x...',
     walletPlaceholder: '0x...\n0x...,备注'
   }),
+  bsc: Object.freeze({
+    id: 'bsc',
+    label: 'BSC',
+    family: 'evm',
+    nativeSymbol: 'BNB',
+    apiPath: 'bsc',
+    explorerRoot: 'https://bscscan.com',
+    explorerAddressPath: 'address',
+    explorerTokenPath: 'token',
+    explorerTxPath: 'tx',
+    debotAddressRoot: 'https://debot.ai/address/bsc',
+    debotTokenRoot: 'https://debot.ai/token/bsc/289942_',
+    debotWalletManagerUrl: 'https://debot.ai/track?chain=bsc&tab=manager',
+    addressPattern: /^0x[0-9a-fA-F]{40}$/,
+    hashPattern: /^0x[0-9a-fA-F]{64}$/,
+    tokenPlaceholder: '0x...',
+    walletPlaceholder: '0x...\n0x...,备注'
+  }),
   solana: Object.freeze({
     id: 'solana',
     label: 'Solana',
@@ -390,6 +408,7 @@ const state = {
   monitorStarted: false,
   monitorTransport: 'idle',
   monitorConnected: false,
+  monitorSettingsLoaded: false,
   monitorEnabled: true,
   monitorThreshold: 3,
   monitorWindowSeconds: 60,
@@ -1115,7 +1134,9 @@ function currentMonitorClusters() {
 }
 
 function formatMonitorAmount(event) {
-  if (event.eventType === 'token_create') return event.platform === 'noxa' ? 'Noxa 发币' : '直接部署';
+  if (event.eventType === 'token_create') {
+    return { noxa: 'Noxa 发币', four_meme: 'Four.meme 发币', direct: '直接部署' }[event.platform] || '发币平台';
+  }
   if (event.amountUsd !== null) return formatMoney(event.amountUsd);
   const amount = finiteNumber(event.amount);
   if (amount !== null) {
@@ -1283,6 +1304,7 @@ function renderMonitorTokenRisk(event) {
 
 function monitorPlatformLabel(value) {
   if (value === 'noxa') return 'Noxa';
+  if (value === 'four_meme') return 'Four.meme';
   if (value === 'direct') return '直接部署';
   return String(value || '');
 }
@@ -2808,6 +2830,13 @@ function renderMonitorPage() {
   refreshIcons(elements.monitorPage);
 }
 
+function setMonitorMutationControlsDisabled(disabled) {
+  elements.monitorSaveButton.disabled = disabled;
+  elements.monitorSoundSaveButton.disabled = disabled;
+  elements.monitorBarkSettingsSaveButton.disabled = disabled;
+  elements.monitorBarkAddButton.disabled = disabled;
+}
+
 function applyMonitorPayload(payload, { initial = false } = {}) {
   const record = unwrapRecord(payload || {});
   if (record.chain && String(record.chain) !== activeChainId) return;
@@ -2852,6 +2881,8 @@ function applyMonitorPayload(payload, { initial = false } = {}) {
     const normalized = normalizeAddress(tokenAddress);
     if (normalized) state.monitorAlertedTokens.add(normalized);
   }
+  state.monitorSettingsLoaded = true;
+  setMonitorMutationControlsDisabled(false);
   renderMonitorPage();
 }
 
@@ -2956,6 +2987,7 @@ function muteMonitorSound() {
 
 async function saveMonitorSoundSettings(event) {
   event.preventDefault();
+  if (!state.monitorSettingsLoaded) return;
   const context = captureChainRequestContext();
   const sound = normalizeMonitorSound(elements.monitorSoundSelect.value);
   const volume = clampMonitorVolume(elements.monitorVolume.value, state.monitorVolume);
@@ -2981,6 +3013,7 @@ async function saveMonitorSoundSettings(event) {
 
 async function saveBarkSoundSettings(event) {
   event.preventDefault();
+  if (!state.monitorSettingsLoaded) return;
   const context = captureChainRequestContext();
   const barkSound = elements.monitorBarkSoundSelect.value;
   const barkVolume = clampBarkVolume(elements.monitorBarkVolume.value, state.monitorBarkVolume);
@@ -3006,6 +3039,7 @@ async function saveBarkSoundSettings(event) {
 
 async function createBarkTarget(event) {
   event.preventDefault();
+  if (!state.monitorSettingsLoaded) return;
   const context = captureChainRequestContext();
   const endpoint = elements.monitorBarkEndpoint.value.trim();
   const label = elements.monitorBarkLabel.value.trim();
@@ -3615,7 +3649,7 @@ async function deleteSelectedSocialWatchAccounts() {
   }
 }
 
-function stopMonitorTransport() {
+function stopMonitorTransport({ stopSocial = true } = {}) {
   state.monitorSequence += 1;
   clearTimeout(state.monitorPollTimer);
   state.monitorPollTimer = null;
@@ -3629,7 +3663,7 @@ function stopMonitorTransport() {
   state.monitorStarted = false;
   state.monitorTransport = 'idle';
   state.monitorConnected = false;
-  stopSocialMonitor();
+  if (stopSocial) stopSocialMonitor();
 }
 
 function scheduleMonitorPoll(delay = MONITOR_POLL_INTERVAL_MS) {
@@ -3738,20 +3772,21 @@ function connectMonitorStream(context = captureChainRequestContext()) {
   });
 }
 
-async function startMonitorPage({ manual = false } = {}) {
-  stopMonitorTransport();
+async function startMonitorPage({ manual = false, preserveSocial = false } = {}) {
+  stopMonitorTransport({ stopSocial: !preserveSocial });
   const context = captureChainRequestContext();
   const sequence = state.monitorSequence;
   state.monitorStarted = true;
   state.monitorThreshold = readStoredMonitorThreshold();
   state.monitorTransport = 'loading';
   state.monitorHealth = manual ? {} : state.monitorHealth;
+  setMonitorMutationControlsDisabled(!state.monitorSettingsLoaded);
   renderMonitorPage();
   state.monitorTickTimer = setInterval(() => {
     synchronizeMonitorAlerts();
     updateLiveRelativeTimes();
   }, 1_000);
-  void startSocialMonitor({ manual });
+  if (!preserveSocial || !state.socialStarted) void startSocialMonitor({ manual });
   elements.monitorRefreshButton.disabled = true;
   try {
     const payload = await fetchChainJson(context, '/monitor?limit=200');
@@ -3777,6 +3812,7 @@ async function startMonitorPage({ manual = false } = {}) {
 
 async function saveMonitorSettings(event) {
   event.preventDefault();
+  if (!state.monitorSettingsLoaded) return;
   const context = captureChainRequestContext();
   const threshold = clampMonitorThreshold(elements.monitorThreshold.value, state.monitorThreshold);
   const windowSeconds = clampMonitorWindowSeconds(elements.monitorWindowSeconds.value, state.monitorWindowSeconds);
@@ -6583,7 +6619,7 @@ function syncChainUi() {
 }
 
 function resetChainState() {
-  stopMonitorTransport();
+  stopMonitorTransport({ stopSocial: false });
   clearManualWinnerTracking();
   clearTimeout(state.pollTimer);
   clearTimeout(state.librarySearchTimer);
@@ -6600,6 +6636,12 @@ function resetChainState() {
   state.detailCache.clear();
   state.monitorThreshold = readStoredMonitorThreshold();
   state.monitorWindowSeconds = 60;
+  state.monitorSettingsLoaded = false;
+  state.monitorEnabled = true;
+  state.monitorSound = 'alarm';
+  state.monitorVolume = 70;
+  state.monitorBarkSound = 'alarm';
+  state.monitorBarkVolume = 5;
   state.monitorHealth = {};
   state.monitorEvents = [];
   state.monitorServerClusters = [];
@@ -6625,10 +6667,7 @@ function resetChainState() {
   elements.walletEditorForm.querySelector('button[type="submit"]').disabled = false;
   elements.walletEditorExclude.disabled = false;
   elements.monitorRefreshButton.disabled = false;
-  elements.monitorSaveButton.disabled = false;
-  elements.monitorSoundSaveButton.disabled = false;
-  elements.monitorBarkSettingsSaveButton.disabled = false;
-  elements.monitorBarkAddButton.disabled = false;
+  setMonitorMutationControlsDisabled(true);
   elements.manualInput.value = '';
   elements.manualFeedback.textContent = '';
   elements.manualFeedback.className = 'field-feedback';
@@ -6675,7 +6714,7 @@ function switchChain(nextChainId) {
   syncChainUi();
   syncToolbarVisibility();
   showToast(`已切换到 ${activeChain().label}，数据与提醒独立加载`);
-  if (state.activeTab === 'monitor') void startMonitorPage();
+  if (state.activeTab === 'monitor') void startMonitorPage({ preserveSocial: true });
   else void loadData();
 }
 

@@ -110,7 +110,11 @@ function walletEventMessage(event) {
   const wallet = String(event?.walletAlias || '').trim() || shortAddress(event?.walletAddress);
   const symbol = String(event?.tokenSymbol || (event?.assetType === 'native' ? 'ETH' : 'TOKEN'));
   if (eventType === 'token_create') {
-    const platform = event?.platform === 'noxa' ? 'Noxa' : '直接部署';
+    const platform = {
+      noxa: 'Noxa',
+      four_meme: 'Four.meme',
+      direct: '直接部署'
+    }[event?.platform] || '发币平台';
     return {
       title: `${wallet} 发币`,
       body: `${wallet} 通过${platform}创建 ${symbol}（${shortAddress(event?.tokenAddress)}）`

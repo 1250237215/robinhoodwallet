@@ -6,7 +6,7 @@
 }
 
 {$RADAR_SITE_ADDRESS:http://localhost} {
-	@compressible not path /robinhood-radar/api/social/stream /robinhood-radar/api/robinhood/monitor/stream /robinhood-radar/api/base/monitor/stream /robinhood-radar/api/solana/monitor/stream
+	@compressible not path /robinhood-radar/api/social/stream /robinhood-radar/api/robinhood/monitor/stream /robinhood-radar/api/base/monitor/stream /robinhood-radar/api/bsc/monitor/stream /robinhood-radar/api/solana/monitor/stream
 	encode @compressible zstd gzip
 	header Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
 	header {
@@ -53,6 +53,15 @@
 		}
 	}
 
+	handle /robinhood-radar/api/bsc/monitor/stream {
+		uri strip_prefix /robinhood-radar
+		reverse_proxy 127.0.0.1:18122 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up Host {host}
+			flush_interval -1
+		}
+	}
+
 	handle /robinhood-radar/api/solana/monitor/stream {
 		uri strip_prefix /robinhood-radar
 		reverse_proxy 127.0.0.1:18120 {
@@ -78,12 +87,24 @@
 		}
 	}
 
+	handle /robinhood-radar/api/bsc/* {
+		uri strip_prefix /robinhood-radar
+		reverse_proxy 127.0.0.1:18122 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up Host {host}
+		}
+	}
+
 	handle /robinhood-radar/api/solana/* {
 		uri strip_prefix /robinhood-radar
 		reverse_proxy 127.0.0.1:18120 {
 			header_up X-Forwarded-Proto {scheme}
 			header_up Host {host}
 		}
+	}
+
+	handle /robinhood-radar/internal/* {
+		respond "Not found" 404
 	}
 
 	handle_path /robinhood-radar/* {
