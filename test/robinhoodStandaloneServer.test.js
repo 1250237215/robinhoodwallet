@@ -201,6 +201,7 @@ test('standalone wallet routes merge filters and expose validated PATCH and DELE
   let receivedPatch;
   let receivedBatchLines;
   let deletes = 0;
+  let candidateDeletes = 0;
   const service = {
     getDashboard(filters) {
       receivedFilters = filters;
@@ -237,6 +238,10 @@ test('standalone wallet routes merge filters and expose validated PATCH and DELE
     deleteWallet(address) {
       deletes += 1;
       return { ok: true, deleted: true, excluded: true, alreadyExcluded: deletes > 1, wallet: { address } };
+    },
+    excludeWalletCandidate(address) {
+      candidateDeletes += 1;
+      return { ok: true, excluded: true, candidateOnly: true, alreadyExcluded: candidateDeletes > 1, address };
     }
   };
 
@@ -330,6 +335,13 @@ test('standalone wallet routes merge filters and expose validated PATCH and DELE
     assert.equal(firstDelete.status, 200);
     assert.equal((await firstDelete.json()).alreadyExcluded, false);
     assert.equal((await secondDelete.json()).alreadyExcluded, true);
+
+    const candidateDelete = await fetch(
+      `${baseUrl}/api/robinhood/wallet-candidates/${wallet}`,
+      { method: 'DELETE' }
+    );
+    assert.equal(candidateDelete.status, 200);
+    assert.equal((await candidateDelete.json()).candidateOnly, true);
   });
 });
 

@@ -374,6 +374,8 @@ test('candidate and confirmed wallet lists support checkbox batch deletion', () 
   assert.match(appJs, /确认批量删除选中的 \$\{selected\.length\} 个候选/);
   assert.match(appJs, /确认从已确认地址库删除并禁用选中的 \$\{selected\.length\} 个地址/);
   assert.match(appJs, /Promise\.allSettled\(selected\.map\(\(wallet\) => \{/);
+  assert.match(appJs, /const resource = candidateMode \? '\/wallet-candidates' : '\/wallets'/);
+  assert.match(appJs, /fetchChainJson\(context, `\/wallet-candidates\/\$\{encodeURIComponent\(normalized\)\}`/);
   assert.match(appJs, /elements\.deleteSelectedButton\.addEventListener\('click', \(\) => void deleteSelectedWallets\(\)\)/);
   assert.match(stylesCss, /\.batch-delete-button \{/);
   assert.match(stylesCss, /\.wallet-selection-table \.candidate-select-cell/);

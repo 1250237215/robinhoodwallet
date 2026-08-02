@@ -172,6 +172,17 @@ function walletAnnotationDefaults(address) {
   };
 }
 
+function candidateExclusionAnnotation(exclusion) {
+  if (!exclusion?.address) return null;
+  return {
+    ...walletAnnotationDefaults(exclusion.address),
+    status: 'excluded',
+    candidateOnly: true,
+    createdAt: exclusion.createdAt ?? null,
+    updatedAt: exclusion.updatedAt ?? null
+  };
+}
+
 function publicBuyFrequency(stats) {
   if (!stats || typeof stats !== 'object') return null;
   return {
@@ -961,7 +972,8 @@ export class RobinhoodService {
     const summary = this.store
       .listWalletSummaries()
       .find((candidate) => this.normalizeAddress(candidate.address) === normalized);
-    const annotation = this.store.getWalletAnnotation?.(normalized) || null;
+    const annotation = this.store.getWalletAnnotation?.(normalized) ||
+      candidateExclusionAnnotation(this.store.getWalletCandidateExclusion?.(normalized));
     const buyFrequency = annotation
       ? (this.store.listWalletBuyFrequencyStats?.({ asOf: unixSeconds(this.now), address: normalized }) || [])[0] || null
       : null;
@@ -1018,17 +1030,23 @@ export class RobinhoodService {
     const annotations = new Map(
       (this.store.listWalletAnnotations?.() || []).map((annotation) => [this.normalizeAddress(annotation.address), annotation])
     );
+    const candidateExclusions = new Map(
+      (this.store.listWalletCandidateExclusions?.() || []).map((exclusion) => [
+        this.normalizeAddress(exclusion.address),
+        exclusion
+      ])
+    );
     const buyFrequencies = new Map(
       (this.store.listWalletBuyFrequencyStats?.({ asOf: unixSeconds(this.now) }) || [])
         .map((stats) => [this.normalizeAddress(stats.address), stats])
     );
-    const addresses = new Set([...summaries.keys(), ...annotations.keys()]);
+    const addresses = new Set([...summaries.keys(), ...annotations.keys(), ...candidateExclusions.keys()]);
     const wallets = [];
     for (const address of addresses) {
       const summary = summaries.get(address) || null;
       const wallet = mergeWalletAnnotation(
         summary,
-        annotations.get(address) || null,
+        annotations.get(address) || candidateExclusionAnnotation(candidateExclusions.get(address)),
         address,
         buyFrequencies.get(address) || null,
         {
@@ -1102,6 +1120,7 @@ export class RobinhoodService {
       createdAt: existing.createdAt || now,
       updatedAt: now
     });
+    this.store.clearWalletCandidateExclusion?.(normalized);
     return this.getWallet(normalized) || {
       ok: true,
       wallet: mergeWalletAnnotation(null, this.store.getWalletAnnotation(normalized), normalized),
@@ -1252,6 +1271,14 @@ export class RobinhoodService {
     const normalized = this.normalizeAddress(address);
     if (!this.isValidAddress(normalized)) throw new TypeError(`Invalid ${this.chainLabel} wallet address`);
     const previous = this.store.getWalletAnnotation?.(normalized) || null;
+    if (!previous) {
+      const candidate = this.excludeWalletCandidate(normalized);
+      return {
+        ...candidate,
+        deleted: candidate.excluded === true,
+        reason: candidate.reason || 'wallet_candidate_excluded'
+      };
+    }
     const result = this.updateWallet(normalized, { status: 'excluded' });
     return {
       ok: true,
@@ -1259,6 +1286,30 @@ export class RobinhoodService {
       excluded: true,
       alreadyExcluded: previous?.status === 'excluded',
       wallet: result.wallet
+    };
+  }
+
+  excludeWalletCandidate(address) {
+    const normalized = this.normalizeAddress(address);
+    if (!this.isValidAddress(normalized)) throw new TypeError(`Invalid ${this.chainLabel} wallet address`);
+    const confirmed = this.store.getWalletAnnotation?.(normalized) || null;
+    if (confirmed) {
+      return {
+        ok: false,
+        excluded: false,
+        alreadyConfirmed: true,
+        reason: 'wallet_already_confirmed'
+      };
+    }
+    const previous = this.store.getWalletCandidateExclusion?.(normalized) || null;
+    const exclusion = this.store.excludeWalletCandidate(normalized, unixSeconds(this.now));
+    return {
+      ok: true,
+      excluded: true,
+      candidateOnly: true,
+      alreadyExcluded: Boolean(previous),
+      address: normalized,
+      exclusion
     };
   }
 

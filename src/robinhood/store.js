@@ -158,12 +158,194 @@ function migrateLegacyProfitRankAliases(db, migrationKey) {
   }
 }
 
+const WALLET_LIBRARY_SCHEMA = 'wallet_library';
+const WALLET_LIBRARY_TABLE = `${WALLET_LIBRARY_SCHEMA}.wallet_annotations`;
+const WALLET_LIBRARY_METADATA_TABLE = `${WALLET_LIBRARY_SCHEMA}.metadata`;
+const WALLET_LIBRARY_ORIGIN_TABLE = `${WALLET_LIBRARY_SCHEMA}.wallet_annotation_import_origins`;
+
+function configureFileDatabase(db, schema = 'main') {
+  db.exec(`PRAGMA ${schema}.journal_mode = WAL`);
+  db.exec(`PRAGMA ${schema}.synchronous = NORMAL`);
+}
+
+function ensureSharedWalletLibrary(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ${WALLET_LIBRARY_METADATA_TABLE} (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS ${WALLET_LIBRARY_TABLE} (
+      address TEXT PRIMARY KEY,
+      alias TEXT NOT NULL DEFAULT '',
+      alias_source TEXT NOT NULL DEFAULT 'unknown',
+      note TEXT NOT NULL DEFAULT '',
+      tags TEXT NOT NULL DEFAULT '[]',
+      status TEXT NOT NULL DEFAULT 'active',
+      classification_override TEXT,
+      monitor_tier TEXT NOT NULL DEFAULT 'watch' CHECK (monitor_tier IN ('core', 'watch', 'high_frequency')),
+      monitor_rules TEXT NOT NULL DEFAULT '${DEFAULT_MONITOR_RULES_JSON}',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS ${WALLET_LIBRARY_ORIGIN_TABLE} (
+      address TEXT PRIMARY KEY,
+      source TEXT NOT NULL,
+      priority INTEGER NOT NULL
+    );
+  `);
+
+  const columns = new Set(
+    db.prepare(`PRAGMA ${WALLET_LIBRARY_SCHEMA}.table_info(wallet_annotations)`)
+      .all()
+      .map((column) => column.name)
+  );
+  if (!columns.has('monitor_tier')) {
+    db.exec(`ALTER TABLE ${WALLET_LIBRARY_TABLE} ADD COLUMN monitor_tier TEXT NOT NULL DEFAULT 'watch'`);
+  }
+  if (!columns.has('monitor_rules')) {
+    db.exec(
+      `ALTER TABLE ${WALLET_LIBRARY_TABLE} ADD COLUMN monitor_rules TEXT NOT NULL DEFAULT '${DEFAULT_MONITOR_RULES_JSON}'`
+    );
+  }
+  if (!columns.has('alias_source')) {
+    db.exec(`ALTER TABLE ${WALLET_LIBRARY_TABLE} ADD COLUMN alias_source TEXT NOT NULL DEFAULT 'unknown'`);
+  }
+  db.exec(`
+    UPDATE ${WALLET_LIBRARY_TABLE}
+    SET monitor_tier = 'watch'
+    WHERE monitor_tier IS NULL OR monitor_tier NOT IN ('core', 'watch', 'high_frequency')
+  `);
+  const normalizeRules = db.prepare(
+    `UPDATE ${WALLET_LIBRARY_TABLE} SET monitor_rules = ? WHERE address = ?`
+  );
+  const normalizeAliasSource = db.prepare(
+    `UPDATE ${WALLET_LIBRARY_TABLE} SET alias_source = ? WHERE address = ?`
+  );
+  for (const row of db.prepare(
+    `SELECT address, alias, alias_source, monitor_rules FROM ${WALLET_LIBRARY_TABLE}`
+  ).all()) {
+    const rules = json(normalizeWalletMonitorRules(parseJson(row.monitor_rules, null)));
+    if (row.monitor_rules !== rules) normalizeRules.run(rules, row.address);
+    const alias = String(row.alias || '').trim();
+    const currentSource = normalizeWalletAliasSource(row.alias_source);
+    const generated = LEGACY_PROFIT_RANK_ALIAS_PATTERN.test(alias) ||
+      COMPACT_PROFIT_RANK_ALIAS_PATTERN.test(alias);
+    const source = !alias ? 'none' : generated || currentSource === 'generated' ? 'generated' : 'manual';
+    if (source !== currentSource) normalizeAliasSource.run(source, row.address);
+  }
+}
+
+function walletImportPriority(source) {
+  if (source === 'robinhood') return 20;
+  if (source === 'bsc') return 10;
+  return 0;
+}
+
+function importLegacyWalletAnnotations(db, source, normalizeAddress, isValidAddress) {
+  const migrationKey = `evm_wallet_import:${source}:v1`;
+  if (db.prepare(`SELECT 1 FROM ${WALLET_LIBRARY_METADATA_TABLE} WHERE key = ?`).get(migrationKey)) return;
+
+  const priority = walletImportPriority(source);
+  const selectShared = db.prepare(`SELECT * FROM ${WALLET_LIBRARY_TABLE} WHERE address = ?`);
+  const selectOrigin = db.prepare(`SELECT * FROM ${WALLET_LIBRARY_ORIGIN_TABLE} WHERE address = ?`);
+  const insertShared = db.prepare(`
+    INSERT INTO ${WALLET_LIBRARY_TABLE}(
+      address, alias, alias_source, note, tags, status, classification_override, monitor_tier, monitor_rules,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const replaceShared = db.prepare(`
+    UPDATE ${WALLET_LIBRARY_TABLE}
+    SET alias = ?, alias_source = ?, note = ?, tags = ?, status = ?, classification_override = ?,
+        monitor_tier = ?, monitor_rules = ?, created_at = ?, updated_at = ?
+    WHERE address = ?
+  `);
+  const preserveCreatedAt = db.prepare(
+    `UPDATE ${WALLET_LIBRARY_TABLE} SET created_at = ? WHERE address = ?`
+  );
+  const recordOrigin = db.prepare(`
+    INSERT INTO ${WALLET_LIBRARY_ORIGIN_TABLE}(address, source, priority)
+    VALUES (?, ?, ?)
+    ON CONFLICT(address) DO UPDATE SET source = excluded.source, priority = excluded.priority
+  `);
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (!db.prepare(`SELECT 1 FROM ${WALLET_LIBRARY_METADATA_TABLE} WHERE key = ?`).get(migrationKey)) {
+      const rows = db.prepare('SELECT * FROM main.wallet_annotations ORDER BY address').all();
+      for (const row of rows) {
+        const address = normalizeAddress(row.address);
+        if (!isValidAddress(address)) continue;
+        const incoming = {
+          ...row,
+          address,
+          alias: compactLegacyProfitRankAlias(row.alias),
+          alias_source: normalizeWalletAliasSource(row.alias_source, row.alias ? 'manual' : 'none'),
+          monitor_tier: WALLET_MONITOR_TIERS.has(row.monitor_tier) ? row.monitor_tier : 'watch',
+          monitor_rules: json(normalizeWalletMonitorRules(parseJson(row.monitor_rules, null))),
+          created_at: Number(row.created_at) || Math.floor(Date.now() / 1000),
+          updated_at: Number(row.updated_at) || Math.floor(Date.now() / 1000)
+        };
+        const existing = selectShared.get(address);
+        const origin = existing ? selectOrigin.get(address) : null;
+        const createdAt = existing
+          ? Math.min(Number(existing.created_at), incoming.created_at)
+          : incoming.created_at;
+        const replace = !existing || Boolean(origin) && (
+          incoming.updated_at > Number(existing.updated_at) ||
+          incoming.updated_at === Number(existing.updated_at) && priority > Number(origin.priority)
+        );
+        if (!existing) {
+          insertShared.run(
+            address,
+            incoming.alias,
+            incoming.alias_source,
+            incoming.note,
+            incoming.tags,
+            incoming.status,
+            incoming.classification_override,
+            incoming.monitor_tier,
+            incoming.monitor_rules,
+            createdAt,
+            incoming.updated_at
+          );
+        } else if (replace) {
+          replaceShared.run(
+            incoming.alias,
+            incoming.alias_source,
+            incoming.note,
+            incoming.tags,
+            incoming.status,
+            incoming.classification_override,
+            incoming.monitor_tier,
+            incoming.monitor_rules,
+            createdAt,
+            incoming.updated_at,
+            address
+          );
+        } else if (createdAt < Number(existing.created_at)) {
+          preserveCreatedAt.run(createdAt, address);
+        }
+        if (replace) recordOrigin.run(address, source, priority);
+      }
+      db.prepare(`INSERT INTO ${WALLET_LIBRARY_METADATA_TABLE}(key, value) VALUES (?, ?)`)
+        .run(migrationKey, new Date().toISOString());
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
 export function createRobinhoodStore(filename, {
   chainId = 'robinhood',
   chainLabel = 'Robinhood',
   addressNormalizer = defaultAddressNormalizer,
   addressValidator = defaultAddressValidator,
-  transactionNormalizer = defaultTransactionNormalizer
+  transactionNormalizer = defaultTransactionNormalizer,
+  walletLibraryFile = null,
+  walletAnnotationFile = null
 } = {}) {
   if (typeof addressNormalizer !== 'function') throw new TypeError('addressNormalizer must be a function');
   if (typeof addressValidator !== 'function') throw new TypeError('addressValidator must be a function');
@@ -175,8 +357,20 @@ export function createRobinhoodStore(filename, {
   const normalizeTransaction = (value) => String(transactionNormalizer(value) ?? '');
   const compactProfitRankAliasMigration = `${normalizedChainId}:compact_profit_rank_aliases_v1`;
   const walletAliasSourceMigration = `${normalizedChainId}:wallet_alias_sources_v1`;
+  const normalizedWalletLibraryFile = String(walletLibraryFile || walletAnnotationFile || '').trim();
   if (filename !== ':memory:') fs.mkdirSync(path.dirname(filename), { recursive: true });
+  if (normalizedWalletLibraryFile) {
+    if (normalizedWalletLibraryFile === ':memory:') {
+      throw new TypeError('walletLibraryFile must be a persistent SQLite file');
+    }
+    fs.mkdirSync(path.dirname(normalizedWalletLibraryFile), { recursive: true });
+    if (filename !== ':memory:' && path.resolve(filename) === path.resolve(normalizedWalletLibraryFile)) {
+      throw new TypeError('walletLibraryFile must be different from the chain data file');
+    }
+  }
   const db = new DatabaseSync(filename);
+  db.exec('PRAGMA busy_timeout = 5000');
+  if (filename !== ':memory:') configureFileDatabase(db);
   db.exec(`
     PRAGMA foreign_keys = ON;
     CREATE TABLE IF NOT EXISTS metadata (
@@ -222,6 +416,11 @@ export function createRobinhoodStore(filename, {
       classification_override TEXT,
       monitor_tier TEXT NOT NULL DEFAULT 'watch' CHECK (monitor_tier IN ('core', 'watch', 'high_frequency')),
       monitor_rules TEXT NOT NULL DEFAULT '${DEFAULT_MONITOR_RULES_JSON}',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS wallet_candidate_exclusions (
+      address TEXT PRIMARY KEY,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -382,6 +581,14 @@ export function createRobinhoodStore(filename, {
   `);
   migrateWalletAliasSources(db, walletAliasSourceMigration);
   migrateLegacyProfitRankAliases(db, compactProfitRankAliasMigration);
+  let walletAnnotationTable = 'main.wallet_annotations';
+  if (normalizedWalletLibraryFile) {
+    db.prepare(`ATTACH DATABASE ? AS ${WALLET_LIBRARY_SCHEMA}`).run(normalizedWalletLibraryFile);
+    configureFileDatabase(db, WALLET_LIBRARY_SCHEMA);
+    ensureSharedWalletLibrary(db);
+    importLegacyWalletAnnotations(db, normalizedChainId, normalizeAddress, isValidAddress);
+    walletAnnotationTable = WALLET_LIBRARY_TABLE;
+  }
   const upsertTokenStatement = db.prepare(`
     INSERT INTO tokens(address, symbol, name, logo, payload, updated_at)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -399,7 +606,7 @@ export function createRobinhoodStore(filename, {
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const upsertWalletAnnotationStatement = db.prepare(`
-    INSERT INTO wallet_annotations(
+    INSERT INTO ${walletAnnotationTable}(
       address, alias, alias_source, note, tags, status, classification_override, monitor_tier, monitor_rules,
       created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -562,7 +769,7 @@ export function createRobinhoodStore(filename, {
               params.as_of,
               MAX(annotation.created_at, COALESCE(global_monitor_start.started_at, params.as_of))
             ) AS observed_from
-          FROM wallet_annotations AS annotation
+          FROM ${walletAnnotationTable} AS annotation
           CROSS JOIN params
           CROSS JOIN global_monitor_start
           WHERE params.address_filter IS NULL OR annotation.address = params.address_filter
@@ -718,7 +925,7 @@ export function createRobinhoodStore(filename, {
     },
     upsertWalletAnnotation(annotation) {
       const address = normalizeAddress(annotation.address);
-      const existing = db.prepare('SELECT * FROM wallet_annotations WHERE address = ?').get(address);
+      const existing = db.prepare(`SELECT * FROM ${walletAnnotationTable} WHERE address = ?`).get(address);
       const createdAt = Number(annotation.createdAt ?? existing?.created_at ?? Math.floor(Date.now() / 1000));
       const updatedAt = Number(annotation.updatedAt ?? Math.floor(Date.now() / 1000));
       const monitorTier = String(annotation.monitorTier ?? existing?.monitor_tier ?? 'watch').toLowerCase();
@@ -752,27 +959,79 @@ export function createRobinhoodStore(filename, {
         createdAt,
         updatedAt
       );
-      return walletAnnotationFromRow(db.prepare('SELECT * FROM wallet_annotations WHERE address = ?').get(address));
+      db.prepare('DELETE FROM main.wallet_candidate_exclusions WHERE address = ?').run(address);
+      if (normalizedWalletLibraryFile) {
+        db.prepare(`DELETE FROM ${WALLET_LIBRARY_ORIGIN_TABLE} WHERE address = ?`).run(address);
+      }
+      return walletAnnotationFromRow(
+        db.prepare(`SELECT * FROM ${walletAnnotationTable} WHERE address = ?`).get(address)
+      );
     },
     getWalletAnnotation(address) {
       return walletAnnotationFromRow(
-        db.prepare('SELECT * FROM wallet_annotations WHERE address = ?').get(normalizeAddress(address))
+        db.prepare(`SELECT * FROM ${walletAnnotationTable} WHERE address = ?`).get(normalizeAddress(address))
       );
     },
     listWalletAnnotations() {
       return db
-        .prepare('SELECT * FROM wallet_annotations ORDER BY updated_at DESC, address')
+        .prepare(`SELECT * FROM ${walletAnnotationTable} ORDER BY updated_at DESC, address`)
         .all()
         .map(walletAnnotationFromRow);
     },
     listMonitoredWalletAnnotations() {
       return db
-        .prepare("SELECT * FROM wallet_annotations WHERE status != 'excluded' ORDER BY updated_at DESC, address")
+        .prepare(`SELECT * FROM ${walletAnnotationTable} WHERE status != 'excluded' ORDER BY updated_at DESC, address`)
         .all()
         .map(walletAnnotationFromRow);
     },
     deleteWalletAnnotation(address) {
-      return db.prepare('DELETE FROM wallet_annotations WHERE address = ?').run(normalizeAddress(address)).changes > 0;
+      const normalized = normalizeAddress(address);
+      const deleted = db.prepare(`DELETE FROM ${walletAnnotationTable} WHERE address = ?`).run(normalized).changes > 0;
+      if (normalizedWalletLibraryFile) {
+        db.prepare(`DELETE FROM ${WALLET_LIBRARY_ORIGIN_TABLE} WHERE address = ?`).run(normalized);
+      }
+      return deleted;
+    },
+    excludeWalletCandidate(address, updatedAt = Math.floor(Date.now() / 1000)) {
+      const normalized = normalizeAddress(address);
+      if (!isValidAddress(normalized)) throw new TypeError('Invalid wallet address');
+      const timestamp = Math.max(0, Math.floor(Number(updatedAt) || 0));
+      db.prepare(`
+        INSERT INTO main.wallet_candidate_exclusions(address, created_at, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(address) DO UPDATE SET updated_at = excluded.updated_at
+      `).run(normalized, timestamp, timestamp);
+      const row = db.prepare(
+        'SELECT address, created_at, updated_at FROM main.wallet_candidate_exclusions WHERE address = ?'
+      ).get(normalized);
+      return {
+        address: row.address,
+        createdAt: Number(row.created_at),
+        updatedAt: Number(row.updated_at)
+      };
+    },
+    getWalletCandidateExclusion(address) {
+      const row = db.prepare(
+        'SELECT address, created_at, updated_at FROM main.wallet_candidate_exclusions WHERE address = ?'
+      ).get(normalizeAddress(address));
+      return row ? {
+        address: row.address,
+        createdAt: Number(row.created_at),
+        updatedAt: Number(row.updated_at)
+      } : null;
+    },
+    listWalletCandidateExclusions() {
+      return db.prepare(
+        'SELECT address, created_at, updated_at FROM main.wallet_candidate_exclusions ORDER BY updated_at DESC, address'
+      ).all().map((row) => ({
+        address: row.address,
+        createdAt: Number(row.created_at),
+        updatedAt: Number(row.updated_at)
+      }));
+    },
+    clearWalletCandidateExclusion(address) {
+      return db.prepare('DELETE FROM main.wallet_candidate_exclusions WHERE address = ?')
+        .run(normalizeAddress(address)).changes > 0;
     },
     upsertMonitorTokenMetadata(metadata) {
       const address = normalizeAddress(metadata.address);

@@ -9,21 +9,24 @@ Caddy 暴露统一 HTTPS 网站。命令中的域名、服务器地址和密钥�
 
 | 组件 | systemd 服务 | 本地监听 | 数据库 |
 | --- | --- | --- | --- |
-| Robinhood、网页、社媒 API | `robinhood-radar` | `127.0.0.1:18118` | `robinhood.sqlite`、`social.sqlite` |
+| Robinhood、网页、社媒 API | `robinhood-radar` | `127.0.0.1:18118` | `robinhood.sqlite`、`social.sqlite`、共享 `evm-wallets.sqlite` |
 | Base | `base-radar` | `127.0.0.1:18119` | `base.sqlite` |
-| BSC | `bsc-radar` | `127.0.0.1:18122` | `bsc.sqlite` |
+| BSC | `bsc-radar` | `127.0.0.1:18122` | `bsc.sqlite`、共享 `evm-wallets.sqlite` |
 | Solana | `solana-radar` | `127.0.0.1:18120` | `solana.sqlite` |
 | HTTPS 和反向代理 | `caddy` | `80`、`443` | 无 |
 
-四个链的钱包、CA、监控规则、去重状态和 Bark 目标完全隔离。Robinhood
-进程负责网页和唯一共享的社媒 API；Caddy 把同一域名下的四组链上 API 转发到
-对应进程。切换链不会切换或复制社媒监控数据。
+Robinhood 与 BSC 通过同一个 `evm-wallets.sqlite`共用已确认地址库；地址、别名、
+备注、标签、层级、逐钱包事件规则和启用/排除状态会双向同步。两条链的候选地址、
+手工金狗 CA 扫描、代币结果、盈亏、实时流水、去重状态、告警阈值和 Bark 目标仍
+分别保存在 `robinhood.sqlite`与 `bsc.sqlite`。Base、Solana 的地址库和全部链上数据
+仍然独立。Robinhood 进程负责网页和唯一共享的社媒 API；切换链不会切换或复制
+社媒监控数据。
 
 生产目录：
 
 ```text
 /opt/robinhood-radar/          程序 bundle 和网页静态文件
-/var/lib/robinhood-radar/      五个运行数据库
+/var/lib/robinhood-radar/      六个运行数据库
 /etc/robinhood-radar/          私有环境变量
 /var/backups/robinhood-radar/  安装器生成的数据库和版本备份
 ```
@@ -254,7 +257,10 @@ BSC_HOLDER_MAX_TRANSFER_LOGS=100000
 BSC_HOLDER_MAX_BLOCK_SPAN=5000000
 ```
 
-BSC 服务监听 `127.0.0.1:18122`，只读写 `bsc.sqlite`。实时监控使用
+BSC 服务监听 `127.0.0.1:18122`；链上分析数据写入 `bsc.sqlite`，已确认地址注释和
+逐钱包监控规则通过 `EVM_WALLET_DATA_FILE=/var/lib/robinhood-radar/evm-wallets.sqlite`
+与 Robinhood 共用。Robinhood 的 systemd unit 设置同一个路径；Base 与 Solana 不使用
+该共享库。实时监控使用
 `BSC_RPC_URL`，未填写时使用 Blast 的免密公共入口；该入口限制单次日志查询最多
 10 个区块，所以 BSC 默认日志窗口也是 10。生产环境仍建议填写支持完整实时查询的
 独立 RPC。服务启动时会校验实时入口严格返回 `eth_chainId 0x38`，并能批量返回
@@ -430,11 +436,11 @@ RADAR_PUBLIC_BASE_URL=https://radar.example.com/robinhood-radar \
 安装器会在停止服务前验证 `SHA256SUMS`，随后：
 
 1. 记录四个服务原来的启停状态。
-2. 对五个 SQLite 数据库执行 WAL checkpoint、事务一致备份和
+2. 对六个 SQLite 数据库执行 WAL checkpoint、事务一致备份和
    `PRAGMA quick_check`。
 3. 备份现有 bundle、网页、systemd unit、版本标记和可选 Caddy 配置。
 4. 安装新文件并启动四项服务。
-5. 检查四个 dashboard、四个实时 monitor、Social API 和五个数据库。
+5. 检查四个 dashboard、四个实时 monitor、Social API 和六个数据库。
 6. 失败时自动恢复上一个程序、数据库、网页、服务状态和本次修改的 Caddy。
 
 成功输出中的数据库备份路径和 `release_backup`应保存到运维记录。安装成功后
@@ -755,28 +761,31 @@ Caddy 配置也进入 `SHA256SUMS`并随版本一起回退。
 
 数据库 schema 可能只保证向前迁移。安装器成功后打印的
 `robinhood_database_backup`、`base_database_backup`、`bsc_database_backup`、
-`solana_database_backup`、`social_database_backup`和 `release_backup`描述的是
+`solana_database_backup`、`social_database_backup`、`evm_wallet_database_backup`和
+`release_backup`描述的是
 “本次安装之前”的完整状态。
-例如要撤销版本 B 的安装并回到版本 A，必须使用安装 B 成功时打印的这六条路径。
-六条路径必须具有完全相同的 UTC 时间戳；不要分别使用 `ls -t`挑选“最新”文件，
+例如要撤销版本 B 的安装并回到版本 A，必须使用安装 B 成功时打印的这七条路径。
+七条路径必须具有完全相同的 UTC 时间戳；不要分别使用 `ls -t`挑选“最新”文件，
 也不要把另一次安装的程序备份和数据库备份混用。安装器会删除 staging，所以应把
 每次成功输出保存在独立的运维记录中。若旧版本还没有某个数据库，安装器会创建
 `<输出路径>.missing`空标记而不是 `.sqlite`文件；下面的命令会保留这个语义，先
-删除对应实时库及 WAL/SHM，再由旧版本服务按旧 schema 创建空库。
+删除对应实时库及 WAL/SHM。旧版本认识的库可按旧 schema 重新创建，不认识的新库
+（例如回退到共享地址库上线前的版本）则保持不存在。
 
-下面是完整的五库主动回滚流程。先把示例的六条赋值替换为同一次安装器输出的原始
+下面是完整的六库主动回滚流程。先把示例的七条赋值替换为同一次安装器输出的原始
 值。只有被撤销的发布包使用了 `--caddy`并由安装器替换整份 Caddy 配置时，才把
 `RESTORE_CADDY`设为 `1`；共享 Caddy 主机必须保持 `0`并人工管理站点块。
 
 ```bash
 set -Eeuo pipefail
 
-# 必须从同一次成功的 install-remote.sh 输出原样复制这六条路径。
+# 必须从同一次成功的 install-remote.sh 输出原样复制这七条路径。
 robinhood_database_backup=/var/backups/robinhood-radar/robinhood-20260101T000000Z.sqlite
 base_database_backup=/var/backups/robinhood-radar/base-20260101T000000Z.sqlite
 bsc_database_backup=/var/backups/robinhood-radar/bsc-20260101T000000Z.sqlite
 solana_database_backup=/var/backups/robinhood-radar/solana-20260101T000000Z.sqlite
 social_database_backup=/var/backups/robinhood-radar/social-20260101T000000Z.sqlite
+evm_wallet_database_backup=/var/backups/robinhood-radar/evm-wallets-20260101T000000Z.sqlite
 release_backup=/var/backups/robinhood-radar/release-20260101T000000Z
 RESTORE_CADDY=0
 
@@ -790,6 +799,7 @@ LIVE_DATABASES=(
   "$DATA_DIR/bsc.sqlite"
   "$DATA_DIR/solana.sqlite"
   "$DATA_DIR/social.sqlite"
+  "$DATA_DIR/evm-wallets.sqlite"
 )
 TARGET_DATABASES=(
   "$robinhood_database_backup"
@@ -797,6 +807,7 @@ TARGET_DATABASES=(
   "$bsc_database_backup"
   "$solana_database_backup"
   "$social_database_backup"
+  "$evm_wallet_database_backup"
 )
 
 quick_check() {
@@ -859,6 +870,7 @@ test "$base_database_backup" = "$BACKUP_ROOT/base-$rollback_stamp.sqlite"
 test "$bsc_database_backup" = "$BACKUP_ROOT/bsc-$rollback_stamp.sqlite"
 test "$solana_database_backup" = "$BACKUP_ROOT/solana-$rollback_stamp.sqlite"
 test "$social_database_backup" = "$BACKUP_ROOT/social-$rollback_stamp.sqlite"
+test "$evm_wallet_database_backup" = "$BACKUP_ROOT/evm-wallets-$rollback_stamp.sqlite"
 
 for backup in "${TARGET_DATABASES[@]}"; do
   if [[ -f "$backup" ]]; then
@@ -998,7 +1010,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
-# 四个进程可能分别持有五个数据库；必须全部停止并确认都是 inactive。
+# 四个进程可能持有六个数据库；必须全部停止并确认都是 inactive。
 SERVICES_STOPPED=1
 systemctl stop robinhood-radar.service base-radar.service bsc-radar.service solana-radar.service
 for service in "${SERVICES[@]}"; do
@@ -1029,14 +1041,14 @@ fi
 
 ROLLBACK_CHANGED=1
 
-# 清理每一个实时库的 WAL/SHM，再恢复同一时间戳的五个目标数据库。
+# 清理每一个实时库的 WAL/SHM，再恢复同一时间戳的六个目标数据库。
 for index in "${!LIVE_DATABASES[@]}"; do
   live="${LIVE_DATABASES[$index]}"
   backup="${TARGET_DATABASES[$index]}"
   restore_database_entry "$backup" "$live"
 done
 
-# 恢复与五个数据库配对的 bundle、网页、unit 和版本标记。
+# 恢复与六个数据库配对的 bundle、网页、unit 和版本标记。
 for chain in robinhood base bsc solana; do
   install -m 0644 "$release_backup/$chain-server.mjs" "$APP_DIR/$chain-server.mjs"
   restore_optional_release_file \
@@ -1091,10 +1103,17 @@ wait_for_endpoint solana-monitor \
 wait_for_endpoint social-api \
   'http://127.0.0.1:18118/api/social?postLimit=1' 30
 
-# 入口就绪后，旧服务也应已创建原来标记为 .missing 的空库；再检查全部五库。
-for live in "${LIVE_DATABASES[@]}"; do
-  test -f "$live"
-  quick_check "$live"
+# 入口就绪后检查全部现存数据库；旧版本不认识的 .missing 共享库可以保持不存在。
+for index in "${!LIVE_DATABASES[@]}"; do
+  live="${LIVE_DATABASES[$index]}"
+  backup="${TARGET_DATABASES[$index]}"
+  if [[ -f "$live" ]]; then
+    quick_check "$live"
+  else
+    test -f "$backup.missing"
+    test ! -e "$live-wal"
+    test ! -e "$live-shm"
+  fi
 done
 
 COMPLETED=1
@@ -1103,7 +1122,7 @@ echo "Cross-schema rollback completed; safety copy retained at: $SAFETY_DIR"
 ```
 
 成功后继续执行“验证部署”中的公网检查，并保留 `SAFETY_DIR`直到观察期结束。若
-命令中途失败，trap 会恢复执行回滚前的程序、网页、unit、五个数据库、可选 Caddy
+命令中途失败，trap 会恢复执行回滚前的程序、网页、unit、六个数据库、可选 Caddy
 和四个服务原来的启停状态；它提示自动恢复不完整时，不要再次启动发布，应保持
 现场并使用打印的 `SAFETY_DIR`手工恢复。
 

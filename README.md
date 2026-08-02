@@ -3,16 +3,20 @@
 This project is a smart-money research and real-time wallet monitor for
 Robinhood Chain, Base, BSC, and Solana. A segmented control switches the active
 chain,
-while every chain keeps its own SQLite database, address library, token queue,
-scan jobs, monitor events, alert threshold, deduplication state, and Bark targets.
-No wallet, token, event, setting, or notification destination is copied between
-chains.
+while every chain keeps its own chain SQLite database, token queue, scan jobs,
+PnL, monitor events, alert threshold, deduplication state, and Bark targets.
+Robinhood and BSC additionally share one confirmed-address library through
+`EVM_WALLET_DATA_FILE`: addresses, aliases, notes, tags, tiers, per-wallet event
+rules, and active/excluded status stay synchronized between those two chains.
+Candidates, manual-CA scans, token results, PnL, events, and Bark configuration
+remain chain-specific. Base and Solana keep independent address libraries.
 
 ## 中文快速开始
 
 1874catch 是一个可自行部署的多链聪明钱研究与实时钱包监控系统，支持：
 
-- Robinhood Chain、Base、BSC、Solana 四链独立数据库和独立监控配置
+- Robinhood Chain、Base、BSC、Solana 四链独立链上数据和独立监控配置
+- Robinhood 与 BSC 共用已确认地址、备注、标签、分组、规则和启用/排除状态
 - 钱包买入、卖出、转账、直接创建代币及平台发币事件
 - 每个钱包分别设置监控事件、网页声音和 Bark 推送
 - 四链 Holder 分析、人工金狗、钱包命中次数与买币频率排序
@@ -97,6 +101,7 @@ Configuration is supplied through environment variables. Common settings are:
 | --- | --- | --- |
 | `ROBINHOOD_RPC_URL` | Robinhood Chain public RPC | Chain reads and monitoring |
 | `ROBINHOOD_DATA_FILE` | `data/robinhood.sqlite` | Persistent SQLite database |
+| `EVM_WALLET_DATA_FILE` | Empty | Shared Robinhood/BSC confirmed-address library; both services must use the same path |
 | `ROBINHOOD_MIN_ENTRY_USD` | `500` | Default per-token wallet entry floor |
 | `ROBINHOOD_MONITOR_POLL_INTERVAL_MS` | `500` | Fast-mode idle polling interval |
 | `ROBINHOOD_MONITOR_DEGRADED_POLL_INTERVAL_MS` | `1000` | Protected-mode polling interval |
@@ -136,6 +141,13 @@ configured with `BSC_DATA_FILE`, its API is served independently on port `18122`
 and its latency-sensitive monitor RPC can be overridden with `BSC_RPC_URL`.
 The no-key default is Blast's BSC endpoint, so BSC log windows default to ten
 blocks. Production deployments should provide a dedicated full endpoint.
+
+In production, both Robinhood and BSC set `EVM_WALLET_DATA_FILE` to
+`/var/lib/robinhood-radar/evm-wallets.sqlite`. The two processes use that file
+only for confirmed-address annotations and monitoring rules. Their normal chain
+databases continue to own candidates, CA scans, token analysis, PnL, monitor
+events, deduplication state, alert settings, and Bark destinations. Base and
+Solana do not open this shared file.
 
 By default, BSC manual-CA and smart-wallet analysis asks the signed-in local
 DeBot extension for the largest 100 current Holders, ordered by token position.
@@ -228,8 +240,10 @@ the exact redactions, hashes, table counts, and restore precautions.
 
 ## Monitoring model
 
-Each confirmed wallet has independent rules for buys, sells, outbound transfers,
-and token creation. Each rule controls detection, browser sound, and immediate
+Each confirmed wallet has rules for buys, sells, outbound transfers, and token
+creation. For Robinhood and BSC these per-wallet rules are shared with the
+address annotation; each chain still applies them only to its own events and its
+own Bark destination. Each rule controls detection, browser sound, and immediate
 Bark delivery. Existing wallets migrate with buy detection enabled and every new
 alert channel disabled.
 
@@ -273,9 +287,9 @@ marked partial.
   and keep populated files in
   `/etc/robinhood-radar/` with mode `0600`.
 - `deploy/install-remote.sh` installs a prepared release with backup and rollback
-  checks for all four binaries, their databases, the independent social
-  database, and all service units. It verifies the complete checksum manifest
-  before stopping a service.
+  checks for all four binaries, their chain databases, the independent social
+  database, the shared Robinhood/BSC address database, and all service units. It
+  verifies the complete checksum manifest before stopping a service.
 - `deploy/dqdai-prediction-backup-retention.sh` is installed separately with its
   service and hourly timer. It deletes only `all_predictions-*.json` snapshots in
   the three DQD AI backup directories after 48 hours; current prediction data and

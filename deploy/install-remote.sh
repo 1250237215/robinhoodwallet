@@ -55,6 +55,14 @@ social_database_backup_path() {
   echo "$backup_root/social-$stamp.sqlite"
 }
 
+evm_wallet_database_path() {
+  echo "$data_dir/evm-wallets.sqlite"
+}
+
+evm_wallet_database_backup_path() {
+  echo "$backup_root/evm-wallets-$stamp.sqlite"
+}
+
 unit_path() {
   echo "/etc/systemd/system/$1.service"
 }
@@ -258,6 +266,12 @@ rollback() {
       social_backup="$(social_database_backup_path)"
       restore_database_file "$social_backup" "$social_database" robinhood-radar robinhood-radar
 
+      local evm_wallet_database
+      local evm_wallet_backup
+      evm_wallet_database="$(evm_wallet_database_path)"
+      evm_wallet_backup="$(evm_wallet_database_backup_path)"
+      restore_database_file "$evm_wallet_backup" "$evm_wallet_database" robinhood-radar robinhood-radar
+
       if [[ -d "$release_backup/public" ]]; then
         rm -rf "$app_dir/public"
         cp -a "$release_backup/public" "$app_dir/public"
@@ -354,6 +368,9 @@ done
 social_database="$(social_database_path)"
 social_database_backup="$(social_database_backup_path)"
 backup_database_file "$social_database" "$social_database_backup"
+evm_wallet_database="$(evm_wallet_database_path)"
+evm_wallet_database_backup="$(evm_wallet_database_backup_path)"
+backup_database_file "$evm_wallet_database" "$evm_wallet_database_backup"
 cp -a "$app_dir/public" "$release_backup/public"
 rollback_needed=1
 
@@ -515,6 +532,7 @@ node --input-type=module -e '
 ' "$social_file"
 rm -f "$social_file"
 quick_check_database "$(social_database_path)"
+quick_check_database "$(evm_wallet_database_path)"
 
 if [[ -f "$staging_dir/Caddyfile" ]]; then
   caddy_candidate="$(mktemp /etc/caddy/Caddyfile.robinhood-radar.XXXXXX)"
@@ -582,6 +600,7 @@ for chain in "${chains[@]}"; do
   echo "${chain}_database_backup=$(database_backup_path "$chain")"
 done
 echo "social_database_backup=$(social_database_backup_path)"
+echo "evm_wallet_database_backup=$(evm_wallet_database_backup_path)"
 echo "release_backup=$release_backup"
 echo "caddy_backup=$release_backup/Caddyfile"
 for service in "${services[@]}"; do

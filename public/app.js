@@ -6360,7 +6360,8 @@ async function deleteSelectedWallets() {
   try {
     const settled = await Promise.allSettled(selected.map((wallet) => {
       const address = normalizeAddress(wallet.address);
-      return fetchChainJson(context, `/wallets/${encodeURIComponent(address)}`, { method: 'DELETE' });
+      const resource = candidateMode ? '/wallet-candidates' : '/wallets';
+      return fetchChainJson(context, `${resource}/${encodeURIComponent(address)}`, { method: 'DELETE' });
     }));
     requireCurrentChainRequest(context);
     const deleted = [];
@@ -6387,7 +6388,7 @@ async function excludeCandidate(address) {
   const normalized = normalizeAddress(address);
   if (!normalized || !window.confirm(`确认剔除候选 ${shortAddress(normalized)}？之后不会再出现在默认候选中。`)) return;
   try {
-    await fetchChainJson(context, `/wallets/${encodeURIComponent(normalized)}`, { method: 'DELETE' });
+    await fetchChainJson(context, `/wallet-candidates/${encodeURIComponent(normalized)}`, { method: 'DELETE' });
     requireCurrentChainRequest(context);
     state.selectedCandidates.delete(normalized);
     state.detailCache.delete(normalized);

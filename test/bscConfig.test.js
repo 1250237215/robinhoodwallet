@@ -68,6 +68,7 @@ test('defines the BSC mainnet profile and independent data defaults', () => {
     BSC_HOLDER_RPC_URL: 'https://bsc-holder-rpc.example',
     BSC_HOLDER_LOG_RPC_URL: '  https://bsc-holder-logs.example/v1  ',
     BSC_DATA_FILE: '/tmp/bsc-independent.sqlite',
+    EVM_WALLET_DATA_FILE: '/tmp/shared-evm-wallets.sqlite',
     BSC_REQUEST_TIMEOUT_MS: '999999'
   });
   assert.equal(config.chain, BSC_CHAIN);
@@ -79,6 +80,7 @@ test('defines the BSC mainnet profile and independent data defaults', () => {
   assert.equal(config.debotRequestTimeoutMs, 95_000);
   assert.equal(Object.hasOwn(config, 'blockscoutApiUrl'), false);
   assert.equal(config.dataFile, '/tmp/bsc-independent.sqlite');
+  assert.equal(config.walletDataFile, '/tmp/shared-evm-wallets.sqlite');
   assert.equal(config.requestTimeoutMs, 60_000);
 
   assert.equal(createBscConfig({}).holderRpcUrl, '');

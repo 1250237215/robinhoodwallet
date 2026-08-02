@@ -13,6 +13,7 @@ Environment=HOST=127.0.0.1
 Environment=PORT=18118
 Environment=ROBINHOOD_PUBLIC_DIR=/opt/robinhood-radar/public
 Environment=ROBINHOOD_DATA_FILE=/var/lib/robinhood-radar/robinhood.sqlite
+Environment=EVM_WALLET_DATA_FILE=/var/lib/robinhood-radar/evm-wallets.sqlite
 Environment=SOCIAL_DATA_FILE=/var/lib/robinhood-radar/social.sqlite
 Environment=SOCIAL_RETENTION_DAYS=7
 Environment=SOCIAL_BRIDGE_OFFLINE_MS=90000

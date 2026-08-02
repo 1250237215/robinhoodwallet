@@ -604,6 +604,20 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
     return true;
   }
 
+  const walletCandidateMatch = url.pathname.match(/^\/api\/robinhood\/wallet-candidates\/([^/]+)$/);
+  if (walletCandidateMatch) {
+    if (req.method !== 'DELETE') methodNotAllowed(['DELETE']);
+    let value;
+    try {
+      value = decodeURIComponent(walletCandidateMatch[1]);
+    } catch {
+      throw new HttpError(400, 'Invalid encoded wallet address', 'INVALID_ADDRESS');
+    }
+    const result = service.excludeWalletCandidate(address(value, 'wallet', addressCodec));
+    sendJson(res, result.ok ? 200 : 409, result);
+    return true;
+  }
+
   const walletMatch = url.pathname.match(/^\/api\/robinhood\/wallets?\/([^/]+)$/);
   if (walletMatch) {
     let value;
@@ -625,7 +639,8 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
       return true;
     }
     if (req.method === 'DELETE') {
-      sendJson(res, 200, service.deleteWallet(normalized));
+      const result = service.deleteWallet(normalized);
+      sendJson(res, result.ok ? 200 : 409, result);
       return true;
     }
     methodNotAllowed(['GET', 'PATCH', 'DELETE']);
@@ -737,7 +752,9 @@ export async function startRobinhoodStandaloneServer(
   } = {}
 ) {
   const config = createRobinhoodConfig(env);
-  const store = createRobinhoodStore(config.dataFile);
+  const store = createRobinhoodStore(config.dataFile, {
+    walletLibraryFile: config.walletDataFile
+  });
   const socialConfig = createSocialConfig(env, { fallbackDirectory: path.dirname(config.dataFile) });
   const socialService = createSocialService({ config: socialConfig, fetchImpl });
   const debotBridgeTimeoutMs = Math.min(

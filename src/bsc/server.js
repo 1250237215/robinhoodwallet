@@ -311,7 +311,8 @@ export async function startBscStandaloneServer(
     chainLabel: config.chainLabel,
     addressNormalizer: config.addressNormalizer,
     addressValidator: config.addressValidator,
-    transactionNormalizer: config.transactionNormalizer
+    transactionNormalizer: config.transactionNormalizer,
+    walletLibraryFile: config.walletDataFile
   });
   const analysisBridgeFetch = createBscDebotBridgeFetch({
     bridgeUrl: config.debotBridgeUrl,

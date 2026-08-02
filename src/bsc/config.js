@@ -96,6 +96,7 @@ export function createBscConfig(env = process.env) {
       120_000
     ),
     dataFile: env.BSC_DATA_FILE || new URL('../../data/bsc.sqlite', import.meta.url).pathname,
+    walletDataFile: String(env.EVM_WALLET_DATA_FILE || '').trim(),
     requestTimeoutMs: boundedNumber(env.BSC_REQUEST_TIMEOUT_MS, 20_000, 1_000, 60_000)
   };
 }

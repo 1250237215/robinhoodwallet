@@ -14,10 +14,12 @@ test('uses verified Robinhood mainnet addresses and bounded scan settings', () =
     ROBINHOOD_AUTO_SCAN_LIMIT: '1000',
     ROBINHOOD_HOLDER_CANDIDATE_LIMIT: '1',
     ROBINHOOD_HOLDER_FETCH_LIMIT: '5000',
-    ROBINHOOD_HOLDER_PROFIT_CONCURRENCY: '99'
+    ROBINHOOD_HOLDER_PROFIT_CONCURRENCY: '99',
+    EVM_WALLET_DATA_FILE: '/tmp/shared-evm-wallets.sqlite'
   });
 
   assert.equal(config.defaultWinnerMultiple, 10);
+  assert.equal(config.walletDataFile, '/tmp/shared-evm-wallets.sqlite');
   assert.equal(config.minLiquidityUsd, 50_000);
   assert.equal(config.minEffectiveWallets, 100);
   assert.equal(config.minEntryUsd, 500);
