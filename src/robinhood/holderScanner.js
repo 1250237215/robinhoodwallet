@@ -174,7 +174,9 @@ function reusableEmbeddedProfit(holder, tokenAddress, chainProfile, adapter) {
     const parsed = number(value);
     return parsed !== null && parsed !== 0;
   });
-  return meaningful && profit.profitState === 'complete' ? profit : null;
+  return (meaningful || profit.noTradeHistory === true) && profit.profitState === 'complete'
+    ? profit
+    : null;
 }
 
 function mergeCandidate(holder, profit, tokenDetail, minimumEntryUsd, minimumHitMultiple, normalize = normalizeAddress) {
@@ -193,7 +195,8 @@ function mergeCandidate(holder, profit, tokenDetail, minimumEntryUsd, minimumHit
     ? Math.min(1, averageBuyPriceUsd / currentPriceUsd)
     : null;
   const early = entryProgress !== null && entryProgress <= 0.2;
-  const eligible = buyVolumeUsd >= minimumEntryUsd;
+  const noTradeHistory = profit.noTradeHistory === true;
+  const eligible = !noTradeHistory && buyVolumeUsd >= minimumEntryUsd;
   return {
     ...holder,
     ...profit,
@@ -218,7 +221,7 @@ function mergeCandidate(holder, profit, tokenDetail, minimumEntryUsd, minimumHit
     early,
     hit: Boolean(eligible && early && bestMultiple >= minimumHitMultiple),
     eligible,
-    ignoredReason: eligible ? '' : 'below_minimum_entry',
+    ignoredReason: noTradeHistory ? 'no_trade_history' : eligible ? '' : 'below_minimum_entry',
     candidateReason: 'top_holder',
     profitState: 'complete',
     confidence: 'high'

@@ -248,6 +248,58 @@ test('returns a useful partial snapshot when one holder profit request fails', a
   assert.equal(result.scan.analysisSource, 'debot_holder_first');
 });
 
+test('skips a Holder row with explicit no-trade history without calling wallet profit', async () => {
+  let directCalls = 0;
+  const result = await scanTokenHolders({
+    token: { address: token, manual: true },
+    chainProfile: BSC_CHAIN,
+    config: config({ holderCandidateLimit: 1, minEntryUsd: 0 }),
+    holderClient: {
+      fetchTopHolders: async () => ({
+        holders: [holder(walletA, 1, {
+          walletTokenProfit: {
+            address: walletA,
+            tokenAddress: token,
+            chain: 'bsc',
+            currentPriceUsd: 10,
+            holdingTokenAmount: 1_000,
+            holdingValueUsd: 10_000,
+            buyAmount: 0,
+            sellAmount: 0,
+            buyVolumeUsd: 0,
+            sellVolumeUsd: 0,
+            buyTimes: 0,
+            sellTimes: 0,
+            realizedProfitUsd: 0,
+            unrealizedProfitUsd: 0,
+            totalProfitUsd: 0,
+            profitState: 'complete',
+            noTradeHistory: true
+          }
+        })],
+        token: { holders: 1 },
+        snapshotAt: '2026-07-30T00:00:00.000Z',
+        holderUniverseComplete: true,
+        complete: true
+      })
+    },
+    debotClient: {
+      fetchTokenDetail: async () => tokenDetail(),
+      fetchWalletTokenProfit: async () => {
+        directCalls += 1;
+        throw new Error('should not be called');
+      }
+    }
+  });
+
+  assert.equal(directCalls, 0);
+  assert.equal(result.scan.complete, true);
+  assert.equal(result.scan.failedWallets, 0);
+  assert.equal(result.holderAnalysis.failures.length, 0);
+  assert.equal(result.holderAnalysis.candidates[0].eligible, false);
+  assert.equal(result.holderAnalysis.candidates[0].ignoredReason, 'no_trade_history');
+});
+
 test('retries forbidden and transient wallet-profit failures once at low concurrency and preserves order', async () => {
   const calls = new Map();
   let retryActive = 0;

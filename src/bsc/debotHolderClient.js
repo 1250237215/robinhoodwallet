@@ -88,6 +88,26 @@ function meaningfulProfit(value) {
   });
 }
 
+// DeBot uses an all-zero, complete-shaped profit object for holders without
+// recorded trades. Keep that signal so the scanner can skip a doomed
+// per-wallet request instead of turning it into a bridge failure.
+function hasExplicitZeroProfit(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return [
+    'buy_volume',
+    'buy_amount',
+    'buy_times',
+    'sell_volume',
+    'sell_amount',
+    'sell_times',
+    'actual_buy_amount',
+    'actual_buy_cost',
+    'realized_profit',
+    'unrealized_profit',
+    'total_profit'
+  ].every((field) => Object.hasOwn(value, field) && number(value[field]) === 0);
+}
+
 function contractCode(value) {
   const code = String(value || '').trim().toLowerCase();
   if (!/^0x[0-9a-f]*$/.test(code)) throw new Error('BSC RPC returned invalid contract code');
@@ -121,7 +141,8 @@ export class BscDebotHolderClient {
     const holders = rows.flatMap((row, index) => {
       const wallet = normalizeBscAddress(row?.wallet || row?.address);
       if (!isBscAddress(wallet)) return [];
-      const rawProfit = meaningfulProfit(row?.profit) ? row.profit : null;
+      const zeroProfit = hasExplicitZeroProfit(row?.profit);
+      const rawProfit = meaningfulProfit(row?.profit) || zeroProfit ? row.profit : null;
       const holdingTokenAmount = firstNumber(
         row?.position,
         row?.holding_token_amount,
@@ -154,6 +175,7 @@ export class BscDebotHolderClient {
         price: firstNumber(rawProfit.price, currentPrice),
         avg_buy_price: firstNumber(rawProfit.avg_buy_price, averageBuyPrice)
       }, wallet, { chain: 'bsc', addressNormalizer: normalizeBscAddress }) : null;
+      if (walletTokenProfit && zeroProfit) walletTokenProfit.noTradeHistory = true;
       const reasons = exclusionReasons(row, wallet);
       if (this.infrastructureAddresses.has(wallet)) reasons.push('known_infrastructure');
       return [{

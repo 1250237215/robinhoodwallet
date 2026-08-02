@@ -175,6 +175,40 @@ test('reports top-100 and caller truncation as partial unless an authoritative t
   assert.equal(explicitMore.complete, false);
 });
 
+test('preserves an explicit zero profit payload as no trade history', async () => {
+  const client = new BscDebotHolderClient({
+    debotClient: profileClient({
+      total: 1,
+      list: [{
+        wallet: zeroProfitWallet,
+        rank: 1,
+        position: 400,
+        balance: 8,
+        percent: 0.005,
+        profit: {
+          actual_buy_amount: 0,
+          actual_buy_cost: 0,
+          buy_amount: 0,
+          buy_times: 0,
+          buy_volume: 0,
+          realized_profit: 0,
+          sell_amount: 0,
+          sell_times: 0,
+          sell_volume: 0,
+          total_profit: 0,
+          unrealized_profit: 0
+        }
+      }]
+    }),
+    rpcClient: rpcWithCodes()
+  });
+
+  const result = await client.fetchTopHolders(token, { limit: 1 });
+  assert.equal(result.holders.length, 1);
+  assert.equal(result.holders[0].walletTokenProfit.noTradeHistory, true);
+  assert.equal(result.holders[0].walletTokenProfit.buyVolumeUsd, 0);
+});
+
 test('fails closed when RPC contract verification omits a Holder result', async () => {
   const client = new BscDebotHolderClient({
     debotClient: profileClient({
