@@ -12,6 +12,7 @@ Environment=NODE_ENV=production
 Environment=SOLANA_HOST=127.0.0.1
 Environment=SOLANA_PORT=18120
 Environment=SOLANA_DATA_FILE=/var/lib/robinhood-radar/solana.sqlite
+Environment=BARK_DATA_FILE=/var/lib/robinhood-radar/bark.sqlite
 Environment=SOLANA_MIN_ENTRY_USD=500
 Environment=SOLANA_HOLDER_CANDIDATE_LIMIT=100
 Environment=SOLANA_HOLDER_FETCH_LIMIT=150

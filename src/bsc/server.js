@@ -79,6 +79,10 @@ function rpcEndpointIdentity(client, fallback = '') {
 function bscTuningEnvironment(env) {
   const mapped = {};
   for (const [key, value] of Object.entries(env || {})) {
+    if (key === 'BARK_DATA_FILE') {
+      mapped[key] = value;
+      continue;
+    }
     if (!key.startsWith('BSC_')) continue;
     mapped[`ROBINHOOD_${key.slice('BSC_'.length)}`] = value;
   }
@@ -312,7 +316,8 @@ export async function startBscStandaloneServer(
     addressNormalizer: config.addressNormalizer,
     addressValidator: config.addressValidator,
     transactionNormalizer: config.transactionNormalizer,
-    walletLibraryFile: config.walletDataFile
+    walletLibraryFile: config.walletDataFile,
+    barkLibraryFile: config.barkDataFile
   });
   const analysisBridgeFetch = createBscDebotBridgeFetch({
     bridgeUrl: config.debotBridgeUrl,

@@ -831,6 +831,7 @@ export class RobinhoodWalletMonitor {
 
   testBarkTarget(id) {
     if (!this.barkNotifier?.testTarget) throw new Error('Bark notifications are unavailable');
+    this.#syncBarkSettings();
     return this.barkNotifier.testTarget(id, {
       sound: this.settings.barkSound,
       volume: this.settings.barkVolume
@@ -888,6 +889,7 @@ export class RobinhoodWalletMonitor {
   }
 
   getSnapshot({ eventLimit = 100 } = {}) {
+    this.#syncBarkSettings();
     const deepStatus = this.#deepStatus();
     const status = this.closed
       ? 'stopped'
@@ -1431,6 +1433,15 @@ export class RobinhoodWalletMonitor {
     return this.rpcProtection.active ? 1 : this.walletLogConcurrency;
   }
 
+  #syncBarkSettings() {
+    const sound = this.store.getMeta(MONITOR_BARK_SOUND_KEY);
+    this.settings.barkSound = BARK_SOUNDS.has(sound) ? sound : 'alarm';
+    this.settings.barkVolume = Math.max(
+      0,
+      Math.min(10, parseInteger(this.store.getMeta(MONITOR_BARK_VOLUME_KEY), 5))
+    );
+  }
+
   #activateRpcProtection(error) {
     const now = new Date(this.now()).toISOString();
     if (!this.rpcProtection.active) this.rpcProtection.activeSince = now;
@@ -1451,6 +1462,7 @@ export class RobinhoodWalletMonitor {
   }
 
   #reconcileBarkAlerts(notifyNew) {
+    if (notifyNew) this.#syncBarkSettings();
     for (const cluster of this.getClusters()) {
       if (!cluster.triggered) continue;
       if (this.alertedTokens.has(cluster.tokenAddress)) continue;
@@ -1946,6 +1958,7 @@ export class RobinhoodWalletMonitor {
 
   #notifyWalletEvent(event) {
     if (!event.barkAlert || !this.barkNotifier?.notifyWalletEvent) return;
+    this.#syncBarkSettings();
     void this.barkNotifier.notifyWalletEvent({
       event,
       sound: this.settings.barkSound,

@@ -753,7 +753,8 @@ export async function startRobinhoodStandaloneServer(
 ) {
   const config = createRobinhoodConfig(env);
   const store = createRobinhoodStore(config.dataFile, {
-    walletLibraryFile: config.walletDataFile
+    walletLibraryFile: config.walletDataFile,
+    barkLibraryFile: config.barkDataFile
   });
   const socialConfig = createSocialConfig(env, { fallbackDirectory: path.dirname(config.dataFile) });
   const socialService = createSocialService({ config: socialConfig, fetchImpl });

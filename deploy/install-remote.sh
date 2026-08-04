@@ -63,6 +63,14 @@ evm_wallet_database_backup_path() {
   echo "$backup_root/evm-wallets-$stamp.sqlite"
 }
 
+bark_database_path() {
+  echo "$data_dir/bark.sqlite"
+}
+
+bark_database_backup_path() {
+  echo "$backup_root/bark-$stamp.sqlite"
+}
+
 unit_path() {
   echo "/etc/systemd/system/$1.service"
 }
@@ -272,6 +280,12 @@ rollback() {
       evm_wallet_backup="$(evm_wallet_database_backup_path)"
       restore_database_file "$evm_wallet_backup" "$evm_wallet_database" robinhood-radar robinhood-radar
 
+      local bark_database
+      local bark_backup
+      bark_database="$(bark_database_path)"
+      bark_backup="$(bark_database_backup_path)"
+      restore_database_file "$bark_backup" "$bark_database" robinhood-radar robinhood-radar
+
       if [[ -d "$release_backup/public" ]]; then
         rm -rf "$app_dir/public"
         cp -a "$release_backup/public" "$app_dir/public"
@@ -371,6 +385,9 @@ backup_database_file "$social_database" "$social_database_backup"
 evm_wallet_database="$(evm_wallet_database_path)"
 evm_wallet_database_backup="$(evm_wallet_database_backup_path)"
 backup_database_file "$evm_wallet_database" "$evm_wallet_database_backup"
+bark_database="$(bark_database_path)"
+bark_database_backup="$(bark_database_backup_path)"
+backup_database_file "$bark_database" "$bark_database_backup"
 cp -a "$app_dir/public" "$release_backup/public"
 rollback_needed=1
 
@@ -403,6 +420,7 @@ for service in "${services[@]}"; do
 done
 
 declare -A ports=([robinhood]=18118 [base]=18119 [bsc]=18122 [solana]=18120)
+bark_reference_signature=""
 for chain in "${chains[@]}"; do
   health_file="$(mktemp)"
   for attempt in $(seq 1 30); do
@@ -502,6 +520,30 @@ for chain in "${chains[@]}"; do
       }
     ' "$monitor_file"
   fi
+  bark_signature="$(node --input-type=module -e '
+    import fs from "node:fs";
+    const monitor = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (!Array.isArray(monitor.barkTargets)) throw new Error("Bark targets are unavailable");
+    if (typeof monitor.settings?.barkSound !== "string") throw new Error("Bark sound is unavailable");
+    if (!Number.isInteger(Number(monitor.settings?.barkVolume))) throw new Error("Bark volume is unavailable");
+    const targets = monitor.barkTargets.map((target) => ({
+      id: Number(target.id),
+      label: String(target.label || ""),
+      endpointMasked: String(target.endpointMasked || ""),
+      enabled: target.enabled !== false
+    })).sort((left, right) => left.id - right.id);
+    process.stdout.write(JSON.stringify({
+      targets,
+      sound: monitor.settings.barkSound,
+      volume: Number(monitor.settings.barkVolume)
+    }));
+  ' "$monitor_file")"
+  if [[ -z "$bark_reference_signature" ]]; then
+    bark_reference_signature="$bark_signature"
+  elif [[ "$bark_signature" != "$bark_reference_signature" ]]; then
+    echo "$chain Bark configuration does not match the other chain services." >&2
+    exit 1
+  fi
   rm -f "$monitor_file"
 
   removed_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
@@ -533,6 +575,7 @@ node --input-type=module -e '
 rm -f "$social_file"
 quick_check_database "$(social_database_path)"
 quick_check_database "$(evm_wallet_database_path)"
+quick_check_database "$(bark_database_path)"
 
 if [[ -f "$staging_dir/Caddyfile" ]]; then
   caddy_candidate="$(mktemp /etc/caddy/Caddyfile.robinhood-radar.XXXXXX)"
@@ -601,6 +644,7 @@ for chain in "${chains[@]}"; do
 done
 echo "social_database_backup=$(social_database_backup_path)"
 echo "evm_wallet_database_backup=$(evm_wallet_database_backup_path)"
+echo "bark_database_backup=$(bark_database_backup_path)"
 echo "release_backup=$release_backup"
 echo "caddy_backup=$release_backup/Caddyfile"
 for service in "${services[@]}"; do

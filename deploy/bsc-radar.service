@@ -13,6 +13,7 @@ Environment=BSC_HOST=127.0.0.1
 Environment=BSC_PORT=18122
 Environment=BSC_DATA_FILE=/var/lib/robinhood-radar/bsc.sqlite
 Environment=EVM_WALLET_DATA_FILE=/var/lib/robinhood-radar/evm-wallets.sqlite
+Environment=BARK_DATA_FILE=/var/lib/robinhood-radar/bark.sqlite
 Environment=BSC_MIN_ENTRY_USD=500
 Environment=BSC_SIGNIFICANT_PROFIT_RATE=0.002
 Environment=BSC_SMART_BASE_MULTIPLE=5

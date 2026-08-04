@@ -4,12 +4,14 @@ This project is a smart-money research and real-time wallet monitor for
 Robinhood Chain, Base, BSC, and Solana. A segmented control switches the active
 chain,
 while every chain keeps its own chain SQLite database, token queue, scan jobs,
-PnL, monitor events, alert threshold, deduplication state, and Bark targets.
+PnL, monitor events, alert threshold, and deduplication state. All four services
+attach the same `BARK_DATA_FILE`, so Bark targets, enabled state, sound, and
+volume remain identical when the active chain changes.
 Robinhood and BSC additionally share one confirmed-address library through
 `EVM_WALLET_DATA_FILE`: addresses, aliases, notes, tags, tiers, per-wallet event
 rules, and active/excluded status stay synchronized between those two chains.
-Candidates, manual-CA scans, token results, PnL, events, and Bark configuration
-remain chain-specific. Base and Solana keep independent address libraries.
+Candidates, manual-CA scans, token results, PnL, and events remain
+chain-specific. Base and Solana keep independent address libraries.
 
 ## 中文快速开始
 
@@ -17,6 +19,7 @@ remain chain-specific. Base and Solana keep independent address libraries.
 
 - Robinhood Chain、Base、BSC、Solana 四链独立链上数据和独立监控配置
 - Robinhood 与 BSC 共用已确认地址、备注、标签、分组、规则和启用/排除状态
+- 四条链共用 Bark 设备、启停状态、提示音和响度，切链不会丢失推送配置
 - 钱包买入、卖出、转账、直接创建代币及平台发币事件
 - 每个钱包分别设置监控事件、网页声音和 Bark 推送
 - 四链 Holder 分析、人工金狗、钱包命中次数与买币频率排序
@@ -102,6 +105,7 @@ Configuration is supplied through environment variables. Common settings are:
 | `ROBINHOOD_RPC_URL` | Robinhood Chain public RPC | Chain reads and monitoring |
 | `ROBINHOOD_DATA_FILE` | `data/robinhood.sqlite` | Persistent SQLite database |
 | `EVM_WALLET_DATA_FILE` | Empty | Shared Robinhood/BSC confirmed-address library; both services must use the same path |
+| `BARK_DATA_FILE` | Empty | Shared Bark targets, enabled state, sound, and volume; all four services must use the same path |
 | `ROBINHOOD_MIN_ENTRY_USD` | `500` | Default per-token wallet entry floor |
 | `ROBINHOOD_MONITOR_POLL_INTERVAL_MS` | `500` | Fast-mode idle polling interval |
 | `ROBINHOOD_MONITOR_DEGRADED_POLL_INTERVAL_MS` | `1000` | Protected-mode polling interval |
@@ -146,8 +150,14 @@ In production, both Robinhood and BSC set `EVM_WALLET_DATA_FILE` to
 `/var/lib/robinhood-radar/evm-wallets.sqlite`. The two processes use that file
 only for confirmed-address annotations and monitoring rules. Their normal chain
 databases continue to own candidates, CA scans, token analysis, PnL, monitor
-events, deduplication state, alert settings, and Bark destinations. Base and
-Solana do not open this shared file.
+events, deduplication state, and chain-specific alert state. Base and Solana do
+not open this shared wallet file.
+
+All four production services set `BARK_DATA_FILE` to
+`/var/lib/robinhood-radar/bark.sqlite`. Bark destinations, each destination's
+enabled state, sound, and volume are stored there and become visible immediately
+after switching chains. Existing per-chain Bark data is imported once on the
+first startup; the chain databases otherwise remain independent.
 
 By default, BSC manual-CA and smart-wallet analysis asks the signed-in local
 DeBot extension for the largest 100 current Holders, ordered by token position.
@@ -233,19 +243,20 @@ not commit the populated file.
 
 ## Public database snapshot
 
-The `database/` directory contains a compressed production snapshot for public
-recovery and analysis. Bark targets and Bark settings were securely removed
-before publication. See `database/README.md` and `database/manifest.json` for
-the exact redactions, hashes, table counts, and restore precautions.
+The `database/` directory contains a compressed Robinhood chain-database
+snapshot for public recovery and analysis. Legacy Bark rows and settings were
+securely removed before publication, and the current private `bark.sqlite` is
+never included. See `database/README.md` and `database/manifest.json` for the
+exact redactions, hashes, table counts, and restore precautions.
 
 ## Monitoring model
 
 Each confirmed wallet has rules for buys, sells, outbound transfers, and token
 creation. For Robinhood and BSC these per-wallet rules are shared with the
-address annotation; each chain still applies them only to its own events and its
-own Bark destination. Each rule controls detection, browser sound, and immediate
-Bark delivery. Existing wallets migrate with buy detection enabled and every new
-alert channel disabled.
+address annotation; each chain still applies them only to its own events. Each
+rule controls detection, browser sound, and immediate delivery to the global
+Bark target list. Existing wallets migrate with buy detection enabled and every
+new alert channel disabled.
 
 Buys and sells are classified from ERC-20 `Transfer` logs only after validating
 the originating wallet, successful receipt, and a recognized trade event. The
@@ -288,8 +299,9 @@ marked partial.
   `/etc/robinhood-radar/` with mode `0600`.
 - `deploy/install-remote.sh` installs a prepared release with backup and rollback
   checks for all four binaries, their chain databases, the independent social
-  database, the shared Robinhood/BSC address database, and all service units. It
-  verifies the complete checksum manifest before stopping a service.
+  database, the shared Robinhood/BSC address database, the shared Bark database,
+  and all service units. It verifies the complete checksum manifest before
+  stopping a service.
 - `deploy/dqdai-prediction-backup-retention.sh` is installed separately with its
   service and hourly timer. It deletes only `all_predictions-*.json` snapshots in
   the three DQD AI backup directories after 48 hours; current prediction data and

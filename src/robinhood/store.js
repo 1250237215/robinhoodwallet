@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -7,6 +8,7 @@ import {
   normalizeWalletMonitorRules,
   WALLET_MONITOR_EVENT_TYPES
 } from './monitorRules.js';
+import { normalizeBarkEndpoint } from './bark.js';
 import { WALLET_MONITOR_TIERS } from './tiering.js';
 
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
@@ -162,6 +164,36 @@ const WALLET_LIBRARY_SCHEMA = 'wallet_library';
 const WALLET_LIBRARY_TABLE = `${WALLET_LIBRARY_SCHEMA}.wallet_annotations`;
 const WALLET_LIBRARY_METADATA_TABLE = `${WALLET_LIBRARY_SCHEMA}.metadata`;
 const WALLET_LIBRARY_ORIGIN_TABLE = `${WALLET_LIBRARY_SCHEMA}.wallet_annotation_import_origins`;
+
+const BARK_LIBRARY_SCHEMA = 'bark_library';
+const BARK_LIBRARY_TABLE = `${BARK_LIBRARY_SCHEMA}.monitor_bark_targets`;
+const BARK_LIBRARY_METADATA_TABLE = `${BARK_LIBRARY_SCHEMA}.metadata`;
+const SHARED_BARK_SOUND_KEY = 'bark:sound';
+const SHARED_BARK_VOLUME_KEY = 'bark:volume';
+const BARK_LIBRARY_SOURCE_PREFIX = 'legacy_bark_source:';
+const BARK_LIBRARY_TOMBSTONE_PREFIX = 'bark_deleted_endpoint:';
+const BARK_LIBRARY_SOURCE_PRIORITY = Object.freeze({
+  solana: 10,
+  base: 20,
+  bsc: 30,
+  robinhood: 40
+});
+
+function sharedBarkMetadataKey(key) {
+  const match = String(key || '').trim().match(/(?:^|:)monitor:bark-(sound|volume)$/i);
+  if (!match) return null;
+  return match[1].toLowerCase() === 'sound' ? SHARED_BARK_SOUND_KEY : SHARED_BARK_VOLUME_KEY;
+}
+
+function barkEndpointFingerprint(value) {
+  let endpoint;
+  try {
+    endpoint = normalizeBarkEndpoint(value);
+  } catch {
+    endpoint = String(value || '').trim();
+  }
+  return createHash('sha256').update(endpoint).digest('hex');
+}
 
 function configureFileDatabase(db, schema = 'main') {
   db.exec(`PRAGMA ${schema}.journal_mode = WAL`);
@@ -338,6 +370,157 @@ function importLegacyWalletAnnotations(db, source, normalizeAddress, isValidAddr
   }
 }
 
+function ensureSharedBarkLibrary(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ${BARK_LIBRARY_METADATA_TABLE} (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS ${BARK_LIBRARY_TABLE} (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      label TEXT NOT NULL DEFAULT '',
+      endpoint TEXT NOT NULL UNIQUE,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      last_success_at INTEGER,
+      last_error_at INTEGER,
+      last_error TEXT NOT NULL DEFAULT ''
+    );
+  `);
+}
+
+function migrateLegacyBarkConfiguration(db, source) {
+  const normalizedSource = String(source || '').trim().toLowerCase();
+  const sourcePriority = Number(BARK_LIBRARY_SOURCE_PRIORITY[normalizedSource] || 0);
+  const migrationKey = `legacy_bark_import:${normalizedSource}:v2`;
+  if (db.prepare(`SELECT 1 FROM ${BARK_LIBRARY_METADATA_TABLE} WHERE key = ?`).get(migrationKey)) return;
+
+  const upsertMetadata = db.prepare(`
+    INSERT OR REPLACE INTO ${BARK_LIBRARY_METADATA_TABLE}(key, value) VALUES (?, ?)
+  `);
+  const insertTarget = db.prepare(`
+    INSERT INTO ${BARK_LIBRARY_TABLE}(
+      id, label, endpoint, enabled, created_at, updated_at,
+      last_success_at, last_error_at, last_error
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const appendTarget = db.prepare(`
+    INSERT INTO ${BARK_LIBRARY_TABLE}(
+      label, endpoint, enabled, created_at, updated_at,
+      last_success_at, last_error_at, last_error
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const selectByEndpoint = db.prepare(`SELECT * FROM ${BARK_LIBRARY_TABLE} WHERE endpoint = ?`);
+  const selectById = db.prepare(`SELECT 1 FROM ${BARK_LIBRARY_TABLE} WHERE id = ?`);
+  const updateTarget = db.prepare(`
+    UPDATE ${BARK_LIBRARY_TABLE}
+    SET label = ?, enabled = ?, created_at = ?, updated_at = ?,
+        last_success_at = ?, last_error_at = ?, last_error = ?
+    WHERE id = ?
+  `);
+  const selectMetadata = db.prepare(`SELECT value FROM ${BARK_LIBRARY_METADATA_TABLE} WHERE key = ?`);
+
+  function legacySetting(suffix) {
+    const keys = normalizedSource === 'solana'
+      ? [`solana:monitor:bark-${suffix}`, `robinhood:monitor:bark-${suffix}`]
+      : [`${normalizedSource}:monitor:bark-${suffix}`, `robinhood:monitor:bark-${suffix}`];
+    for (const key of [...new Set(keys)]) {
+      const value = db.prepare('SELECT value FROM main.metadata WHERE key = ?').get(key)?.value;
+      if (value !== undefined && value !== null && String(value).trim()) return String(value);
+    }
+    return null;
+  }
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    // A marker is written in the shared database, so deleting a shared target
+    // does not cause an old per-chain target to reappear on the next restart.
+    if (!selectMetadata.get(migrationKey)) {
+      const legacyRows = db.prepare('SELECT * FROM main.monitor_bark_targets ORDER BY created_at, id').all();
+      let invalidTargets = 0;
+      for (const row of legacyRows) {
+        let endpoint;
+        try {
+          endpoint = normalizeBarkEndpoint(row.endpoint);
+        } catch {
+          // Do not expose a corrupt device key in logs, and do not let one bad
+          // legacy row prevent every chain service from starting.
+          invalidTargets += 1;
+          continue;
+        }
+        const tombstoneKey = `${BARK_LIBRARY_TOMBSTONE_PREFIX}${barkEndpointFingerprint(endpoint)}`;
+        if (selectMetadata.get(tombstoneKey)) continue;
+        const createdAt = Number(row.created_at) || Math.floor(Date.now() / 1000);
+        const updatedAt = Number(row.updated_at) || createdAt;
+        const values = [
+          String(row.label || ''),
+          endpoint,
+          row.enabled ? 1 : 0,
+          createdAt,
+          updatedAt,
+          row.last_success_at === null || row.last_success_at === undefined ? null : Number(row.last_success_at),
+          row.last_error_at === null || row.last_error_at === undefined ? null : Number(row.last_error_at),
+          String(row.last_error || '')
+        ];
+        const existing = selectByEndpoint.get(endpoint);
+        if (existing) {
+          const sourceKey = `${BARK_LIBRARY_SOURCE_PREFIX}target:${existing.id}`;
+          const existingPriority = Number(selectMetadata.get(sourceKey)?.value || 0);
+          const incomingWins = existingPriority < 1000 && (
+            updatedAt > Number(existing.updated_at) ||
+            updatedAt === Number(existing.updated_at) && sourcePriority > existingPriority
+          );
+          if (incomingWins) {
+            updateTarget.run(
+              values[0],
+              values[2],
+              Math.min(Number(existing.created_at) || createdAt, createdAt),
+              updatedAt,
+              values[5],
+              values[6],
+              values[7],
+              Number(existing.id)
+            );
+            upsertMetadata.run(sourceKey, String(sourcePriority));
+          }
+          continue;
+        }
+        const legacyId = Number(row.id);
+        let insertedId;
+        if (Number.isInteger(legacyId) && legacyId > 0 && !selectById.get(legacyId)) {
+          insertTarget.run(legacyId, ...values);
+          insertedId = legacyId;
+        } else {
+          insertedId = Number(appendTarget.run(...values).lastInsertRowid);
+        }
+        upsertMetadata.run(`${BARK_LIBRARY_SOURCE_PREFIX}target:${insertedId}`, String(sourcePriority));
+      }
+
+      for (const [canonicalKey, value] of [
+        [SHARED_BARK_SOUND_KEY, legacySetting('sound')],
+        [SHARED_BARK_VOLUME_KEY, legacySetting('volume')]
+      ]) {
+        if (value === null) continue;
+        const sourceKey = `${BARK_LIBRARY_SOURCE_PREFIX}${canonicalKey}`;
+        const existingPriority = Number(selectMetadata.get(sourceKey)?.value || -1);
+        if (!selectMetadata.get(canonicalKey) || sourcePriority > existingPriority) {
+          upsertMetadata.run(canonicalKey, value);
+          upsertMetadata.run(sourceKey, String(sourcePriority));
+        }
+      }
+      if (invalidTargets > 0) {
+        upsertMetadata.run(`legacy_bark_invalid_targets:${normalizedSource}`, String(invalidTargets));
+      }
+      upsertMetadata.run(migrationKey, new Date().toISOString());
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
 export function createRobinhoodStore(filename, {
   chainId = 'robinhood',
   chainLabel = 'Robinhood',
@@ -345,7 +528,9 @@ export function createRobinhoodStore(filename, {
   addressValidator = defaultAddressValidator,
   transactionNormalizer = defaultTransactionNormalizer,
   walletLibraryFile = null,
-  walletAnnotationFile = null
+  walletAnnotationFile = null,
+  barkLibraryFile = null,
+  barkDataFile = null
 } = {}) {
   if (typeof addressNormalizer !== 'function') throw new TypeError('addressNormalizer must be a function');
   if (typeof addressValidator !== 'function') throw new TypeError('addressValidator must be a function');
@@ -358,6 +543,7 @@ export function createRobinhoodStore(filename, {
   const compactProfitRankAliasMigration = `${normalizedChainId}:compact_profit_rank_aliases_v1`;
   const walletAliasSourceMigration = `${normalizedChainId}:wallet_alias_sources_v1`;
   const normalizedWalletLibraryFile = String(walletLibraryFile || walletAnnotationFile || '').trim();
+  const normalizedBarkLibraryFile = String(barkLibraryFile || barkDataFile || '').trim();
   if (filename !== ':memory:') fs.mkdirSync(path.dirname(filename), { recursive: true });
   if (normalizedWalletLibraryFile) {
     if (normalizedWalletLibraryFile === ':memory:') {
@@ -366,6 +552,18 @@ export function createRobinhoodStore(filename, {
     fs.mkdirSync(path.dirname(normalizedWalletLibraryFile), { recursive: true });
     if (filename !== ':memory:' && path.resolve(filename) === path.resolve(normalizedWalletLibraryFile)) {
       throw new TypeError('walletLibraryFile must be different from the chain data file');
+    }
+  }
+  if (normalizedBarkLibraryFile) {
+    if (normalizedBarkLibraryFile === ':memory:') {
+      throw new TypeError('barkLibraryFile must be a persistent SQLite file');
+    }
+    fs.mkdirSync(path.dirname(normalizedBarkLibraryFile), { recursive: true });
+    if (filename !== ':memory:' && path.resolve(filename) === path.resolve(normalizedBarkLibraryFile)) {
+      throw new TypeError('barkLibraryFile must be different from the chain data file');
+    }
+    if (normalizedWalletLibraryFile && path.resolve(normalizedWalletLibraryFile) === path.resolve(normalizedBarkLibraryFile)) {
+      throw new TypeError('barkLibraryFile must be different from walletLibraryFile');
     }
   }
   const db = new DatabaseSync(filename);
@@ -589,6 +787,33 @@ export function createRobinhoodStore(filename, {
     importLegacyWalletAnnotations(db, normalizedChainId, normalizeAddress, isValidAddress);
     walletAnnotationTable = WALLET_LIBRARY_TABLE;
   }
+  let barkTargetTable = 'main.monitor_bark_targets';
+  let barkMetadataTable = 'main.metadata';
+  if (normalizedBarkLibraryFile) {
+    db.prepare(`ATTACH DATABASE ? AS ${BARK_LIBRARY_SCHEMA}`).run(normalizedBarkLibraryFile);
+    configureFileDatabase(db, BARK_LIBRARY_SCHEMA);
+    ensureSharedBarkLibrary(db);
+    migrateLegacyBarkConfiguration(db, normalizedChainId);
+    barkTargetTable = BARK_LIBRARY_TABLE;
+    barkMetadataTable = BARK_LIBRARY_METADATA_TABLE;
+  }
+  function runSharedBarkWrite(operation) {
+    if (!normalizedBarkLibraryFile) return operation();
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = operation();
+      db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+  function markSharedBarkTarget(id) {
+    if (!normalizedBarkLibraryFile) return;
+    db.prepare(`INSERT OR REPLACE INTO ${barkMetadataTable}(key, value) VALUES (?, ?)`)
+      .run(`${BARK_LIBRARY_SOURCE_PREFIX}target:${Number(id)}`, '1000');
+  }
   const upsertTokenStatement = db.prepare(`
     INSERT INTO tokens(address, symbol, name, logo, payload, updated_at)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -712,10 +937,25 @@ export function createRobinhoodStore(filename, {
     isValidAddress,
     normalizeTransaction,
     setMeta(key, value) {
-      db.prepare('INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)').run(key, String(value));
+      const sharedKey = normalizedBarkLibraryFile ? sharedBarkMetadataKey(key) : null;
+      if (sharedKey) {
+        runSharedBarkWrite(() => {
+          db.prepare(`INSERT OR REPLACE INTO ${barkMetadataTable}(key, value) VALUES (?, ?)`)
+            .run(sharedKey, String(value));
+          db.prepare(`INSERT OR REPLACE INTO ${barkMetadataTable}(key, value) VALUES (?, ?)`)
+            .run(`${BARK_LIBRARY_SOURCE_PREFIX}${sharedKey}`, '1000');
+        });
+        return;
+      }
+      db.prepare('INSERT OR REPLACE INTO main.metadata(key, value) VALUES (?, ?)').run(key, String(value));
     },
     getMeta(key) {
-      return db.prepare('SELECT value FROM metadata WHERE key = ?').get(key)?.value ?? null;
+      const sharedKey = normalizedBarkLibraryFile ? sharedBarkMetadataKey(key) : null;
+      if (sharedKey) {
+        const shared = db.prepare(`SELECT value FROM ${barkMetadataTable} WHERE key = ?`).get(sharedKey)?.value;
+        if (shared !== undefined) return shared;
+      }
+      return db.prepare('SELECT value FROM main.metadata WHERE key = ?').get(key)?.value ?? null;
     },
     recordMonitorTokenAlert(tokenAddress, alertedAt = Math.floor(Date.now() / 1000)) {
       const address = normalizeAddress(tokenAddress);
@@ -1346,55 +1586,95 @@ export function createRobinhoodStore(filename, {
     },
     createMonitorBarkTarget(target) {
       const now = Number(target.updatedAt || Math.floor(Date.now() / 1000));
-      const result = db.prepare(`
-        INSERT INTO monitor_bark_targets(label, endpoint, enabled, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(
-        String(target.label || ''),
-        String(target.endpoint || ''),
-        target.enabled === false ? 0 : 1,
-        Number(target.createdAt || now),
-        now
-      );
+      const endpoint = String(target.endpoint || '');
+      const result = runSharedBarkWrite(() => {
+        const inserted = db.prepare(`
+          INSERT INTO ${barkTargetTable}(label, endpoint, enabled, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(
+          String(target.label || ''),
+          endpoint,
+          target.enabled === false ? 0 : 1,
+          Number(target.createdAt || now),
+          now
+        );
+        if (normalizedBarkLibraryFile) {
+          const id = Number(inserted.lastInsertRowid);
+          markSharedBarkTarget(id);
+          db.prepare(`DELETE FROM ${barkMetadataTable} WHERE key = ?`)
+            .run(`${BARK_LIBRARY_TOMBSTONE_PREFIX}${barkEndpointFingerprint(endpoint)}`);
+        }
+        return inserted;
+      });
       return monitorBarkTargetFromRow(
-        db.prepare('SELECT * FROM monitor_bark_targets WHERE id = ?').get(Number(result.lastInsertRowid))
+        db.prepare(`SELECT * FROM ${barkTargetTable} WHERE id = ?`).get(Number(result.lastInsertRowid))
       );
     },
     listMonitorBarkTargets() {
       return db
-        .prepare('SELECT * FROM monitor_bark_targets ORDER BY created_at, id')
+        .prepare(`SELECT * FROM ${barkTargetTable} ORDER BY created_at, id`)
         .all()
         .map(monitorBarkTargetFromRow);
     },
     getMonitorBarkTarget(id) {
       return monitorBarkTargetFromRow(
-        db.prepare('SELECT * FROM monitor_bark_targets WHERE id = ?').get(Number(id))
+        db.prepare(`SELECT * FROM ${barkTargetTable} WHERE id = ?`).get(Number(id))
       );
     },
     updateMonitorBarkTarget(id, patch = {}) {
-      const existing = db.prepare('SELECT * FROM monitor_bark_targets WHERE id = ?').get(Number(id));
-      if (!existing) return null;
-      db.prepare(`
-        UPDATE monitor_bark_targets
-        SET label = ?, endpoint = ?, enabled = ?, updated_at = ?,
-            last_success_at = ?, last_error_at = ?, last_error = ?
-        WHERE id = ?
-      `).run(
-        String(patch.label ?? existing.label),
-        String(patch.endpoint ?? existing.endpoint),
-        Object.hasOwn(patch, 'enabled') ? (patch.enabled ? 1 : 0) : existing.enabled,
-        Number(patch.updatedAt || Math.floor(Date.now() / 1000)),
-        Object.hasOwn(patch, 'lastSuccessAt') ? patch.lastSuccessAt : existing.last_success_at,
-        Object.hasOwn(patch, 'lastErrorAt') ? patch.lastErrorAt : existing.last_error_at,
-        String(patch.lastError ?? existing.last_error),
-        Number(id)
-      );
+      const updated = runSharedBarkWrite(() => {
+        const existing = db.prepare(`SELECT * FROM ${barkTargetTable} WHERE id = ?`).get(Number(id));
+        if (!existing) return false;
+        const endpoint = String(patch.endpoint ?? existing.endpoint);
+        const configurationChanged = ['label', 'endpoint', 'enabled']
+          .some((field) => Object.hasOwn(patch, field));
+        db.prepare(`
+          UPDATE ${barkTargetTable}
+          SET label = ?, endpoint = ?, enabled = ?, updated_at = ?,
+              last_success_at = ?, last_error_at = ?, last_error = ?
+          WHERE id = ?
+        `).run(
+          String(patch.label ?? existing.label),
+          endpoint,
+          Object.hasOwn(patch, 'enabled') ? (patch.enabled ? 1 : 0) : existing.enabled,
+          normalizedBarkLibraryFile && !configurationChanged
+            ? Number(existing.updated_at)
+            : Number(patch.updatedAt || Math.floor(Date.now() / 1000)),
+          Object.hasOwn(patch, 'lastSuccessAt') ? patch.lastSuccessAt : existing.last_success_at,
+          Object.hasOwn(patch, 'lastErrorAt') ? patch.lastErrorAt : existing.last_error_at,
+          String(patch.lastError ?? existing.last_error),
+          Number(id)
+        );
+        if (normalizedBarkLibraryFile) {
+          if (configurationChanged) {
+            markSharedBarkTarget(id);
+            db.prepare(`DELETE FROM ${barkMetadataTable} WHERE key = ?`)
+              .run(`${BARK_LIBRARY_TOMBSTONE_PREFIX}${barkEndpointFingerprint(endpoint)}`);
+            if (endpoint !== existing.endpoint) {
+              db.prepare(`INSERT OR REPLACE INTO ${barkMetadataTable}(key, value) VALUES (?, ?)`)
+                .run(`${BARK_LIBRARY_TOMBSTONE_PREFIX}${barkEndpointFingerprint(existing.endpoint)}`, new Date().toISOString());
+            }
+          }
+        }
+        return true;
+      });
+      if (!updated) return null;
       return monitorBarkTargetFromRow(
-        db.prepare('SELECT * FROM monitor_bark_targets WHERE id = ?').get(Number(id))
+        db.prepare(`SELECT * FROM ${barkTargetTable} WHERE id = ?`).get(Number(id))
       );
     },
     deleteMonitorBarkTarget(id) {
-      return db.prepare('DELETE FROM monitor_bark_targets WHERE id = ?').run(Number(id)).changes > 0;
+      return runSharedBarkWrite(() => {
+        const existing = db.prepare(`SELECT * FROM ${barkTargetTable} WHERE id = ?`).get(Number(id));
+        if (!existing) return false;
+        if (normalizedBarkLibraryFile) {
+          db.prepare(`INSERT OR REPLACE INTO ${barkMetadataTable}(key, value) VALUES (?, ?)`)
+            .run(`${BARK_LIBRARY_TOMBSTONE_PREFIX}${barkEndpointFingerprint(existing.endpoint)}`, new Date().toISOString());
+          db.prepare(`DELETE FROM ${barkMetadataTable} WHERE key = ?`)
+            .run(`${BARK_LIBRARY_SOURCE_PREFIX}target:${Number(id)}`);
+        }
+        return db.prepare(`DELETE FROM ${barkTargetTable} WHERE id = ?`).run(Number(id)).changes > 0;
+      });
     },
     upsertJob(job) {
       const updatedAt = Number(job.updatedAt || Math.floor(Date.now() / 1000));

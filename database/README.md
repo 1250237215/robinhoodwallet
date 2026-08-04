@@ -20,8 +20,11 @@ The snapshot does not contain Bark credentials or Bark preferences:
   verified absent from the resulting SQLite file bytes.
 
 The empty `monitor_bark_targets` table remains so the database can be restored
-without a schema migration. Bark targets must be configured again after a
-restore.
+without a schema migration. Current deployments store the global four-chain
+Bark target list, enabled state, sound, and volume in a separate private
+`bark.sqlite`; that file is not part of this repository. Restoring only this
+public Robinhood snapshot does not replace an existing `bark.sqlite`. A fresh
+deployment must configure Bark again through the monitor page.
 
 ## Verify and extract
 

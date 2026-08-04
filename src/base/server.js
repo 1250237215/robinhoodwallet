@@ -36,6 +36,10 @@ export const BASE_ADDRESS_CODEC = Object.freeze({
 function baseTuningEnvironment(env) {
   const mapped = {};
   for (const [key, value] of Object.entries(env || {})) {
+    if (key === 'BARK_DATA_FILE') {
+      mapped[key] = value;
+      continue;
+    }
     if (!key.startsWith('BASE_')) continue;
     mapped[`ROBINHOOD_${key.slice('BASE_'.length)}`] = value;
   }
@@ -105,7 +109,8 @@ export async function startBaseStandaloneServer(
     chainLabel: config.chainLabel,
     addressNormalizer: config.addressNormalizer,
     addressValidator: config.addressValidator,
-    transactionNormalizer: config.transactionNormalizer
+    transactionNormalizer: config.transactionNormalizer,
+    barkLibraryFile: config.barkDataFile
   });
   const activeDebotClient = debotClient || new RobinhoodDebotClient({
     chain: 'base',

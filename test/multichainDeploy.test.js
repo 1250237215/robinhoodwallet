@@ -127,6 +127,7 @@ test('chain systemd units bind independent ports, chain databases, and private e
   assert.doesNotMatch(solanaUnit, /HELIUS_API_KEY=/);
   assert.doesNotMatch(solanaUnit, /SOLANA_HELIUS_AUTH_HEADER=/);
   for (const unit of [robinhoodUnit, baseUnit, bscUnit, solanaUnit]) {
+    assert.match(unit, /Environment=BARK_DATA_FILE=\/var\/lib\/robinhood-radar\/bark\.sqlite/);
     assert.match(unit, /ExecStart=\/usr\/bin\/env node /);
     assert.doesNotMatch(unit, /ExecStart=\/usr\/local\/bin\/node/);
   }
@@ -158,6 +159,9 @@ test('environment templates expose production overrides without embedding creden
   assert.match(solanaEnv, /^SOLANA_HELIUS_AUTH_HEADER=$/m);
   assert.match(socialEnv, /^SOCIAL_BRIDGE_TOKEN=$/m);
   assert.match(socialEnv, /^SOCIAL_X_FAST_HANDLES=$/m);
+  for (const example of [robinhoodEnv, baseEnv, bscEnv, solanaEnv]) {
+    assert.match(example, /^BARK_DATA_FILE=\/var\/lib\/robinhood-radar\/bark\.sqlite$/m);
+  }
   for (const example of [robinhoodEnv, baseEnv, bscEnv, solanaEnv, socialEnv]) {
     assert.doesNotMatch(example, /217\.116\.171\.250|sslip\.io|api\.day\.app/);
     assert.doesNotMatch(example, /^\s*[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)=.+$/m);
@@ -186,7 +190,7 @@ test('release preparer builds a complete checksummed installer staging directory
   assert.match(releasePreparer, /the Git worktree is dirty/);
 });
 
-test('remote installer backs up, checks, deploys, and validates all six databases', () => {
+test('remote installer backs up, checks, deploys, and validates all seven databases', () => {
   assert.match(installer, /readonly services=\("robinhood-radar" "base-radar" "bsc-radar" "solana-radar"\)/);
   assert.match(installer, /readonly chains=\("robinhood" "base" "bsc" "solana"\)/);
   assert.match(installer, /declare -A ports=\(\[robinhood\]=18118 \[base\]=18119 \[bsc\]=18122 \[solana\]=18120\)/);
@@ -194,18 +198,24 @@ test('remote installer backs up, checks, deploys, and validates all six database
   assert.match(installer, /database_backup_path/);
   assert.match(installer, /social_database_backup_path/);
   assert.match(installer, /evm_wallet_database_backup_path/);
+  assert.match(installer, /bark_database_backup_path/);
   assert.match(installer, /PRAGMA wal_checkpoint\(TRUNCATE\)/);
   assert.match(installer, /backup_database_file "\$database" "\$database_backup"/);
   assert.match(installer, /backup_database_file "\$social_database" "\$social_database_backup"/);
   assert.match(installer, /backup_database_file "\$evm_wallet_database" "\$evm_wallet_database_backup"/);
+  assert.match(installer, /backup_database_file "\$bark_database" "\$bark_database_backup"/);
   assert.match(installer, /restore_database_file "\$backup" "\$database" robinhood-radar robinhood-radar/);
   assert.match(installer, /restore_database_file "\$social_backup" "\$social_database" robinhood-radar robinhood-radar/);
   assert.match(installer, /restore_database_file "\$evm_wallet_backup" "\$evm_wallet_database" robinhood-radar robinhood-radar/);
+  assert.match(installer, /restore_database_file "\$bark_backup" "\$bark_database" robinhood-radar robinhood-radar/);
   assert.match(installer, /rm -f "\$database-wal" "\$database-shm"/);
   assert.match(installer, /api\/social\?postLimit=1/);
   assert.match(installer, /quick_check_database "\$\(social_database_path\)"/);
   assert.match(installer, /quick_check_database "\$\(evm_wallet_database_path\)"/);
+  assert.match(installer, /quick_check_database "\$\(bark_database_path\)"/);
   assert.match(installer, /evm_wallet_database_backup=\$\(evm_wallet_database_backup_path\)/);
+  assert.match(installer, /bark_database_backup=\$\(bark_database_backup_path\)/);
+  assert.match(installer, /Bark configuration does not match the other chain services/);
   assert.match(installer, /restore_optional_file/);
   assert.match(installer, /verify_release_manifest "\$staging_dir"/);
   assert.match(installer, /sha256sum --check --strict SHA256SUMS/);
@@ -327,7 +337,7 @@ test('SQLite deployment backup and restore preserve committed WAL rows for every
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
-  for (const name of ['robinhood', 'base', 'bsc', 'solana', 'social', 'evm-wallets']) {
+  for (const name of ['robinhood', 'base', 'bsc', 'solana', 'social', 'evm-wallets', 'bark']) {
     const livePath = path.join(directory, `${name}.sqlite`);
     const mainFileOnlyPath = path.join(directory, `${name}-main-only.sqlite`);
     const backupPath = path.join(directory, `${name}-backup.sqlite`);

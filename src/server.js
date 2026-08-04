@@ -77,7 +77,10 @@ function summaryView(params) {
 
 export function createDefaultRobinhoodService(env = process.env, overrides = {}) {
   const config = overrides.config || createRobinhoodConfig(env);
-  const store = overrides.store || createRobinhoodStore(config.dataFile);
+  const store = overrides.store || createRobinhoodStore(config.dataFile, {
+    walletLibraryFile: config.walletDataFile,
+    barkLibraryFile: config.barkDataFile
+  });
   const activeDebotClient = overrides.debotClient || new RobinhoodDebotClient({ timeoutMs: config.requestTimeoutMs });
   const activeHolderClient = overrides.holderClient || new RobinhoodHolderClient({
     baseUrl: config.blockscoutApiUrl,

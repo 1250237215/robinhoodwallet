@@ -108,6 +108,7 @@ export function createSolanaConfig(env = process.env) {
     debotAddressRoot: SOLANA_CHAIN.debotAddressRoot,
     rpcUrl: env.SOLANA_RPC_URL || SOLANA_CHAIN.rpcUrl,
     dataFile: env.SOLANA_DATA_FILE || new URL('../../data/solana.sqlite', import.meta.url).pathname,
+    barkDataFile: String(env.BARK_DATA_FILE || '').trim(),
     requestTimeoutMs: boundedNumber(env.SOLANA_REQUEST_TIMEOUT_MS, 20_000, 1_000, 120_000),
     rpcMaxRetries: boundedNumber(env.SOLANA_RPC_MAX_RETRIES, 3, 0, 12),
     rpcRetryDelayMs: boundedNumber(env.SOLANA_RPC_RETRY_DELAY_MS, 500, 0, 60_000),
@@ -411,6 +412,7 @@ export class SolanaRuntimeMonitor {
   }
 
   getSnapshot({ eventLimit = 100 } = {}) {
+    this.#syncBarkSettings();
     const health = this.getHealth();
     const status = this.closed
       ? 'stopped'
@@ -489,6 +491,7 @@ export class SolanaRuntimeMonitor {
 
   testBarkTarget(id) {
     if (!this.barkNotifier?.testTarget) throw new Error('Bark notifications are unavailable');
+    this.#syncBarkSettings();
     return this.barkNotifier.testTarget(id, {
       sound: this.settings.barkSound,
       volume: this.settings.barkVolume
@@ -536,6 +539,7 @@ export class SolanaRuntimeMonitor {
         insertedEvents.push(event);
         this.#emit('event', event);
         if (event.barkAlert) {
+          this.#syncBarkSettings();
           void this.barkNotifier?.notifyWalletEvent?.({
             event,
             sound: this.settings.barkSound,
@@ -561,6 +565,7 @@ export class SolanaRuntimeMonitor {
   }
 
   #reconcileClusterAlerts() {
+    this.#syncBarkSettings();
     for (const cluster of this.getClusters()) {
       if (!cluster.triggered) continue;
       const alert = this.store.recordMonitorTokenAlert(cluster.tokenAddress, Math.floor(this.now() / 1_000));
@@ -573,6 +578,22 @@ export class SolanaRuntimeMonitor {
         volume: this.settings.barkVolume
       }).catch(() => {});
     }
+  }
+
+  #syncBarkSettings() {
+    this.settings.barkSound = stringSetting(
+      this.store,
+      SETTINGS_KEYS.barkSound,
+      'alarm',
+      BARK_SOUNDS
+    );
+    this.settings.barkVolume = integerSetting(
+      this.store,
+      SETTINGS_KEYS.barkVolume,
+      5,
+      0,
+      10
+    );
   }
 
   #queueEnrichment(tokenAddress, eventId, event) {
@@ -718,7 +739,8 @@ export function createSolanaRuntime(env = process.env, overrides = {}) {
     chainLabel: 'Solana',
     addressNormalizer: normalizeOptionalAddress,
     addressValidator: isSolanaAddress,
-    transactionNormalizer: normalizeTransaction
+    transactionNormalizer: normalizeTransaction,
+    barkLibraryFile: config.barkDataFile
   });
   const debotClient = overrides.debotClient || new RobinhoodDebotClient({
     chain: 'solana',

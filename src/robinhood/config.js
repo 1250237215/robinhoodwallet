@@ -41,6 +41,7 @@ export function createRobinhoodConfig(env = process.env) {
     blockscoutApiUrl: env.ROBINHOOD_BLOCKSCOUT_API_URL || ROBINHOOD_CHAIN.blockscoutApiUrl,
     dataFile: env.ROBINHOOD_DATA_FILE || new URL('../../data/robinhood.sqlite', import.meta.url).pathname,
     walletDataFile: String(env.EVM_WALLET_DATA_FILE || '').trim(),
+    barkDataFile: String(env.BARK_DATA_FILE || env.ROBINHOOD_BARK_DATA_FILE || '').trim(),
     defaultWinnerMultiple: boundedNumber(env.ROBINHOOD_WINNER_MULTIPLE, 10, 1, 1000),
     minLiquidityUsd: boundedNumber(env.ROBINHOOD_MIN_LIQUIDITY_USD, 50_000, 0, 1_000_000_000),
     minEffectiveWallets: boundedNumber(env.ROBINHOOD_MIN_WALLETS, 100, 1, 1_000_000),
