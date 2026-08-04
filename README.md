@@ -25,6 +25,8 @@ chain-specific. Base and Solana keep independent address libraries.
 - 四链 Holder 分析、人工金狗、钱包命中次数与买币频率排序
 - 实时市值、币龄，以及 Robinhood 专属的流动性、持仓和合约风险补全
 - 通过本地 Chrome 扩展同步已登录 DeBot 的个人社媒监控名单
+- Telegram 只读消息流：保留原文并异步显示中文翻译；可访问的频道目录会自动
+  排除明显成人/受限聊天，勾选状态在保存前不会被轮询覆盖
 
 本地体验 Robinhood 功能需要 Node.js 22.13.0 或更高版本：
 
@@ -95,6 +97,18 @@ The Robinhood process serves the UI and the single shared social API. A reverse
 proxy routes `/api/robinhood`, `/api/base`, `/api/bsc`, and `/api/solana` to
 ports `18118`, `18119`, `18122`, and `18120` respectively. Switching chains
 never changes or duplicates `/api/social`.
+
+The optional Telegram viewer runs as a separate read-only service on
+`127.0.0.1:18123` and is routed under `/robinhood-radar/telegram/`. Its source is
+in [`telegram/`](telegram/), while the Telethon login session, API credentials,
+selected-chat configuration, avatars, and downloaded media remain only in
+`/var/lib/robinhood-radar/telegram`. The release archive deliberately excludes
+those runtime files. Translation is best-effort and asynchronous: the original
+message is available immediately, and a `translated_text` field is filled in
+when the public Google endpoint responds. A dedicated real-time translation lane
+keeps new messages from waiting behind historical backfill. Chat filtering uses
+adult/restriction metadata, conservative title/username rules, and the optional
+`TG_VIEWER_BLOCKED_CHAT_IDS` setting in `telegram.env`.
 
 ## Main configuration
 

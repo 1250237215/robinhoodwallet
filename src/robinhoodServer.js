@@ -1,4 +1,5 @@
 import http from 'node:http';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -57,6 +58,73 @@ function sendJson(res, statusCode, body) {
 
 function methodNotAllowed(methods) {
   throw new HttpError(405, 'Method not allowed', 'METHOD_NOT_ALLOWED', { allow: methods.join(', ') });
+}
+
+function internalTokenMatches(req, expectedToken) {
+  const expected = Buffer.from(String(expectedToken || ''));
+  const authorization = String(req.headers.authorization || '');
+  const provided = Buffer.from(authorization.startsWith('Bearer ') ? authorization.slice(7) : '');
+  return expected.length >= 32
+    && provided.length === expected.length
+    && crypto.timingSafeEqual(provided, expected);
+}
+
+function cleanInternalText(value, name, maxLength) {
+  if (typeof value !== 'string') {
+    throw new HttpError(400, `${name} must be a string`, 'INVALID_TELEGRAM_BARK_PAYLOAD');
+  }
+  const normalized = value.trim();
+  if (!normalized || normalized.length > maxLength) {
+    throw new HttpError(400, `${name} is invalid`, 'INVALID_TELEGRAM_BARK_PAYLOAD');
+  }
+  return normalized;
+}
+
+function telegramBarkPayload(body) {
+  const chatId = Number(body.chatId);
+  const messageId = Number(body.messageId);
+  const senderId = Number(body.senderId);
+  if (![chatId, messageId, senderId].every(Number.isSafeInteger)) {
+    throw new HttpError(400, 'Telegram identifiers must be integers', 'INVALID_TELEGRAM_BARK_PAYLOAD');
+  }
+  if (!Array.isArray(body.contractAddresses) || !body.contractAddresses.length || body.contractAddresses.length > 8) {
+    throw new HttpError(400, 'contractAddresses must contain 1 to 8 entries', 'INVALID_TELEGRAM_BARK_PAYLOAD');
+  }
+  const contractAddresses = [...new Set(body.contractAddresses.map((value) => (
+    cleanInternalText(value, 'contract address', 100)
+  )))];
+  const messageUrl = body.messageUrl === undefined || body.messageUrl === ''
+    ? ''
+    : cleanInternalText(body.messageUrl, 'messageUrl', 500);
+  if (messageUrl && !/^https:\/\/t\.me\//i.test(messageUrl)) {
+    throw new HttpError(400, 'messageUrl must be a Telegram URL', 'INVALID_TELEGRAM_BARK_PAYLOAD');
+  }
+  return {
+    chatId,
+    messageId,
+    senderId,
+    streamId: cleanInternalText(body.streamId, 'streamId', 160),
+    senderName: cleanInternalText(body.senderName, 'senderName', 120),
+    chatName: cleanInternalText(body.chatName, 'chatName', 120),
+    text: typeof body.text === 'string' ? body.text.slice(0, 2_000) : '',
+    contractAddresses,
+    messageUrl
+  };
+}
+
+async function handleInternalTelegramBark(req, res, url, monitor, token) {
+  if (url.pathname !== '/internal/telegram-bark') return false;
+  if (req.method !== 'POST') methodNotAllowed(['POST']);
+  if (!internalTokenMatches(req, token)) {
+    throw new HttpError(401, 'Unauthorized', 'UNAUTHORIZED');
+  }
+  if (!monitor?.notifyTelegramMessage) {
+    throw new HttpError(503, 'Bark notifications are unavailable', 'BARK_UNAVAILABLE');
+  }
+  const payload = telegramBarkPayload(await readJson(req, 16 * 1024));
+  const delivery = await monitor.notifyTelegramMessage(payload);
+  sendJson(res, 200, { ok: true, delivery });
+  return true;
 }
 
 function summaryView(params) {
@@ -680,6 +748,7 @@ export function createRobinhoodStandaloneServer({
   apiPrefix = '/api/robinhood',
   addressCodec = DEFAULT_ADDRESS_CODEC,
   extraApiHandler = null,
+  telegramBarkToken = '',
   servePublic = true
 }) {
   const normalizedApiPrefix = `/${String(apiPrefix || '/api/robinhood').replace(/^\/+|\/+$/g, '')}`;
@@ -689,6 +758,7 @@ export function createRobinhoodStandaloneServer({
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
+      if (await handleInternalTelegramBark(req, res, url, monitor, telegramBarkToken)) return;
       if (typeof extraApiHandler === 'function' && await extraApiHandler(req, res, url)) return;
       if (socialApiHandler && await socialApiHandler(req, res, url)) return;
       if (url.pathname === normalizedApiPrefix || url.pathname.startsWith(`${normalizedApiPrefix}/`)) {
@@ -868,6 +938,7 @@ export async function startRobinhoodStandaloneServer(
     monitor,
     socialService,
     socialBridgeToken: socialConfig.bridgeToken,
+    telegramBarkToken: env.TELEGRAM_BARK_INTERNAL_TOKEN || '',
     publicDir: env.ROBINHOOD_PUBLIC_DIR || path.resolve('public')
   });
   const host = env.HOST || '127.0.0.1';

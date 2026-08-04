@@ -264,6 +264,14 @@ try {
     path.join(temporaryDirectory, 'install-remote.sh'),
     0o755
   );
+  copyFile(
+    path.join(repoRoot, 'deploy', 'telegram-viewer.service'),
+    path.join(temporaryDirectory, 'telegram-viewer.service')
+  );
+  copyFile(
+    path.join(repoRoot, 'deploy', 'telegram.env.example'),
+    path.join(temporaryDirectory, 'telegram.env.example')
+  );
   if (options.caddy) {
     copyFile(options.caddy, path.join(temporaryDirectory, 'Caddyfile'));
   }
@@ -271,6 +279,11 @@ try {
   createPublicArchive(
     path.join(repoRoot, 'public'),
     path.join(temporaryDirectory, 'public.tar.gz'),
+    sourceDateEpoch
+  );
+  createPublicArchive(
+    path.join(repoRoot, 'telegram'),
+    path.join(temporaryDirectory, 'telegram.tar.gz'),
     sourceDateEpoch
   );
   fs.writeFileSync(

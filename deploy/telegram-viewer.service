@@ -1,0 +1,30 @@
+[Unit]
+Description=1874catch Telegram Read-Only Viewer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=robinhood-radar
+Group=robinhood-radar
+WorkingDirectory=/opt/robinhood-radar/telegram
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/robinhood-radar/telegram.env
+Environment=TG_RUNTIME_DIR=/var/lib/robinhood-radar/telegram
+Environment=TG_VIEWER_RUNTIME_DIR=/var/lib/robinhood-radar/telegram
+Environment=TG_VIEWER_PUBLIC_PREFIX=/robinhood-radar/telegram
+Environment=TG_VIEWER_NO_BROWSER=1
+Environment=TG_BARK_INTERNAL_URL=http://127.0.0.1:18118/internal/telegram-bark
+ExecStart=/opt/robinhood-radar/telegram/.venv/bin/python /opt/robinhood-radar/telegram/viewer.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/robinhood-radar/telegram
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

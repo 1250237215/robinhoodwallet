@@ -103,6 +103,13 @@
 		}
 	}
 
+	handle_path /robinhood-radar/telegram/* {
+		reverse_proxy 127.0.0.1:18123 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up Host {host}
+		}
+	}
+
 	handle /robinhood-radar/internal/* {
 		respond "Not found" 404
 	}

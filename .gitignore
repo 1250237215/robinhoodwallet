@@ -16,6 +16,17 @@ storage-state*.json
 cookies*.json
 bridge/debot-social-bridge/config.local.js
 
+# Telegram viewer runtime (credentials, session, private media and local venv)
+telegram/.venv/
+telegram/config.json
+telegram/viewer_config.json
+telegram/proxy.json
+telegram/tg_forwarder.session*
+telegram/forwarder.log
+telegram/avatars/
+telegram/media/
+telegram/*.sqlite*
+
 *.sqlite
 *.sqlite-*
 *.db

@@ -30,6 +30,73 @@ async function withServer(service, run, monitor = null) {
   }
 }
 
+test('internal Telegram Bark endpoint requires its bearer token and validates payloads', async () => {
+  const received = [];
+  const tokenValue = 't'.repeat(48);
+  const monitor = {
+    async notifyTelegramMessage(payload) {
+      received.push(payload);
+      return { attempted: 1, sent: 1, failed: 0 };
+    }
+  };
+  const server = createRobinhoodStandaloneServer({
+    service: {},
+    monitor,
+    telegramBarkToken: tokenValue,
+    servePublic: false
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    const payload = {
+      chatId: -1001,
+      messageId: 7,
+      senderId: 42,
+      streamId: '-1001:7',
+      senderName: 'Alice',
+      chatName: 'LazyCat FNF',
+      text: 'new CA',
+      contractAddresses: ['0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+      messageUrl: 'https://t.me/lazycat/7'
+    };
+    const unauthorized = await fetch(`${baseUrl}/internal/telegram-bark`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    assert.equal(unauthorized.status, 401);
+    assert.equal(received.length, 0);
+
+    const invalid = await fetch(`${baseUrl}/internal/telegram-bark`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${tokenValue}`,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({ ...payload, contractAddresses: [] })
+    });
+    assert.equal(invalid.status, 400);
+
+    const response = await fetch(`${baseUrl}/internal/telegram-bark`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${tokenValue}`,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      ok: true,
+      delivery: { attempted: 1, sent: 1, failed: 0 }
+    });
+    assert.equal(received.length, 1);
+    assert.equal(received[0].streamId, '-1001:7');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('standalone deployment server validates filters without legacy Base dependencies', () => {
   const filters = parseDashboardFilters(new URLSearchParams('multiple=50&minEntryUsd=325&minLiquidityUsd=75000&minWallets=200&tab=unrealized'));
   assert.deepEqual(filters, { multiple: 50, minLiquidityUsd: 75_000, minWallets: 200, tab: 'unrealized', minEntryUsd: 325 });

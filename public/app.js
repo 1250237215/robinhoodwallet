@@ -2355,6 +2355,177 @@ function visibleSocialPosts() {
   });
 }
 
+function telegramSocialSnapshot() {
+  const snapshot = window.__telegramSocialSnapshot;
+  return snapshot && typeof snapshot === 'object' ? snapshot : {};
+}
+
+function telegramSocialMessageKey(message) {
+  const streamId = message?.stream_id ?? message?.streamId;
+  if (streamId !== null && streamId !== undefined && streamId !== '') return String(streamId);
+  const chatId = message?.chat_id ?? message?.chat?.id;
+  const messageId = message?.id;
+  return chatId !== null && chatId !== undefined && messageId !== null && messageId !== undefined
+    ? `${chatId}:${messageId}`
+    : String(messageId ?? '');
+}
+
+function telegramSocialAssetUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (!raw.startsWith('/')) return safeHttpUrl(raw);
+  try {
+    const viewerAssetPath = /^\/(?:avatars|media)\//.test(raw)
+      ? `${/^\/robinhood-radar(?:\/|$)/.test(window.location.pathname) ? '/robinhood-radar' : ''}/telegram${raw}`
+      : raw;
+    const url = new URL(viewerAssetPath, window.location.origin);
+    return url.origin === window.location.origin ? url.href : '';
+  } catch {
+    return '';
+  }
+}
+
+function visibleTelegramSocialMessages() {
+  const messages = Array.isArray(telegramSocialSnapshot().messages)
+    ? telegramSocialSnapshot().messages
+    : [];
+  const query = state.socialSearchQuery.trim().toLowerCase();
+  return messages.filter((message) => {
+    if (!telegramSocialMessageKey(message)) return false;
+    if (message?.adult === true || message?.blocked === true || message?.chat?.adult === true || message?.chat?.blocked === true) {
+      return false;
+    }
+    if (!query) return true;
+    const chat = message?.chat || {};
+    const reply = message?.reply_preview || message?.replyPreview || {};
+    return [
+      message?.text,
+      message?.translated_text,
+      message?.translatedText,
+      message?.sender,
+      chat?.name,
+      chat?.kind,
+      chat?.username,
+      reply?.text,
+      reply?.translated_text,
+      reply?.translatedText,
+      reply?.sender,
+      message?.media?.kind,
+      reply?.media?.kind
+    ].map((value) => String(value || '').toLowerCase()).join('\n').includes(query);
+  });
+}
+
+function telegramSocialMediaMarkup(media, { context = false } = {}) {
+  if (!media || typeof media !== 'object') return '';
+  const mediaUrl = telegramSocialAssetUrl(media.preview_url ?? media.previewUrl);
+  if (!mediaUrl) return '';
+  const kind = String(media.kind || '媒体');
+  const declaredType = String(media.preview_type ?? media.previewType ?? '').toLowerCase();
+  const sourcePath = mediaUrl.split('?', 1)[0].toLowerCase();
+  const isVideo = declaredType.includes('video') || /\.(?:webm|mp4|mov|m4v)$/.test(sourcePath);
+  const isSticker = /贴纸|表情包|sticker/i.test(kind) || media.sticker === true;
+  const fallback = `<a class="social-media-error" href="${escapeHtml(mediaUrl)}" target="_blank" rel="noopener noreferrer"><i data-lucide="image-off" aria-hidden="true"></i><span>媒体加载失败，单独打开</span></a>`;
+  const element = isVideo
+    ? `<video src="${escapeHtml(mediaUrl)}"${isSticker ? ' autoplay loop muted' : ' controls'} preload="metadata" playsinline aria-label="${escapeHtml(kind)}"></video>${fallback}`
+    : `<a class="social-media-preview" href="${escapeHtml(mediaUrl)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(kind)}"><img src="${escapeHtml(mediaUrl)}" alt="${escapeHtml(kind)}" loading="lazy" decoding="async" /></a>`;
+  return `<div class="social-post-media${context ? ' is-context' : ''}" data-media-count="1"><figure class="social-media-item${isSticker ? ' is-telegram-sticker' : ''}" data-social-media-item data-media-kind="${isVideo ? 'video' : 'image'}">${element}${isVideo ? '' : fallback}</figure></div>`;
+}
+
+function telegramSocialReplyMarkup(message) {
+  const reply = message?.reply_preview || message?.replyPreview;
+  const replyId = message?.reply_to ?? message?.replyTo ?? message?.reply_to_msg_id;
+  if ((!reply || typeof reply !== 'object') && !replyId) return '';
+  const value = reply && typeof reply === 'object' ? reply : {};
+  const sender = String(value.sender || value.author || '原消息');
+  const content = String(value.text || value.raw_text || (replyId ? '正在读取原消息' : '')).trim();
+  const translated = String(value.translated_text || value.translatedText || '').trim();
+  const mediaMarkup = telegramSocialMediaMarkup(value.media, { context: true });
+  return `
+    <aside class="social-reply-context" data-reference-kind="telegram-reply">
+      <div class="social-reply-target">
+        <i data-lucide="message-circle-reply" aria-hidden="true"></i>
+        <span>回复</span>
+        <strong>${escapeHtml(sender)}</strong>
+      </div>
+      ${content ? `<div class="social-reply-original"><p>${escapeHtml(content)}</p></div>` : ''}
+      ${translated && translated !== content ? `<div class="social-reply-translation"><b>中文</b><p>${escapeHtml(translated)}</p></div>` : ''}
+      ${mediaMarkup}
+    </aside>
+  `;
+}
+
+function telegramSocialPostMarkup(message) {
+  const chat = message?.chat && typeof message.chat === 'object' ? message.chat : {};
+  const chatName = String(chat.name || message?.sender || 'Telegram');
+  const username = String(chat.username || '').replace(/^@/, '');
+  const profileUrl = username ? safeHttpUrl(`https://t.me/${encodeURIComponent(username)}`) : '';
+  const messageId = Number(message?.id);
+  const postUrl = profileUrl && Number.isSafeInteger(messageId) && messageId > 0
+    ? safeHttpUrl(`https://t.me/${encodeURIComponent(username)}/${messageId}`)
+    : '';
+  const avatar = chat.avatar && typeof chat.avatar === 'object' ? chat.avatar : message?.avatar || {};
+  const avatarUrl = telegramSocialAssetUrl(avatar.url);
+  const initials = String(avatar.initials || chatName).replace(/^@/, '').slice(0, 2).toUpperCase() || 'TG';
+  const chatKind = String(chat.kind || 'Telegram');
+  const sourceLabel = chatKind.includes('频道') ? 'Telegram 频道' : chatKind.includes('群') ? 'Telegram 群组' : 'Telegram';
+  const sender = String(message?.sender || '').trim();
+  const senderLabel = sender && sender !== chatName ? sender : '';
+  const mediaMarkup = telegramSocialMediaMarkup(message?.media);
+  const rawText = String(message?.text || '').trim();
+  const content = mediaMarkup && /^\[(?:图片|贴纸|表情包|视频|媒体)\]$/.test(rawText) ? '' : rawText;
+  const translated = String(message?.translated_text || message?.translatedText || '').trim();
+  const translationMarkup = translated && translated !== rawText
+    ? `<div class="social-post-translation is-telegram"><b>中文翻译</b><p>${escapeHtml(translated)}</p></div>`
+    : '';
+  const publishedAt = message?.date || telegramSocialSnapshot().updated_at || Date.now();
+  const key = telegramSocialMessageKey(message);
+  return `
+    <article class="social-post" data-source="telegram" data-kind="post" data-social-message-key="${escapeHtml(key)}">
+      <div class="social-avatar">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" loading="lazy" />` : escapeHtml(initials)}</div>
+      <div class="social-post-copy">
+        <header class="social-post-head">
+          <div class="social-post-author">
+            <div class="social-post-author-line">
+              <strong>${escapeHtml(chatName)}</strong>
+              ${profileUrl ? `<a href="${escapeHtml(profileUrl)}" target="_blank" rel="noopener noreferrer">@${escapeHtml(username)}</a>` : '<span class="social-post-platform">Telegram</span>'}
+            </div>
+            <div class="social-post-meta">
+              <span class="social-post-kind">发帖</span>
+              <span>${escapeHtml(sourceLabel)}</span>
+              ${senderLabel ? `<span>${escapeHtml(senderLabel)}</span>` : ''}
+            </div>
+          </div>
+          <div class="social-post-head-tools">
+            <time class="social-post-time" datetime="${escapeHtml(String(publishedAt))}" data-live-timestamp="${escapeHtml(String(publishedAt))}" title="${escapeHtml(formatDateTime(publishedAt))}" aria-live="off">${escapeHtml(formatMonitorAge(publishedAt))}</time>
+          </div>
+        </header>
+        ${telegramSocialReplyMarkup(message)}
+        ${content ? `<p class="social-post-content">${escapeHtml(content)}</p>` : ''}
+        ${translationMarkup}
+        ${mediaMarkup}
+        ${postUrl ? `<footer class="social-post-footer"><a href="${escapeHtml(postUrl)}" target="_blank" rel="noopener noreferrer">查看原文<i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a></footer>` : ''}
+      </div>
+    </article>
+  `;
+}
+
+function socialFeedItems() {
+  const socialItems = visibleSocialPosts().map((post) => ({
+    type: 'social',
+    timestamp: monitorTimestampMs(post.publishedAt) ?? 0,
+    post
+  }));
+  const telegramItems = visibleTelegramSocialMessages().map((message) => ({
+    type: 'telegram',
+    timestamp: monitorTimestampMs(message.date) ?? 0,
+    message
+  }));
+  return [...socialItems, ...telegramItems]
+    .sort((left, right) => right.timestamp - left.timestamp)
+    .slice(0, 500);
+}
+
 function renderSocialBridgeStatus() {
   const bridge = state.socialBridge || {};
   const reportedHeartbeatAgeMs = finiteNumber(bridge.heartbeatAgeMs);
@@ -2417,7 +2588,13 @@ function renderSocialBridgeStatus() {
       : state.socialTransport === 'reconnecting'
         ? ' · 正在恢复实时流'
         : streamConnected ? ' · SSE 已连接' : '';
-  elements.socialMonitorSummary.textContent = `${formatInteger(visibleSocialPosts().length)} 条个人动态 · ${formatInteger(state.socialWatchlist.length)} 个账号${lastSeen}${transport}`;
+  const telegramChannelCount = Array.isArray(telegramSocialSnapshot().selected_chat_ids)
+    ? new Set(telegramSocialSnapshot().selected_chat_ids.map(String)).size
+    : 0;
+  const telegramSummary = telegramChannelCount
+    ? ` · ${formatInteger(telegramChannelCount)} 个 Telegram 频道`
+    : '';
+  elements.socialMonitorSummary.textContent = `${formatInteger(socialFeedItems().length)} 条个人动态 · ${formatInteger(state.socialWatchlist.length)} 个 X 账号${telegramSummary}${lastSeen}${transport}`;
   elements.socialPairingRow.hidden = !SOCIAL_WRITE_CONTEXT_ALLOWED
     || (state.socialExtensionReady && state.socialExtensionWritable);
 }
@@ -2470,13 +2647,15 @@ function renderSocialWatchlist() {
 }
 
 function renderSocialFeed() {
-  const posts = visibleSocialPosts();
-  if (!posts.length) {
+  const items = socialFeedItems();
+  if (!items.length) {
     elements.socialFeed.innerHTML = '<div class="monitor-empty-state"><i data-lucide="messages-square" aria-hidden="true"></i><strong>暂无个人监控动态</strong><span>等待名单中的账号产生新动态。</span></div>';
     refreshIcons(elements.socialFeed);
     return;
   }
-  elements.socialFeed.innerHTML = posts.map((post) => {
+  elements.socialFeed.innerHTML = items.map((item) => {
+    if (item.type === 'telegram') return telegramSocialPostMarkup(item.message);
+    const post = item.post;
     const author = post.author || {};
     const watchEntry = socialWatchEntryForPost(post);
     const watchEntryId = Number(watchEntry?.id);
@@ -6964,6 +7143,12 @@ elements.socialFeed.addEventListener('click', (event) => {
   const editButton = event.target.closest('[data-social-feed-note-edit]');
   if (!editButton) return;
   openSocialEventEditor(editButton.dataset.socialFeedNoteEdit, { noteOnly: true });
+});
+
+window.addEventListener('telegram-social-update', () => {
+  if (state.activeTab !== 'monitor') return;
+  renderSocialBridgeStatus();
+  renderSocialFeed();
 });
 
 window.addEventListener('message', (event) => {

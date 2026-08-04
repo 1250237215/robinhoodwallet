@@ -79,7 +79,10 @@ test('release staging is complete, checksummed, and reproducible', (t) => {
     'social.env.example',
     'solana-radar.service',
     'solana-server.mjs',
-    'solana.env.example'
+    'solana.env.example',
+    'telegram-viewer.service',
+    'telegram.env.example',
+    'telegram.tar.gz'
   ];
   for (const name of required) {
     assert.ok(fs.statSync(path.join(first, name)).isFile(), `release is missing ${name}`);
@@ -100,4 +103,14 @@ test('release staging is complete, checksummed, and reproducible', (t) => {
   assert.ok(archiveEntries.includes('index.html'));
   assert.ok(archiveEntries.includes('app.js'));
   assert.equal(archiveEntries.some((name) => name.startsWith('public/')), false);
+
+  const telegramArchive = spawnSync('tar', ['-tzf', path.join(first, 'telegram.tar.gz')], {
+    encoding: 'utf8'
+  });
+  assert.equal(telegramArchive.status, 0, telegramArchive.stderr);
+  const telegramEntries = telegramArchive.stdout.trim().split('\n');
+  assert.ok(telegramEntries.includes('viewer.py'));
+  assert.ok(telegramEntries.includes('forwarder.py'));
+  assert.ok(telegramEntries.includes('web/app.js'));
+  assert.equal(telegramEntries.some((name) => /(?:\.session|config\.json|proxy\.json|\.venv)/.test(name)), false);
 });

@@ -396,6 +396,81 @@
           </div>
         </section>
 
+        <section class="telegram-monitor-panel" id="telegram-monitor-panel" aria-labelledby="telegram-monitor-title">
+          <header class="monitor-panel-head telegram-monitor-head">
+            <div>
+              <div class="telegram-monitor-title-line">
+                <h3 id="telegram-monitor-title">Telegram 实时群聊</h3>
+                <span class="telegram-connection-badge" id="telegram-connection-badge" data-state="loading">
+                  <span aria-hidden="true"></span>
+                  <strong id="telegram-connection-label">正在连接</strong>
+                </span>
+              </div>
+              <p id="telegram-monitor-summary">正在读取 LazyCat FNF 群组消息</p>
+            </div>
+            <div class="telegram-head-actions">
+              <button class="inline-icon-button" id="telegram-ca-watch-button" type="button" title="设置 Telegram CA Bark 推送" aria-label="设置 Telegram CA Bark 推送" aria-expanded="false">
+                <i data-lucide="bell-ring" aria-hidden="true"></i>
+              </button>
+              <button class="inline-icon-button" id="telegram-refresh-button" type="button" title="刷新 Telegram 消息" aria-label="刷新 Telegram 消息">
+                <i data-lucide="refresh-cw" aria-hidden="true"></i>
+              </button>
+            </div>
+          </header>
+
+          <div class="telegram-chat-bar">
+            <div class="telegram-avatar telegram-source-avatar" id="telegram-source-avatar" aria-hidden="true">TG</div>
+            <div class="telegram-source-copy">
+              <strong id="telegram-source-name">LazyCat FNF</strong>
+              <span><span id="telegram-source-kind">群组</span> · <span id="telegram-message-count">0 条消息</span></span>
+            </div>
+            <time id="telegram-last-updated">等待同步</time>
+          </div>
+
+          <section class="telegram-ca-watch" id="telegram-ca-watch" aria-labelledby="telegram-ca-watch-title" hidden>
+            <header>
+              <div>
+                <div class="telegram-ca-watch-title-line">
+                  <h4 id="telegram-ca-watch-title">CA Bark 推送</h4>
+                  <span class="telegram-ca-watch-status" id="telegram-ca-watch-status" data-state="disabled">已关闭</span>
+                </div>
+                <p id="telegram-ca-watch-summary">正在读取近期发言人</p>
+              </div>
+              <label class="telegram-ca-watch-enabled">
+                <input id="telegram-ca-watch-enabled" type="checkbox" />
+                <span>启用</span>
+              </label>
+            </header>
+            <div class="telegram-ca-watch-toolbar">
+              <label class="telegram-ca-watch-search">
+                <i data-lucide="search" aria-hidden="true"></i>
+                <span class="sr-only">搜索 Telegram 发言人</span>
+                <input id="telegram-ca-watch-search" type="search" autocomplete="off" placeholder="搜索发言人" />
+              </label>
+              <label class="telegram-ca-watch-select-all">
+                <input id="telegram-ca-watch-select-all" type="checkbox" />
+                <span>全选</span>
+              </label>
+            </div>
+            <div class="telegram-ca-watch-list" id="telegram-ca-watch-list" aria-live="polite"></div>
+            <footer>
+              <span id="telegram-ca-watch-count">已选 0 人</span>
+              <button class="social-primary-button" id="telegram-ca-watch-save" type="button" disabled>
+                <i data-lucide="check" aria-hidden="true"></i>
+                保存规则
+              </button>
+            </footer>
+          </section>
+
+          <ol class="telegram-message-feed" id="telegram-message-feed" aria-live="polite">
+            <li class="telegram-empty-state" id="telegram-empty-state">
+              <i data-lucide="send" aria-hidden="true"></i>
+              <strong>等待 Telegram 消息</strong>
+              <span>连接成功后，消息会显示在这里。</span>
+            </li>
+          </ol>
+        </section>
+
         <div class="monitor-workspace">
           <section class="social-monitor-panel" id="social-monitor-panel" aria-labelledby="social-monitor-title">
             <header class="monitor-panel-head social-monitor-head">
@@ -429,7 +504,7 @@
             <section class="social-watchlist-manager" id="social-watchlist-manager" aria-labelledby="social-watchlist-title" hidden>
               <header>
                 <div>
-                  <h4 id="social-watchlist-title">DeBot 监控名单</h4>
+                  <h4 id="social-watchlist-title">社媒监控名单</h4>
                   <p id="social-watchlist-summary">等待同步</p>
                 </div>
                 <button class="inline-icon-button" id="social-manager-close" type="button" title="关闭名单管理" aria-label="关闭名单管理">
@@ -468,6 +543,37 @@
                 </button>
               </div>
               <div class="social-watchlist" id="social-watchlist" aria-live="polite"></div>
+
+              <section class="telegram-social-watchlist" aria-labelledby="telegram-social-watchlist-title">
+                <header>
+                  <div>
+                    <h5 id="telegram-social-watchlist-title">Telegram 群组与频道</h5>
+                    <p id="telegram-social-manager-summary">正在读取个人账号可见的聊天</p>
+                  </div>
+                  <button class="inline-icon-button" id="telegram-social-refresh" type="button" title="刷新 Telegram 群组与频道" aria-label="刷新 Telegram 群组与频道">
+                    <i data-lucide="refresh-cw" aria-hidden="true"></i>
+                  </button>
+                </header>
+                <div class="telegram-social-manager-toolbar">
+                  <label class="telegram-social-search">
+                    <i data-lucide="search" aria-hidden="true"></i>
+                    <span class="sr-only">搜索 Telegram 群组或频道</span>
+                    <input id="telegram-social-search" type="search" autocomplete="off" placeholder="搜索群组或频道" />
+                  </label>
+                  <label class="telegram-social-select-all">
+                    <input id="telegram-social-select-all" type="checkbox" />
+                    <span>全选</span>
+                  </label>
+                </div>
+                <div class="telegram-social-chat-list" id="telegram-social-chat-list" aria-live="polite"></div>
+                <footer>
+                  <span id="telegram-social-selected-count">已选 0 个</span>
+                  <button class="telegram-social-save social-primary-button" id="telegram-social-save" type="button" disabled>
+                    <i data-lucide="check" aria-hidden="true"></i>
+                    保存频道
+                  </button>
+                </footer>
+              </section>
             </section>
 
             <div class="social-feed" id="social-feed" aria-live="polite">
@@ -718,5 +824,7 @@
 
     <script src="vendor/lucide.js"></script>
     <script src="app.js" type="module"></script>
+    <script src="telegram-monitor.js" type="module"></script>
+    <script src="telegram-social.js" type="module"></script>
   </body>
 </html>

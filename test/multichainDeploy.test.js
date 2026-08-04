@@ -187,6 +187,8 @@ test('release preparer builds a complete checksummed installer staging directory
   assert.match(releasePreparer, /SHA256SUMS/);
   assert.match(releasePreparer, /bootstrap-host\.sh/);
   assert.match(releasePreparer, /install-remote\.sh/);
+  assert.match(releasePreparer, /telegram-viewer\.service/);
+  assert.match(releasePreparer, /telegram\.tar\.gz/);
   assert.match(releasePreparer, /the Git worktree is dirty/);
 });
 
@@ -217,6 +219,9 @@ test('remote installer backs up, checks, deploys, and validates all seven databa
   assert.match(installer, /bark_database_backup=\$\(bark_database_backup_path\)/);
   assert.match(installer, /Bark configuration does not match the other chain services/);
   assert.match(installer, /restore_optional_file/);
+  assert.match(installer, /telegram-viewer/);
+  assert.match(installer, /telegram\.tar\.gz/);
+  assert.match(installer, /api\/messages\?limit=1/);
   assert.match(installer, /verify_release_manifest "\$staging_dir"/);
   assert.match(installer, /sha256sum --check --strict SHA256SUMS/);
   assert.match(installer, /Checksum manifest does not cover required file/);
@@ -307,7 +312,9 @@ test('remote installer accepts a complete manifest and rejects a changed release
     'base-radar.service',
     'bsc-radar.service',
     'solana-radar.service',
-    'public.tar.gz'
+    'public.tar.gz',
+    'telegram-viewer.service',
+    'telegram.tar.gz'
   ];
   const checksums = [];
   for (const name of required) {

@@ -838,6 +838,18 @@ export class RobinhoodWalletMonitor {
     });
   }
 
+  notifyTelegramMessage(payload) {
+    if (!this.barkNotifier?.notifyTelegramMessage) {
+      throw new Error('Bark notifications are unavailable');
+    }
+    this.#syncBarkSettings();
+    return this.barkNotifier.notifyTelegramMessage({
+      ...payload,
+      sound: this.settings.barkSound,
+      volume: this.settings.barkVolume
+    });
+  }
+
   getClusters() {
     const cutoff = unixSeconds(this.now) - this.settings.windowSeconds;
     const grouped = new Map();

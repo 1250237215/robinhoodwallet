@@ -13,6 +13,7 @@ Caddy 暴露统一 HTTPS 网站。命令中的域名、服务器地址和密钥�
 | Base | `base-radar` | `127.0.0.1:18119` | `base.sqlite`、共享 `bark.sqlite` |
 | BSC | `bsc-radar` | `127.0.0.1:18122` | `bsc.sqlite`、共享 `evm-wallets.sqlite`和 `bark.sqlite` |
 | Solana | `solana-radar` | `127.0.0.1:18120` | `solana.sqlite`、共享 `bark.sqlite` |
+| Telegram 只读消息和翻译 | `telegram-viewer` | `127.0.0.1:18123` | `telegram_ca_alerts.sqlite`（私有运行目录） |
 | HTTPS 和反向代理 | `caddy` | `80`、`443` | 无 |
 
 Robinhood 与 BSC 通过同一个 `evm-wallets.sqlite`共用已确认地址库；地址、别名、
@@ -30,6 +31,7 @@ Robinhood 与 BSC 通过同一个 `evm-wallets.sqlite`共用已确认地址库�
 /var/lib/robinhood-radar/      七个运行数据库
 /etc/robinhood-radar/          私有环境变量
 /var/backups/robinhood-radar/  安装器生成的数据库和版本备份
+/var/lib/robinhood-radar/telegram/  Telegram 登录会话、选择、头像和媒体（不进 Git）
 ```
 
 ## 2. 部署前准备
@@ -46,6 +48,8 @@ Robinhood 与 BSC 通过同一个 `evm-wallets.sqlite`共用已确认地址库�
 - 要启用 DeBot 社媒监控时，需要一台长期运行 Chrome 的电脑和已登录的
   DeBot 账号
 - 要启用手机推送时，需要 Bark 应用提供的设备 Key
+- 要启用 Telegram 只读监控时，需要 Telegram API ID/Hash 和一次性登录会话；凭据、
+  session、频道选择和媒体只保存在 VPS 的 Telegram 数据目录
 
 Robinhood、Base 和 BSC 默认使用公开 RPC，可以启动和体验。大量钱包的长期生产
 监控建议配置自己的稳定 RPC。Solana 公共 RPC 只用于人工 Holder 查询，不能
@@ -142,6 +146,9 @@ robinhood-radar.service
 base-radar.service
 bsc-radar.service
 solana-radar.service
+telegram-viewer.service
+telegram.env.example
+telegram.tar.gz
 robinhood.env.example
 base.env.example
 bsc.env.example
@@ -544,7 +551,59 @@ HTTPS origin 单独申请；HTTP 仅允许 `localhost`和 `127.0.0.1`开发地�
 
 完整桥接行为见 `bridge/debot-social-bridge/README.md`。
 
-## 11. 配置 Bark
+## 11. 配置 Telegram 只读监控
+
+Telegram 查看器是独立的只读服务，不会发送、转发、编辑或删除消息。安装器会把
+脱敏源码放到 `/opt/robinhood-radar/telegram`，并保留已有的 `.venv`；登录会话、
+API ID/Hash、频道选择、头像、媒体和 CA 提醒状态只放在
+`/var/lib/robinhood-radar/telegram`，不会进入发布包或 GitHub。
+
+首次启用时，在 VPS 上创建 Python 虚拟环境并安装依赖（只需一次）：
+
+```bash
+cd /opt/robinhood-radar/telegram
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+chown -R root:root /opt/robinhood-radar/telegram
+```
+
+然后用一次性设置命令登录 Telegram 并选择要监控的群组/频道。登录过程中输入的
+API Hash、手机号、验证码和两步验证密码只写入 `/var/lib/robinhood-radar/telegram`
+下的私有文件：
+
+```bash
+install -d -o robinhood-radar -g robinhood-radar -m 0700 /var/lib/robinhood-radar/telegram
+sudo -u robinhood-radar env TG_RUNTIME_DIR=/var/lib/robinhood-radar/telegram \
+  TG_VIEWER_RUNTIME_DIR=/var/lib/robinhood-radar/telegram \
+  /opt/robinhood-radar/telegram/.venv/bin/python \
+  /opt/robinhood-radar/telegram/viewer.py --setup
+```
+
+在 `/etc/robinhood-radar/telegram.env` 中可以额外填写已知敏感聊天 ID：
+
+```dotenv
+TG_VIEWER_BLOCKED_CHAT_IDS=
+# 如需 Telegram CA Bark，把这里设置为与 robinhood.env 相同的随机值
+TELEGRAM_BARK_INTERNAL_TOKEN=
+```
+
+服务端会在目录、选择、历史消息和实时事件四层过滤明显成人/受限聊天；启动时还
+会把自动识别到的敏感 ID 固定写入 `viewer_config.json`，频道改名后也不会重新出现在
+选择列表。Telegram 原文先显示，后台翻译完成后通过 `translated_text` 增量更新；历史
+回填与实时翻译分开限流，旧消息不会阻塞新消息。网页入口为：
+`https://radar.example.com/robinhood-radar/telegram/`。
+
+检查服务和翻译字段：
+
+```bash
+systemctl --no-pager --full status telegram-viewer
+curl --fail http://127.0.0.1:18123/api/chats >/dev/null
+curl --fail 'http://127.0.0.1:18123/api/messages?limit=1' | jq '.messages[0] | {text, translated_text}'
+```
+
+如果翻译暂时失败，Telegram 流水仍会正常显示原文；服务不会因翻译接口超时而停止。
+
+## 12. 配置 Bark
 
 完整设备 Key 只保存在共享的 `/var/lib/robinhood-radar/bark.sqlite`中。四个 systemd
 unit 固定使用同一个 `BARK_DATA_FILE`，所以在任意链添加、暂停、删除设备或修改
@@ -563,7 +622,7 @@ unit 固定使用同一个 `BARK_DATA_FILE`，所以在任意链添加、暂停�
 会混合不同链的事件数据。不要把 `bark.sqlite`或任何包含 Bark Key 的生产数据库
 上传到 GitHub。
 
-## 12. 可选：恢复公开 Robinhood 数据快照
+## 13. 可选：恢复公开 Robinhood 数据快照
 
 公开快照已删除旧的 Bark 目标和 Bark 设置，而且不包含当前私有的 `bark.sqlite`；
 它仍包含公开钱包地址、人工备注、代币分析和历史监控事件。恢复 Robinhood 快照
@@ -741,7 +800,7 @@ fi
 重新启动。服务 unit 尚不存在时，命令只准备数据库，后续由第一次安装启动服务。
 不要直接替换正在运行且启用了 WAL 的数据库。
 
-## 13. 升级和回滚
+## 14. 升级和回滚
 
 升级前在构建机执行：
 
@@ -1151,7 +1210,7 @@ echo "Cross-schema rollback completed; safety copy retained at: $SAFETY_DIR"
 和四个服务原来的启停状态；它提示自动恢复不完整时，不要再次启动发布，应保持
 现场并使用打印的 `SAFETY_DIR`手工恢复。
 
-## 14. 常见问题
+## 15. 常见问题
 
 ### 社媒桥接显示离线
 
@@ -1182,7 +1241,7 @@ echo "Cross-schema rollback completed; safety copy retained at: $SAFETY_DIR"
 确认五个 `/monitor/stream`或 `/social/stream`路由没有压缩和代理缓冲，且
 `flush_interval -1`仍然存在。修改 Caddy 后先 validate，再 reload。
 
-## 15. 安全和许可证
+## 16. 安全和许可证
 
 - 生产 env、Bark Key、DeBot 登录数据、VPS 凭据和实时数据库禁止提交。
 - 公开部署前应配置防火墙、SSH Key、系统更新和最小权限。

@@ -253,11 +253,52 @@ export class RobinhoodBarkNotifier {
     };
   }
 
+  async notifyTelegramMessage({
+    senderName = 'Telegram',
+    chatName = 'Telegram',
+    text = '',
+    contractAddresses = [],
+    messageUrl = '',
+    sound = 'alarm',
+    volume = 5
+  } = {}) {
+    const targets = this.store.listMonitorBarkTargets().filter((target) => target.enabled);
+    if (!targets.length) return { attempted: 0, sent: 0, failed: 0 };
+    const addresses = [...new Set(
+      (Array.isArray(contractAddresses) ? contractAddresses : [])
+        .map((address) => String(address || '').trim())
+        .filter(Boolean)
+    )].slice(0, 8);
+    const normalizedSender = cleanLabel(senderName, 'Telegram');
+    const normalizedChat = cleanLabel(chatName, 'Telegram');
+    const normalizedText = String(text || '').replace(/\s+/g, ' ').trim();
+    const addressSummary = addresses.join(' · ');
+    const textSummary = normalizedText.length > 220
+      ? `${normalizedText.slice(0, 219).trimEnd()}...`
+      : normalizedText;
+    const body = [normalizedChat, addressSummary, textSummary]
+      .filter(Boolean)
+      .join('\n');
+    const results = await Promise.allSettled(targets.map((target) => this.#send(target, {
+      title: `Telegram CA：${normalizedSender}`,
+      body: body || '检测到新的合约地址',
+      sound,
+      volume,
+      url: String(messageUrl || ''),
+      group: 'Telegram CA 监控'
+    })));
+    return {
+      attempted: targets.length,
+      sent: results.filter((result) => result.status === 'fulfilled').length,
+      failed: results.filter((result) => result.status === 'rejected').length
+    };
+  }
+
   async #send(target, payload) {
     try {
       const response = await this.fetch(notificationUrl(target.endpoint, {
         ...payload,
-        group: `${this.brand} 聪明钱`
+        group: payload.group || `${this.brand} 聪明钱`
       }), {
         method: 'GET',
         headers: { accept: 'application/json' },

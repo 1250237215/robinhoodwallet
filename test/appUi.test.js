@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 
 const indexHtml = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 const appJs = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+const telegramMonitorJs = fs.readFileSync(new URL('../public/telegram-monitor.js', import.meta.url), 'utf8');
+const telegramSocialJs = fs.readFileSync(new URL('../public/telegram-social.js', import.meta.url), 'utf8');
 const stylesCss = fs.readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
 
 function appSourceBetween(start, end) {
@@ -1135,7 +1137,24 @@ test('real-time monitoring is the default first-level page and replaces the rese
     'monitor-deep-live-backlog',
     'monitor-deep-gap',
     'monitor-deep-duration',
+    'telegram-monitor-panel',
+    'telegram-message-feed',
+    'telegram-ca-watch-button',
+    'telegram-ca-watch',
+    'telegram-ca-watch-enabled',
+    'telegram-ca-watch-search',
+    'telegram-ca-watch-select-all',
+    'telegram-ca-watch-list',
+    'telegram-ca-watch-save',
     'social-monitor-panel',
+    'social-watchlist-manager',
+    'telegram-social-refresh',
+    'telegram-social-manager-summary',
+    'telegram-social-search',
+    'telegram-social-select-all',
+    'telegram-social-chat-list',
+    'telegram-social-selected-count',
+    'telegram-social-save',
     'social-monitor-summary',
     'social-feed',
     'monitor-event-feed'
@@ -1146,6 +1165,184 @@ test('real-time monitoring is the default first-level page and replaces the rese
   assert.match(appJs, /elements\.researchBoard\.hidden = showingMonitor/);
   assert.match(appJs, /elements\.monitorPage\.hidden = !showingMonitor/);
   assert.match(appJs, /if \(state\.activeTab === 'monitor'\)[\s\S]*startMonitorPage/);
+});
+
+test('the pinned LazyCat Telegram panel precedes the shared monitoring workspace', () => {
+  const telegramPanelIndex = indexHtml.indexOf('<section class="telegram-monitor-panel"');
+  const workspaceIndex = indexHtml.indexOf('<div class="monitor-workspace">');
+  const socialPanelIndex = indexHtml.indexOf('<section class="social-monitor-panel"');
+  const managerIndex = indexHtml.indexOf('<section class="social-watchlist-manager"');
+  const telegramControlsIndex = indexHtml.indexOf('<section class="telegram-social-watchlist"');
+  const socialFeedIndex = indexHtml.indexOf('<div class="social-feed"');
+
+  assert.ok(telegramPanelIndex > 0);
+  assert.ok(telegramPanelIndex < workspaceIndex);
+  assert.match(indexHtml.slice(telegramPanelIndex, workspaceIndex), /id="telegram-monitor-panel"[\s\S]*id="telegram-message-feed"[\s\S]*<\/section>\s*$/);
+  assert.ok(workspaceIndex < socialPanelIndex);
+  assert.ok(socialPanelIndex > 0);
+  assert.ok(socialPanelIndex < managerIndex);
+  assert.ok(managerIndex < telegramControlsIndex);
+  assert.ok(telegramControlsIndex < socialFeedIndex);
+  const managerMarkup = indexHtml.slice(managerIndex, socialFeedIndex);
+  for (const id of [
+    'telegram-social-refresh',
+    'telegram-social-manager-summary',
+    'telegram-social-search',
+    'telegram-social-select-all',
+    'telegram-social-chat-list',
+    'telegram-social-selected-count',
+    'telegram-social-save'
+  ]) {
+    assert.match(managerMarkup, new RegExp(`id="${id}"`));
+  }
+
+  assert.doesNotMatch(indexHtml, /social-telegram-section|social-telegram-feed/);
+  assert.match(indexHtml, /<script src="telegram-monitor\.js" type="module"><\/script>/);
+  assert.match(indexHtml, /<script src="telegram-social\.js" type="module"><\/script>/);
+});
+
+test('the pinned Telegram viewer targets LazyCat FNF by chat id and stays read only', () => {
+  assert.match(telegramMonitorJs, /TELEGRAM_PINNED_SOURCE_NAME = 'LazyCat FNF'/);
+  const sourceLookup = telegramMonitorJs.slice(
+    telegramMonitorJs.indexOf('async function ensureTelegramPinnedSource'),
+    telegramMonitorJs.indexOf('function scheduleTelegramLoad')
+  );
+  assert.match(sourceLookup, /fetchTelegramJson\('\/chats'/);
+  assert.match(sourceLookup, /startsWith\(TELEGRAM_PINNED_SOURCE_NAME\)/);
+  assert.match(sourceLookup, /body: \{ chat_ids: \[sourceId, \.\.\.selectedIds\] \}/);
+  assert.match(telegramMonitorJs, /`\/messages\?limit=\$\{TELEGRAM_MESSAGE_LIMIT\}&chat_id=\$\{encodeURIComponent\(sourceId\)\}`/);
+  assert.match(telegramMonitorJs, /feed\.scrollTop[\s\S]*row\.getBoundingClientRect\(\)\.top[\s\S]*feed\.getBoundingClientRect\(\)\.top/);
+  assert.match(telegramMonitorJs, /credentials: 'same-origin'/);
+  assert.doesNotMatch(telegramMonitorJs, /send_message|send_file|forward_messages|edit_message|delete_messages/);
+  assert.match(stylesCss, /\.telegram-reply \.telegram-media\.is-compact img,[\s\S]*max-width: 46px;[\s\S]*max-height: 34px;/);
+});
+
+test('the pinned Telegram panel configures server-side CA Bark rules by sender id', () => {
+  const panel = indexHtml.slice(
+    indexHtml.indexOf('<section class="telegram-monitor-panel"'),
+    indexHtml.indexOf('<div class="monitor-workspace">')
+  );
+  for (const id of [
+    'telegram-ca-watch-button',
+    'telegram-ca-watch',
+    'telegram-ca-watch-status',
+    'telegram-ca-watch-enabled',
+    'telegram-ca-watch-search',
+    'telegram-ca-watch-select-all',
+    'telegram-ca-watch-list',
+    'telegram-ca-watch-save'
+  ]) {
+    assert.match(panel, new RegExp(`id="${id}"`));
+  }
+  assert.match(telegramMonitorJs, /fetchTelegramJson\('\/ca-watch'\)/);
+  assert.match(telegramMonitorJs, /fetchTelegramJson\('\/ca-watch', \{[\s\S]*method: 'PUT'/);
+  assert.match(telegramMonitorJs, /sender_ids: \[\.\.\.state\.draftSenderIds\]/);
+  assert.match(telegramMonitorJs, /selected_sender_ids/);
+  assert.match(telegramMonitorJs, /delivery_configured/);
+  assert.match(telegramMonitorJs, /EVM \/ Solana 地址/);
+  assert.match(stylesCss, /\.telegram-ca-watch-option \{[\s\S]*grid-template-columns:/);
+  assert.match(stylesCss, /\.telegram-reply \.telegram-media\.is-compact \{[\s\S]*width: 46px;[\s\S]*height: 34px;/);
+});
+
+test('Telegram is a read-only source merged chronologically with X in the existing social feed', () => {
+  assert.match(telegramSocialJs, /TELEGRAM_SOCIAL_POLL_MS = 2_000/);
+  assert.match(telegramSocialJs, /telegramSocialFetchJson\('\/chats'/);
+  assert.match(telegramSocialJs, /telegramSocialFetchJson\(`\/messages\?limit=\$\{TELEGRAM_SOCIAL_MESSAGE_LIMIT\}`/);
+  assert.match(telegramSocialJs, /telegramSocialFetchJson\('\/selection',[\s\S]*method: 'POST'/);
+  assert.match(telegramSocialJs, /body: \{ chat_ids: chatIds \}/);
+  assert.match(telegramSocialJs, /message\?\.stream_id \?\? message\?\.streamId/);
+  assert.match(telegramSocialJs, /credentials: 'same-origin'/);
+  assert.match(telegramSocialJs, /new CustomEvent\('telegram-social-update', \{ detail: snapshot \}\)/);
+  assert.doesNotMatch(telegramSocialJs, /send_message|send_file|forward_messages|edit_message|delete_messages|innerHTML\s*=/);
+
+  const telegramMarkupSource = appJs.slice(
+    appJs.indexOf('function telegramSocialMediaMarkup'),
+    appJs.indexOf('function socialFeedItems()')
+  );
+  for (const className of [
+    'social-post',
+    'social-avatar',
+    'social-post-content',
+    'social-reply-context',
+    'social-post-media'
+  ]) {
+    assert.match(telegramMarkupSource, new RegExp(`class="[^"]*${className}`));
+  }
+  assert.match(telegramMarkupSource, /data-source="telegram"/);
+
+  const mergedFeedSource = appSourceBetween('function socialFeedItems()', 'function renderSocialBridgeStatus()');
+  assert.match(mergedFeedSource, /visibleSocialPosts\(\)\.map/);
+  assert.match(mergedFeedSource, /visibleTelegramSocialMessages\(\)\.map/);
+  assert.match(mergedFeedSource, /type: 'social',[\s\S]*post/);
+  assert.match(mergedFeedSource, /type: 'telegram',[\s\S]*message/);
+  assert.match(mergedFeedSource, /return \[\.\.\.socialItems, \.\.\.telegramItems\]/);
+  assert.match(mergedFeedSource, /\.sort\(\(left, right\) => right\.timestamp - left\.timestamp\)/);
+
+  const renderFeedSource = appSourceBetween('function renderSocialFeed()', 'function renderSocialMonitor()');
+  assert.match(renderFeedSource, /if \(item\.type === 'telegram'\) return telegramSocialPostMarkup\(item\.message\)/);
+  assert.match(appJs, /window\.addEventListener\('telegram-social-update', \(\) => \{[\s\S]*renderSocialFeed\(\)/);
+});
+
+test('the pinned LazyCat chat stays out of the lower selector and feed but remains selected on the backend', () => {
+  assert.match(telegramSocialJs, /TELEGRAM_SOCIAL_PINNED_NAME = 'LazyCat FNF'/);
+
+  const visibleChatsSource = telegramSocialJs.slice(
+    telegramSocialJs.indexOf('function telegramSocialVisibleChats()'),
+    telegramSocialJs.indexOf('function telegramSocialRenderAvatar')
+  );
+  assert.match(visibleChatsSource, /telegramSocialState\.chats\.filter\(\(chat\) => chat\.id !== telegramSocialPinnedId\(\)\)/);
+
+  const publishSource = telegramSocialJs.slice(
+    telegramSocialJs.indexOf('function telegramSocialPublish('),
+    telegramSocialJs.indexOf('async function telegramSocialLoadChats')
+  );
+  assert.match(publishSource, /\.filter\(\(message\) => !telegramSocialIsPinnedMessage\(message\)\)/);
+  assert.match(publishSource, /\.filter\(\(source\) => telegramSocialNumericId\(source\?\.id\) !== telegramSocialPinnedId\(\)/);
+
+  const saveSource = telegramSocialJs.slice(
+    telegramSocialJs.indexOf('async function telegramSocialSaveSelection()'),
+    telegramSocialJs.indexOf('function telegramSocialStart()')
+  );
+  assert.match(saveSource, /const pinnedId = telegramSocialPinnedId\(\)/);
+  assert.match(saveSource, /const chatIds = \[pinnedId, \.\.\.selectedChatIds\.filter\(\(id\) => id !== pinnedId\)\]/);
+  assert.match(saveSource, /body: \{ chat_ids: chatIds \}/);
+});
+
+test('Telegram channel selection keeps unsaved edits across polling and rejects pre-save responses', () => {
+  const syncSource = telegramSocialJs.slice(
+    telegramSocialJs.indexOf('function telegramSocialSyncCatalog('),
+    telegramSocialJs.indexOf('function telegramSocialSetsEqual(')
+  );
+  assert.match(syncSource, /ignoreSelection = false/);
+  assert.match(syncSource, /selected && !ignoreSelection && !telegramSocialState\.selectionBusy/);
+  assert.match(syncSource, /if \(!telegramSocialState\.draftDirty\)[\s\S]*draftChatIds = new Set\(selected\)/);
+
+  const draftChangeSource = telegramSocialJs.slice(
+    telegramSocialJs.indexOf('function telegramSocialRecordDraftChange('),
+    telegramSocialJs.indexOf('function telegramSocialVisibleChats(')
+  );
+  assert.match(draftChangeSource, /telegramSocialState\.draftRevision \+= 1/);
+  assert.match(draftChangeSource, /draftDirty = !telegramSocialSetsEqual/);
+  assert.ok((telegramSocialJs.match(/telegramSocialRecordDraftChange\(\)/g) || []).length >= 3);
+
+  const loadChatsSource = telegramSocialJs.slice(
+    telegramSocialJs.indexOf('async function telegramSocialLoadChats('),
+    telegramSocialJs.indexOf('function telegramSocialSchedule(')
+  );
+  assert.match(loadChatsSource, /const selectionEpoch = telegramSocialState\.selectionEpoch/);
+  assert.match(loadChatsSource, /ignoreSelection: selectionEpoch !== telegramSocialState\.selectionEpoch/);
+
+  const saveSource = telegramSocialJs.slice(
+    telegramSocialJs.indexOf('async function telegramSocialSaveSelection()'),
+    telegramSocialJs.indexOf('function telegramSocialStart()')
+  );
+  assert.match(saveSource, /telegramSocialState\.selectionEpoch \+= 1/);
+  assert.match(saveSource, /messagesController\?\.abort\(\)/);
+  assert.match(saveSource, /catalogController\?\.abort\(\)/);
+  assert.match(saveSource, /telegramSocialSyncCatalog\(payload, \{ ignoreSelection: true \}\)/);
+  assert.match(saveSource, /telegramSocialState\.draftRevision === saveRevision[\s\S]*draftDirty = false/);
+  assert.match(saveSource, /保存失败：[\s\S]*selectedChatIds = previousSelected/);
+  assert.match(telegramSocialJs, /telegramSocialPublish\(payload, '', \{ ignoreSelection \}\)/);
 });
 
 test('monitor health exposes compact fast and deep lane diagnostics', () => {

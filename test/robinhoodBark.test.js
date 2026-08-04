@@ -134,3 +134,36 @@ test('sends an immediate per-wallet event with the transaction link', async () =
   assert.equal(requests[0].searchParams.get('url'), 'https://robinhoodchain.blockscout.com/tx/0x1234');
   store.close();
 });
+
+test('sends Telegram CA alerts to enabled targets in a separate Bark group', async () => {
+  const store = createRobinhoodStore(':memory:');
+  const requests = [];
+  const notifier = new RobinhoodBarkNotifier({
+    store,
+    fetchImpl: async (url) => {
+      requests.push(new URL(url));
+      return new Response(JSON.stringify({ code: 200 }), { status: 200 });
+    }
+  });
+  notifier.createTarget({ endpoint: 'device_key_123456', label: 'Phone' });
+  notifier.createTarget({ endpoint: 'disabled_key_654321', label: 'Tablet', enabled: false });
+  const delivery = await notifier.notifyTelegramMessage({
+    senderName: 'Alice',
+    chatName: 'LazyCat FNF',
+    text: 'new launch 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    contractAddresses: ['0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+    messageUrl: 'https://t.me/lazycat/7',
+    sound: 'chime',
+    volume: 7
+  });
+
+  assert.deepEqual(delivery, { attempted: 1, sent: 1, failed: 0 });
+  assert.equal(requests.length, 1);
+  assert.match(decodeURIComponent(requests[0].pathname), /Telegram CA：Alice/);
+  assert.match(decodeURIComponent(requests[0].pathname), /LazyCat FNF/);
+  assert.equal(requests[0].searchParams.get('group'), 'Telegram CA 监控');
+  assert.equal(requests[0].searchParams.get('sound'), 'chime');
+  assert.equal(requests[0].searchParams.get('volume'), '7');
+  assert.equal(requests[0].searchParams.get('url'), 'https://t.me/lazycat/7');
+  store.close();
+});

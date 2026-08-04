@@ -16,6 +16,9 @@ readonly monitor_ready_timeout_seconds="${DEPLOY_MONITOR_READY_TIMEOUT_SECONDS:-
 readonly solana_monitor_ready_timeout_seconds="${SOLANA_MONITOR_READY_TIMEOUT_SECONDS:-120}"
 readonly services=("robinhood-radar" "base-radar" "bsc-radar" "solana-radar")
 readonly chains=("robinhood" "base" "bsc" "solana")
+readonly telegram_service="telegram-viewer"
+readonly telegram_dir="$app_dir/telegram"
+readonly telegram_runtime_dir="$data_dir/telegram"
 
 rollback_needed=0
 caddy_changed=0
@@ -181,6 +184,41 @@ restore_optional_file() {
   fi
 }
 
+backup_telegram_source() {
+  local destination="$1"
+  local source_file
+  local relative_file
+
+  rm -rf "$destination"
+  install -d -m 0755 "$destination"
+  for relative_file in viewer.py forwarder.py requirements.txt README.md; do
+    source_file="$telegram_dir/$relative_file"
+    backup_optional_file "$source_file" "$destination/$relative_file"
+  done
+  if [[ -d "$telegram_dir/web" ]]; then
+    cp -a "$telegram_dir/web" "$destination/web"
+  else
+    touch "$destination/web.missing"
+  fi
+}
+
+restore_telegram_source() {
+  local backup_directory="$1"
+  local relative_file
+
+  [[ -d "$backup_directory" ]] || return 0
+  install -d -m 0755 "$telegram_dir"
+  for relative_file in viewer.py forwarder.py requirements.txt README.md; do
+    restore_optional_file "$backup_directory/$relative_file" "$telegram_dir/$relative_file"
+  done
+  if [[ -f "$backup_directory/web.missing" ]]; then
+    rm -rf "$telegram_dir/web"
+  elif [[ -d "$backup_directory/web" ]]; then
+    rm -rf "$telegram_dir/web"
+    cp -a "$backup_directory/web" "$telegram_dir/web"
+  fi
+}
+
 manifest_contains_file() {
   local manifest="$1"
   local expected="$2"
@@ -229,7 +267,9 @@ verify_release_manifest() {
     base-radar.service \
     bsc-radar.service \
     solana-radar.service \
-    public.tar.gz; do
+    public.tar.gz \
+    telegram-viewer.service \
+    telegram.tar.gz; do
     manifest_contains_file "$manifest" "$required" || {
       echo "Checksum manifest does not cover required file: $required" >&2
       return 1
@@ -255,6 +295,9 @@ rollback() {
       for service in "${services[@]}"; do
         systemctl stop "$service.service" 2>/dev/null || true
       done
+      if [[ -f "$(unit_path "$telegram_service")" ]]; then
+        systemctl stop "$telegram_service.service" 2>/dev/null || true
+      fi
 
       for chain in "${chains[@]}"; do
         restore_optional_file "$release_backup/$chain-server.mjs" "$(bundle_path "$chain")"
@@ -290,6 +333,8 @@ rollback() {
         rm -rf "$app_dir/public"
         cp -a "$release_backup/public" "$app_dir/public"
       fi
+      restore_telegram_source "$release_backup/telegram"
+      restore_optional_file "$release_backup/telegram-viewer.service" "$(unit_path "$telegram_service")"
       restore_optional_file "$release_backup/REVISION" "$app_dir/REVISION"
 
       if [[ $caddy_changed -eq 1 ]]; then
@@ -304,12 +349,18 @@ rollback() {
           systemctl start "$service.service" || true
         fi
       done
+      if [[ "${telegram_was_active:-0}" == "1" ]]; then
+        systemctl start "$telegram_service.service" || true
+      fi
     else
       for service in "${services[@]}"; do
         if [[ "${was_active[$service]:-0}" == "1" ]]; then
           systemctl start "$service.service" || true
         fi
       done
+      if [[ "${telegram_was_active:-0}" == "1" ]]; then
+        systemctl start "$telegram_service.service" || true
+      fi
     fi
   fi
 
@@ -322,6 +373,8 @@ fi
 
 declare -A was_active=()
 declare -A unit_existed=()
+telegram_was_active=0
+telegram_unit_existed=0
 
 trap rollback EXIT
 
@@ -336,11 +389,29 @@ for file in \
   "$staging_dir/base-radar.service" \
   "$staging_dir/bsc-radar.service" \
   "$staging_dir/solana-radar.service" \
+  "$staging_dir/telegram-viewer.service" \
+  "$staging_dir/telegram.tar.gz" \
   "$staging_dir/public.tar.gz" \
   "$staging_dir/REVISION" \
   "$staging_dir/SHA256SUMS"; do
   [[ -f "$file" ]] || { echo "Missing deployment file: $file" >&2; exit 1; }
 done
+
+if systemctl is-active --quiet "$telegram_service.service" 2>/dev/null; then
+  telegram_was_active=1
+fi
+if [[ -f "$(unit_path "$telegram_service")" ]]; then
+  telegram_unit_existed=1
+fi
+if [[ "$telegram_unit_existed" == "1" ]]; then
+  systemctl stop "$telegram_service.service"
+  systemctl is-active --quiet "$telegram_service.service" && {
+    echo "$telegram_service.service did not stop cleanly." >&2
+    exit 1
+  }
+else
+  systemctl stop "$telegram_service.service" 2>/dev/null || true
+fi
 
 install -d -m 0700 "$backup_root" "$release_backup"
 install -d -o robinhood-radar -g robinhood-radar -m 0750 "$data_dir"
@@ -389,6 +460,8 @@ bark_database="$(bark_database_path)"
 bark_database_backup="$(bark_database_backup_path)"
 backup_database_file "$bark_database" "$bark_database_backup"
 cp -a "$app_dir/public" "$release_backup/public"
+backup_telegram_source "$release_backup/telegram"
+backup_optional_file "$(unit_path "$telegram_service")" "$release_backup/telegram-viewer.service"
 rollback_needed=1
 
 install -m 0644 "$staging_dir/REVISION" "$app_dir/REVISION"
@@ -402,6 +475,26 @@ for chain in "${chains[@]}"; do
   fi
   install -m 0644 "$staging_dir/$chain-radar.service" "$(unit_path "$chain-radar")"
 done
+
+install -m 0644 "$staging_dir/telegram-viewer.service" "$(unit_path "$telegram_service")"
+install -d -m 0755 "$telegram_dir"
+for relative_file in viewer.py forwarder.py requirements.txt README.md; do
+  rm -f "$telegram_dir/$relative_file"
+done
+rm -rf "$telegram_dir/web"
+tar -xzf "$staging_dir/telegram.tar.gz" -C "$telegram_dir"
+for relative_file in viewer.py forwarder.py requirements.txt README.md; do
+  chown root:root "$telegram_dir/$relative_file"
+  chmod 0644 "$telegram_dir/$relative_file"
+done
+chmod 0755 "$telegram_dir/viewer.py" "$telegram_dir/forwarder.py"
+chown -R root:root "$telegram_dir/web"
+find "$telegram_dir/web" -type d -exec chmod 0755 {} +
+find "$telegram_dir/web" -type f -exec chmod 0644 {} +
+if [[ "$telegram_was_active" == "1" && ! -x "$telegram_dir/.venv/bin/python" ]]; then
+  echo "Telegram viewer was active but its Python virtual environment is missing." >&2
+  exit 1
+fi
 
 rm -rf "$app_dir/public.new"
 install -d -m 0755 "$app_dir/public.new"
@@ -418,6 +511,16 @@ systemctl daemon-reload
 for service in "${services[@]}"; do
   systemctl start "$service.service"
 done
+
+telegram_should_run=0
+if [[ "$telegram_was_active" == "1" || (
+  -x "$telegram_dir/.venv/bin/python" &&
+  -f "$telegram_runtime_dir/viewer_config.json" &&
+  -f "$telegram_runtime_dir/tg_forwarder.session"
+) ]]; then
+  telegram_should_run=1
+  systemctl start "$telegram_service.service"
+fi
 
 declare -A ports=([robinhood]=18118 [base]=18119 [bsc]=18122 [solana]=18120)
 bark_reference_signature=""
@@ -573,6 +676,50 @@ node --input-type=module -e '
   if (!social.counts || !Number.isInteger(Number(social.counts.posts))) throw new Error("social counts are unavailable");
 ' "$social_file"
 rm -f "$social_file"
+
+if [[ "$telegram_should_run" == "1" ]]; then
+  telegram_chats_file="$(mktemp)"
+  telegram_messages_file="$(mktemp)"
+  telegram_ready=0
+  for attempt in $(seq 1 30); do
+    if curl --fail --silent --show-error \
+      --connect-timeout "$health_connect_timeout_seconds" \
+      --max-time "$health_request_timeout_seconds" \
+      "http://127.0.0.1:18123/api/chats" > "$telegram_chats_file" \
+      && curl --fail --silent --show-error \
+      --connect-timeout "$health_connect_timeout_seconds" \
+      --max-time "$health_request_timeout_seconds" \
+      "http://127.0.0.1:18123/api/messages?limit=1" > "$telegram_messages_file"; then
+      telegram_ready=1
+      break
+    fi
+    (( attempt < 30 )) || break
+    sleep 1
+  done
+  if [[ "$telegram_ready" != "1" ]]; then
+    echo "Telegram viewer health check did not become ready." >&2
+    rm -f "$telegram_chats_file" "$telegram_messages_file"
+    exit 1
+  fi
+  node --input-type=module -e '
+    import fs from "node:fs";
+    const chats = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    const messages = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+    if (!Array.isArray(chats.chats) || !Array.isArray(chats.selected_chat_ids)) {
+      throw new Error("Telegram chat catalog is unavailable");
+    }
+    if (!Array.isArray(messages.messages) || !Array.isArray(messages.selected_chat_ids)) {
+      throw new Error("Telegram message feed is unavailable");
+    }
+    for (const message of messages.messages) {
+      if (!Object.hasOwn(message, "translated_text")) {
+        throw new Error("Telegram translation field is unavailable");
+      }
+    }
+  ' "$telegram_chats_file" "$telegram_messages_file"
+  rm -f "$telegram_chats_file" "$telegram_messages_file"
+  systemctl is-active --quiet "$telegram_service.service"
+fi
 quick_check_database "$(social_database_path)"
 quick_check_database "$(evm_wallet_database_path)"
 quick_check_database "$(bark_database_path)"
@@ -635,6 +782,9 @@ fi
 for service in "${services[@]}"; do
   systemctl enable "$service.service" >/dev/null
 done
+if [[ "$telegram_should_run" == "1" ]]; then
+  systemctl enable "$telegram_service.service" >/dev/null
+fi
 
 rm -rf "$app_dir/public.previous" "$staging_dir"
 rollback_needed=0
@@ -650,5 +800,10 @@ echo "caddy_backup=$release_backup/Caddyfile"
 for service in "${services[@]}"; do
   echo "$service=$(systemctl is-active "$service.service")"
 done
+if [[ "$telegram_should_run" == "1" ]]; then
+  echo "$telegram_service=$(systemctl is-active "$telegram_service.service")"
+else
+  echo "$telegram_service=not-configured"
+fi
 
 trap - EXIT

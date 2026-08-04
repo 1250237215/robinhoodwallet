@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#517da2">
+    <title>Telegram 聊天记录</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+  </head>
+  <body>
+    <main class="telegram-app">
+      <header class="chat-header">
+        <button class="header-button back-button" type="button" title="返回" aria-label="返回">‹</button>
+        <div id="source-avatar" class="avatar avatar-header" aria-hidden="true">TG</div>
+        <div class="chat-heading">
+          <h1 id="source-name">正在读取…</h1>
+          <p id="source-kind">连接中</p>
+        </div>
+        <div class="header-actions">
+          <button class="header-button" type="button" title="搜索" aria-label="搜索">⌕</button>
+          <button class="header-button" type="button" title="更多" aria-label="更多">⋮</button>
+        </div>
+      </header>
+
+      <div class="sync-strip">
+        <span class="sync-dot" aria-hidden="true"></span>
+        <span id="connection-state" class="sync-state">连接中</span>
+        <span class="sync-divider" aria-hidden="true">·</span>
+        <span id="message-count">000 条消息</span>
+        <span class="sync-divider" aria-hidden="true">·</span>
+        <span id="last-updated">等待同步</span>
+        <button id="refresh-button" class="sync-refresh" type="button" title="立即刷新" aria-label="立即刷新">↻</button>
+      </div>
+
+      <section class="message-panel" aria-live="polite">
+        <div id="empty-state" class="empty-state">
+          <div class="empty-icon" aria-hidden="true">✈</div>
+          <h2>还没有消息</h2>
+          <p>新消息会实时出现在这里。</p>
+        </div>
+        <div id="error-state" class="error-state" hidden></div>
+        <ol id="message-list" class="message-list"></ol>
+      </section>
+
+      <footer class="read-only-bar">
+        <div class="read-only-avatar avatar avatar-small" aria-hidden="true">TG</div>
+        <div class="read-only-copy">
+          <strong>只读模式</strong>
+          <span>正在监听新消息</span>
+        </div>
+        <span class="read-only-lock" aria-label="本地只读">▣</span>
+      </footer>
+    </main>
+
+    <script src="/assets/app.js"></script>
+  </body>
+</html>
