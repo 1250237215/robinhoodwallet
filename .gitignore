@@ -3,6 +3,8 @@ dist/
 data/
 output/
 coverage/
+__pycache__/
+*.py[cod]
 .playwright-cli/
 playwright-report/
 test-results/

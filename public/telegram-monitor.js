@@ -4,6 +4,7 @@ const TELEGRAM_APP_BASE = /^\/robinhood-radar(?:\/|$)/.test(window.location.path
 const TELEGRAM_API_ROOT = `${TELEGRAM_APP_BASE}/telegram/api`;
 const TELEGRAM_POLL_INTERVAL_MS = 2_000;
 const TELEGRAM_STATUS_INTERVAL_MS = 10_000;
+const TELEGRAM_CA_WATCH_REFRESH_INTERVAL_MS = 10_000;
 const TELEGRAM_MESSAGE_LIMIT = 300;
 const TELEGRAM_PINNED_SOURCE_NAME = 'LazyCat FNF';
 
@@ -36,6 +37,7 @@ const telegramState = {
   active: false,
   busy: false,
   timer: null,
+  caWatchTimer: null,
   controller: null,
   statusCheckedAt: 0,
   firstRender: true,
@@ -46,6 +48,8 @@ const telegramState = {
   caWatch: {
     loaded: false,
     busy: false,
+    refreshing: false,
+    requestEpoch: 0,
     enabled: false,
     draftEnabled: false,
     deliveryConfigured: false,
@@ -54,7 +58,8 @@ const telegramState = {
     draftSenderIds: new Set(),
     searchQuery: '',
     error: '',
-    latestDelivery: null
+    latestDelivery: null,
+    directory: null
   }
 };
 
@@ -132,8 +137,31 @@ function telegramCaWatchDirty() {
     || !telegramCaWatchSetsEqual(state.selectedSenderIds, state.draftSenderIds);
 }
 
+function telegramCaWatchSignature(state) {
+  return JSON.stringify({
+    loaded: state.loaded,
+    enabled: state.enabled,
+    draftEnabled: state.draftEnabled,
+    deliveryConfigured: state.deliveryConfigured,
+    selectedSenderIds: [...state.selectedSenderIds].sort((a, b) => a - b),
+    draftSenderIds: [...state.draftSenderIds].sort((a, b) => a - b),
+    searchQuery: state.searchQuery,
+    senders: state.senders.map((sender) => ({
+      id: sender.id,
+      name: sender.name,
+      avatar: sender.avatar,
+      lastSeenAt: sender.lastSeenAt,
+      selected: sender.selected
+    })),
+    latestStatus: state.latestDelivery?.status || '',
+    directory: state.directory,
+    error: state.error
+  });
+}
+
 function renderTelegramCaWatch() {
   const state = telegramState.caWatch;
+  const previousScrollTop = telegramElements.caWatchList.scrollTop;
   const visibleSenders = telegramCaWatchVisibleSenders();
   telegramElements.caWatchList.replaceChildren();
 
@@ -210,7 +238,7 @@ function renderTelegramCaWatch() {
   } else if (latestFailed) {
     telegramElements.caWatchSummary.textContent = `最近推送失败 · ${latest?.sender_name || 'Telegram'}`;
   } else {
-    telegramElements.caWatchSummary.textContent = `${state.senders.length} 位近期发言人 · EVM / Solana 地址`;
+    telegramElements.caWatchSummary.textContent = `${state.senders.length} 位已发现发言人 · 新发言人自动记录 · EVM / Solana 地址`;
   }
 
   const status = state.busy
@@ -223,10 +251,13 @@ function renderTelegramCaWatch() {
   telegramElements.caWatchStatus.dataset.state = status.value;
   telegramElements.caWatchStatus.textContent = status.label;
   telegramElements.caWatchButton.classList.toggle('is-active', state.enabled);
+  telegramElements.caWatchList.scrollTop = previousScrollTop;
 }
 
-function applyTelegramCaWatch(payload) {
+function applyTelegramCaWatch(payload, { preserveDraft = false, draftEnabled, draftSenderIds } = {}) {
   const state = telegramState.caWatch;
+  const wasLoaded = state.loaded;
+  const beforeSignature = telegramCaWatchSignature(state);
   const senders = (Array.isArray(payload?.senders) ? payload.senders : [])
     .map(telegramCaWatchNormalizeSender)
     .filter(Boolean);
@@ -237,38 +268,74 @@ function applyTelegramCaWatch(payload) {
   );
   state.loaded = true;
   state.enabled = Boolean(payload?.enabled);
-  state.draftEnabled = state.enabled;
+  state.draftEnabled = preserveDraft ? Boolean(draftEnabled) : state.enabled;
   state.deliveryConfigured = Boolean(payload?.delivery_configured);
   state.senders = senders;
   state.selectedSenderIds = selectedIds;
-  state.draftSenderIds = new Set(selectedIds);
+  state.draftSenderIds = preserveDraft
+    ? new Set(draftSenderIds || [])
+    : new Set(selectedIds);
   state.latestDelivery = payload?.latest_delivery && typeof payload.latest_delivery === 'object'
     ? payload.latest_delivery
     : null;
+  state.directory = payload?.directory && typeof payload.directory === 'object'
+    ? payload.directory
+    : null;
   state.error = '';
-  renderTelegramCaWatch();
-}
-
-async function loadTelegramCaWatch() {
-  const state = telegramState.caWatch;
-  if (state.busy) return;
-  state.busy = true;
-  state.error = '';
-  renderTelegramCaWatch();
-  try {
-    const payload = await fetchTelegramJson('/ca-watch');
-    applyTelegramCaWatch(payload);
-  } catch (error) {
-    state.error = `CA Bark：${error.message}`;
-  } finally {
-    state.busy = false;
+  if (!wasLoaded || beforeSignature !== telegramCaWatchSignature(state)) {
     renderTelegramCaWatch();
   }
+}
+
+async function loadTelegramCaWatch({ silent = false } = {}) {
+  const state = telegramState.caWatch;
+  if (state.busy || state.refreshing) return;
+  const requestEpoch = ++state.requestEpoch;
+  const hadError = Boolean(state.error);
+  state.refreshing = true;
+  state.busy = !silent;
+  state.error = '';
+  if (!silent) renderTelegramCaWatch();
+  try {
+    const payload = await fetchTelegramJson('/ca-watch');
+    if (requestEpoch !== state.requestEpoch) return;
+    const preserveDraft = state.loaded && telegramCaWatchDirty();
+    applyTelegramCaWatch(payload, {
+      preserveDraft,
+      draftEnabled: state.draftEnabled,
+      draftSenderIds: state.draftSenderIds
+    });
+  } catch (error) {
+    if (requestEpoch === state.requestEpoch) {
+      state.error = `CA Bark：${error.message}`;
+    }
+  } finally {
+    if (requestEpoch !== state.requestEpoch) return;
+    state.refreshing = false;
+    state.busy = false;
+    if (!silent || state.error || hadError) renderTelegramCaWatch();
+  }
+}
+
+function stopTelegramCaWatchRefresh() {
+  clearInterval(telegramState.caWatchTimer);
+  telegramState.caWatchTimer = null;
+}
+
+function scheduleTelegramCaWatchRefresh() {
+  stopTelegramCaWatchRefresh();
+  if (telegramElements.caWatchPanel.hidden || !telegramState.active) return;
+  telegramState.caWatchTimer = window.setInterval(
+    () => void loadTelegramCaWatch({ silent: true }),
+    TELEGRAM_CA_WATCH_REFRESH_INTERVAL_MS
+  );
 }
 
 async function saveTelegramCaWatch() {
   const state = telegramState.caWatch;
   if (state.busy || !state.loaded || !telegramCaWatchDirty()) return;
+  const requestEpoch = ++state.requestEpoch;
+  state.refreshing = false;
   state.busy = true;
   state.error = '';
   renderTelegramCaWatch();
@@ -280,10 +347,14 @@ async function saveTelegramCaWatch() {
         sender_ids: [...state.draftSenderIds]
       }
     });
+    if (requestEpoch !== state.requestEpoch) return;
     applyTelegramCaWatch(payload);
   } catch (error) {
-    state.error = `保存失败：${error.message}`;
+    if (requestEpoch === state.requestEpoch) {
+      state.error = `保存失败：${error.message}`;
+    }
   } finally {
+    if (requestEpoch !== state.requestEpoch) return;
     state.busy = false;
     renderTelegramCaWatch();
   }
@@ -293,7 +364,12 @@ function toggleTelegramCaWatch() {
   const opening = telegramElements.caWatchPanel.hidden;
   telegramElements.caWatchPanel.hidden = !opening;
   telegramElements.caWatchButton.setAttribute('aria-expanded', String(opening));
-  if (opening) void loadTelegramCaWatch();
+  if (opening) {
+    void loadTelegramCaWatch();
+    scheduleTelegramCaWatchRefresh();
+  } else {
+    stopTelegramCaWatchRefresh();
+  }
 }
 
 function renderTelegramAvatar(container, avatar, label) {
@@ -793,6 +869,7 @@ function stopTelegramMonitor() {
   telegramState.active = false;
   clearTimeout(telegramState.timer);
   telegramState.timer = null;
+  stopTelegramCaWatchRefresh();
   telegramState.controller?.abort();
   telegramState.controller = null;
   telegramState.busy = false;
@@ -800,8 +877,10 @@ function stopTelegramMonitor() {
 
 function synchronizeTelegramLifecycle() {
   const visible = !telegramElements.monitorPage.hidden && document.visibilityState !== 'hidden';
-  if (visible) startTelegramMonitor();
-  else stopTelegramMonitor();
+  if (visible) {
+    startTelegramMonitor();
+    scheduleTelegramCaWatchRefresh();
+  } else stopTelegramMonitor();
 }
 
 if (Object.values(telegramElements).every(Boolean)) {

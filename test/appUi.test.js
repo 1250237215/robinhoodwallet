@@ -1239,6 +1239,14 @@ test('the pinned Telegram panel configures server-side CA Bark rules by sender i
   assert.match(telegramMonitorJs, /sender_ids: \[\.\.\.state\.draftSenderIds\]/);
   assert.match(telegramMonitorJs, /selected_sender_ids/);
   assert.match(telegramMonitorJs, /delivery_configured/);
+  assert.match(telegramMonitorJs, /TELEGRAM_CA_WATCH_REFRESH_INTERVAL_MS = 10_000/);
+  assert.match(telegramMonitorJs, /loadTelegramCaWatch\(\{ silent: true \}\)/);
+  assert.match(telegramMonitorJs, /window\.setInterval\([\s\S]*TELEGRAM_CA_WATCH_REFRESH_INTERVAL_MS/);
+  assert.match(telegramMonitorJs, /preserveDraft/);
+  assert.match(telegramMonitorJs, /requestEpoch = \+\+state\.requestEpoch/);
+  assert.match(telegramMonitorJs, /requestEpoch !== state\.requestEpoch/);
+  assert.match(telegramMonitorJs, /state\.busy \|\| state\.refreshing/);
+  assert.match(telegramMonitorJs, /caWatchList\.scrollTop/);
   assert.match(telegramMonitorJs, /EVM \/ Solana 地址/);
   assert.match(stylesCss, /\.telegram-ca-watch-option \{[\s\S]*grid-template-columns:/);
   assert.match(stylesCss, /\.telegram-reply \.telegram-media\.is-compact \{[\s\S]*width: 46px;[\s\S]*height: 34px;/);
