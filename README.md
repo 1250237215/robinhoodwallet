@@ -151,7 +151,7 @@ Configuration is supplied through environment variables. Common settings are:
 | `SOCIAL_DEBOT_JOB_LEASE_MS` | `120000` | Browser analysis claim lease; longer than the bridge deadline so hidden-tab throttling can recover |
 | `DEEPSEEK_TRANSLATION_API_KEY` | Empty | Private server-side key for X and Telegram translation; store only in `/etc/robinhood-radar/translation.env` |
 | `DEEPSEEK_TRANSLATION_MODEL` | `deepseek-v4-flash` | Low-latency, non-reasoning model used for real-time translation |
-| `DEEPSEEK_TRANSLATION_TIMEOUT_MS` | `4000` | Per-attempt translation timeout; original content remains available on failure |
+| `DEEPSEEK_TRANSLATION_TIMEOUT_MS` | `8000` | Per-attempt translation timeout; original content remains available on failure |
 | `DEEPSEEK_TRANSLATION_CONCURRENCY` | `3` | Maximum concurrent real-time translation requests |
 
 See `src/robinhood/config.js` for all bounded settings and defaults.

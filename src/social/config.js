@@ -55,7 +55,7 @@ export function createSocialConfig(env = process.env, { fallbackDirectory = null
       .trim()
       .replace(/\/+$/, ''),
     translationModel: String(env.DEEPSEEK_TRANSLATION_MODEL || 'deepseek-v4-flash').trim(),
-    translationTimeoutMs: boundedInteger(env.DEEPSEEK_TRANSLATION_TIMEOUT_MS, 4_000, 500, 15_000),
+    translationTimeoutMs: boundedInteger(env.DEEPSEEK_TRANSLATION_TIMEOUT_MS, 8_000, 500, 15_000),
     translationMaxAttempts: boundedInteger(env.DEEPSEEK_TRANSLATION_MAX_ATTEMPTS, 2, 1, 3),
     translationRetryDelayMs: boundedInteger(env.DEEPSEEK_TRANSLATION_RETRY_DELAY_MS, 200, 0, 5_000),
     translationConcurrency: boundedInteger(env.DEEPSEEK_TRANSLATION_CONCURRENCY, 3, 1, 8),

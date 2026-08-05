@@ -82,7 +82,7 @@ DEEPSEEK_TRANSLATION_MODEL = os.environ.get(
 ).strip() or "deepseek-v4-flash"
 TRANSLATION_TIMEOUT_SECONDS = bounded_environment_number(
     "DEEPSEEK_TRANSLATION_TIMEOUT_MS",
-    4000,
+    8000,
     500,
     15000,
 ) / 1000

@@ -36,6 +36,7 @@ function deepSeekResponse(content) {
 
 test('social translation uses only the dedicated DeepSeek key and the flash model by default', () => {
   assert.equal(createSocialConfig({ DEEPSEEK_API_KEY: 'unrelated-key' }).translationApiKey, '');
+  assert.equal(createSocialConfig({}).translationTimeoutMs, 8_000);
   const config = createSocialConfig({
     DEEPSEEK_TRANSLATION_API_KEY: ' dedicated-key ',
     DEEPSEEK_TRANSLATION_TIMEOUT_MS: '10',
@@ -303,7 +304,7 @@ test('social service ignores client translations, persists originals first, then
       translationApiKey: 'translation-test-key',
       translationBaseUrl: 'https://api.deepseek.com',
       translationModel: 'deepseek-v4-flash',
-      translationTimeoutMs: 4_000,
+      translationTimeoutMs: 8_000,
       translationMaxAttempts: 1,
       translationRetryDelayMs: 0,
       translationConcurrency: 3,
@@ -383,7 +384,7 @@ test('social service ignores client translations, persists originals first, then
       translationApiKey: 'translation-test-key',
       translationBaseUrl: 'https://api.deepseek.com',
       translationModel: 'deepseek-v4-flash',
-      translationTimeoutMs: 4_000,
+      translationTimeoutMs: 8_000,
       translationMaxAttempts: 1,
       translationRetryDelayMs: 0,
       translationConcurrency: 3,

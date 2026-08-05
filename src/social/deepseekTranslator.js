@@ -105,7 +105,7 @@ export function createDeepSeekSocialTranslator({
   baseUrl = DEFAULT_BASE_URL,
   model = DEFAULT_MODEL,
   fetchImpl = globalThis.fetch,
-  timeoutMs = 4_000,
+  timeoutMs = 8_000,
   maxAttempts = 2,
   retryDelayMs = 200,
   concurrency = 3,
@@ -120,7 +120,7 @@ export function createDeepSeekSocialTranslator({
 
   const endpoint = `${String(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '')}/chat/completions`;
   const selectedModel = String(model || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
-  const requestTimeoutMs = boundedInteger(timeoutMs, 4_000, 500, 15_000);
+  const requestTimeoutMs = boundedInteger(timeoutMs, 8_000, 500, 15_000);
   const attemptLimit = boundedInteger(maxAttempts, 2, 1, 3);
   const retryDelay = boundedInteger(retryDelayMs, 200, 0, 5_000);
   const activeLimit = boundedInteger(concurrency, 3, 1, 8);
