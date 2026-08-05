@@ -418,7 +418,11 @@ def translate_text_to_chinese(
     except Exception as error:
         raise TranslationRequestError("network", True) from error
     translated = extract_deepseek_translation(response_payload)
-    return translated if translated and translated != source else ""
+    # A healthy model can legitimately leave a name, ticker, URL, or other
+    # proper noun unchanged. Preserve that signal so the resolver can treat it
+    # as a successful no-op instead of turning a healthy API response into a
+    # persistent "translation error" state.
+    return translated if translated else ""
 
 
 class TranslationCacheStore:
@@ -601,6 +605,13 @@ class TranslationResolver:
             self._stats["translated"] += 1
             self._last_logged_error = ""
 
+    def _record_noop(self):
+        """Record a healthy response that did not need a Chinese rewrite."""
+        with self._status_lock:
+            self._last_success_at = time.time()
+            self._stats["skipped"] += 1
+            self._last_logged_error = ""
+
     @property
     def status(self):
         with self._status_lock:
@@ -651,6 +662,9 @@ class TranslationResolver:
                     self._record_failure("internal_error")
                     failure_recorded = True
                     translated = ""
+            if translated and str(translated).strip() == source:
+                self._record_noop()
+                return ""
             if translated:
                 self._record_success()
                 return translated

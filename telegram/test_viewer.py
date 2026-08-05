@@ -185,6 +185,75 @@ class ViewerUtilityTests(unittest.TestCase):
         self.assertEqual(asyncio.run(exercise()), "")
         self.assertEqual(attempts, 3)
 
+    def test_unchanged_model_response_is_a_healthy_noop(self):
+        requests = []
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "choices": [{"message": {"content": "Ethereum"}}],
+                }).encode("utf-8")
+
+        def opener(request, timeout):
+            requests.append((request, timeout))
+            return Response()
+
+        def leave_proper_name_alone(text, timeout):
+            return translate_text_to_chinese(
+                text,
+                timeout=timeout,
+                opener=opener,
+                api_key="test-key",
+            )
+
+        async def exercise():
+            resolver = TranslationResolver(
+                translate_impl=leave_proper_name_alone,
+                retry_delays=(0, 0, 0),
+            )
+            result = await resolver.translate("Ethereum")
+            return result, resolver.status
+
+        result, status = asyncio.run(exercise())
+        self.assertEqual(result, "")
+        self.assertEqual(status["state"], "ready")
+        self.assertEqual(status["failures"], 0)
+        self.assertEqual(status["skipped"], 1)
+        self.assertEqual(status["last_error"], "")
+        self.assertEqual(len(requests), 1)
+
+    def test_empty_model_response_remains_an_error(self):
+        attempts = 0
+
+        def empty_translate(_text, _timeout):
+            nonlocal attempts
+            attempts += 1
+            return ""
+
+        async def exercise():
+            resolver = TranslationResolver(
+                translate_impl=empty_translate,
+                retry_delays=(0, 0),
+            )
+            result = await resolver.translate("hello")
+            return result, resolver.status
+
+        result, status = asyncio.run(exercise())
+        self.assertEqual(result, "")
+        self.assertEqual(attempts, 2)
+        self.assertEqual(status["state"], "error")
+        self.assertEqual(status["last_error"], "empty_response")
+        self.assertEqual(status["failures"], 2)
+        self.assertEqual(status["retries"], 1)
+
     def test_failed_translation_is_not_cached(self):
         attempts = 0
 
