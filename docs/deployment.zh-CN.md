@@ -154,6 +154,7 @@ base.env.example
 bsc.env.example
 solana.env.example
 social.env.example
+translation.env.example
 Caddyfile.example
 bootstrap-host.sh
 install-remote.sh
@@ -345,6 +346,25 @@ SOCIAL_X_REPLY_ENRICHMENT=true
 
 这个 token 只授权社媒名单和浏览器桥接写入，不是网站登录密码。不要通过聊天、
 截图、Issue 或 Git 提交公开它。
+
+### DeepSeek 翻译
+
+X 主帖、回复、引用原文和 Telegram 消息统一由 VPS 后台翻译。浏览器扩展上传的
+DeBot 翻译不会作为最终译文，API Key 也不会进入浏览器。把 DeepSeek Key 填入
+权限为 `0600` 的 `/etc/robinhood-radar/translation.env`：
+
+```dotenv
+DEEPSEEK_TRANSLATION_API_KEY=替换为你的Key
+DEEPSEEK_TRANSLATION_BASE_URL=https://api.deepseek.com
+DEEPSEEK_TRANSLATION_MODEL=deepseek-v4-flash
+DEEPSEEK_TRANSLATION_TIMEOUT_MS=4000
+DEEPSEEK_TRANSLATION_CONCURRENCY=3
+```
+
+`deepseek-v4-flash` 是低延迟、非推理模型，适合实时短文本。原文会先立即显示，
+译文完成后再增量更新；翻译失败不会阻塞 X 或 Telegram 流水。X 历史译文会分页
+走低优先级回填，成功结果保存在 `social.sqlite` 的专用缓存表；长文本会分段完整
+翻译，不会在 5000 字符处静默截断。
 
 ### Solana 和 Helius
 
@@ -593,15 +613,24 @@ TELEGRAM_BARK_INTERNAL_TOKEN=
 回填与实时翻译分开限流，旧消息不会阻塞新消息。网页入口为：
 `https://radar.example.com/robinhood-radar/telegram/`。
 
+Telegram 服务与 Robinhood 社媒服务共同读取 `/etc/robinhood-radar/translation.env`。
+成功的 Telegram 译文会以原文哈希写入私有的
+`/var/lib/robinhood-radar/telegram/telegram_translation_cache.sqlite`，不保存原文，
+服务重启时可直接复用。修改 DeepSeek 配置后需要重启 `robinhood-radar` 和
+`telegram-viewer`。
+
 检查服务和翻译字段：
 
 ```bash
 systemctl --no-pager --full status telegram-viewer
 curl --fail http://127.0.0.1:18123/api/chats >/dev/null
 curl --fail 'http://127.0.0.1:18123/api/messages?limit=1' | jq '.messages[0] | {text, translated_text}'
+curl --fail http://127.0.0.1:18123/api/status | jq '.translation'
 ```
 
 如果翻译暂时失败，Telegram 流水仍会正常显示原文；服务不会因翻译接口超时而停止。
+状态中的 `last_error` 只记录 `http_401`、`http_429`、`timeout` 等脱敏类别，不包含 key
+或响应正文。鉴权和请求错误会立即停止，只有限流、超时和服务端错误会重试。
 
 ## 12. 配置 Bark
 

@@ -269,6 +269,7 @@ verify_release_manifest() {
     solana-radar.service \
     public.tar.gz \
     telegram-viewer.service \
+    translation.env.example \
     telegram.tar.gz; do
     manifest_contains_file "$manifest" "$required" || {
       echo "Checksum manifest does not cover required file: $required" >&2
@@ -390,6 +391,7 @@ for file in \
   "$staging_dir/bsc-radar.service" \
   "$staging_dir/solana-radar.service" \
   "$staging_dir/telegram-viewer.service" \
+  "$staging_dir/translation.env.example" \
   "$staging_dir/telegram.tar.gz" \
   "$staging_dir/public.tar.gz" \
   "$staging_dir/REVISION" \

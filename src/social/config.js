@@ -49,6 +49,17 @@ export function createSocialConfig(env = process.env, { fallbackDirectory = null
     xFastRequestTimeoutMs: boundedInteger(env.SOCIAL_X_FAST_REQUEST_TIMEOUT_MS, 3_500, 1_000, 15_000),
     xReplyEnrichmentEnabled: !['0', 'false', 'off', 'no'].includes(
       String(env.SOCIAL_X_REPLY_ENRICHMENT || 'true').trim().toLowerCase()
-    )
+    ),
+    translationApiKey: String(env.DEEPSEEK_TRANSLATION_API_KEY || '').trim(),
+    translationBaseUrl: String(env.DEEPSEEK_TRANSLATION_BASE_URL || 'https://api.deepseek.com')
+      .trim()
+      .replace(/\/+$/, ''),
+    translationModel: String(env.DEEPSEEK_TRANSLATION_MODEL || 'deepseek-v4-flash').trim(),
+    translationTimeoutMs: boundedInteger(env.DEEPSEEK_TRANSLATION_TIMEOUT_MS, 4_000, 500, 15_000),
+    translationMaxAttempts: boundedInteger(env.DEEPSEEK_TRANSLATION_MAX_ATTEMPTS, 2, 1, 3),
+    translationRetryDelayMs: boundedInteger(env.DEEPSEEK_TRANSLATION_RETRY_DELAY_MS, 200, 0, 5_000),
+    translationConcurrency: boundedInteger(env.DEEPSEEK_TRANSLATION_CONCURRENCY, 3, 1, 8),
+    translationMaxQueue: boundedInteger(env.DEEPSEEK_TRANSLATION_MAX_QUEUE, 1_000, 10, 10_000),
+    translationCacheSize: boundedInteger(env.DEEPSEEK_TRANSLATION_CACHE_SIZE, 2_000, 10, 20_000)
   };
 }

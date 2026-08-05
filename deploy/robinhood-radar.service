@@ -63,6 +63,7 @@ Environment=ROBINHOOD_MONITOR_DEEP_GAP_POLL_INTERVAL_MS=5000
 Environment=ROBINHOOD_MONITOR_TOKEN_METADATA_BUDGET_MS=1500
 EnvironmentFile=-/etc/robinhood-radar/robinhood.env
 EnvironmentFile=-/etc/robinhood-radar/social.env
+EnvironmentFile=-/etc/robinhood-radar/translation.env
 ExecStart=/usr/bin/env node /opt/robinhood-radar/robinhood-server.mjs
 Restart=on-failure
 RestartSec=5

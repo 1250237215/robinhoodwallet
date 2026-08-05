@@ -1,4 +1,5 @@
 import { parseXProfileHtml } from './xProfileMonitor.js';
+import { shouldTranslateSocialText } from './deepseekTranslator.js';
 
 const X_STATUS_URL = /^https:\/\/(?:www\.)?(?:x|twitter)\.com\/[a-z0-9_]{1,15}\/status\/\d{5,25}(?:[/?#]|$)/i;
 const X_RESPONSE_URL = /^https:\/\/(?:www\.)?(?:x|twitter)\.com(?:[/?#]|$)/i;
@@ -14,7 +15,7 @@ function statusHandleFromUrl(value) {
     .exec(String(value || ''))?.[1] || '';
 }
 
-export function replyContextNeedsEnrichment(post) {
+export function replyContextNeedsEnrichment(post, { translationRequired = true } = {}) {
   if (!post || String(post.kind || '').toLowerCase() !== 'reply') return false;
   const context = post.replyContext && typeof post.replyContext === 'object' ? post.replyContext : {};
   const externalId = String(context.externalId || '').trim();
@@ -24,13 +25,13 @@ export function replyContextNeedsEnrichment(post) {
   const url = String(context.url || '').trim();
   return !STATUS_ID.test(externalId)
     || !content
-    || !translatedContent
+    || (translationRequired && shouldTranslateSocialText(content) && !translatedContent)
     || !/^[a-z0-9_]{1,15}$/i.test(handle)
     || !X_STATUS_URL.test(url)
     || statusIdFromUrl(url) !== externalId;
 }
 
-export function quoteContextNeedsEnrichment(post) {
+export function quoteContextNeedsEnrichment(post, { translationRequired = true } = {}) {
   if (!post || String(post.kind || '').toLowerCase() !== 'quote') return false;
   const context = post.quoteContext && typeof post.quoteContext === 'object' ? post.quoteContext : {};
   const externalId = String(context.externalId || post.quotedExternalId || '').trim();
@@ -40,14 +41,14 @@ export function quoteContextNeedsEnrichment(post) {
   const url = String(context.url || '').trim();
   return !STATUS_ID.test(externalId)
     || !content
-    || !translatedContent
+    || (translationRequired && shouldTranslateSocialText(content) && !translatedContent)
     || !/^[a-z0-9_]{1,15}$/i.test(handle)
     || !X_STATUS_URL.test(url)
     || statusIdFromUrl(url) !== externalId;
 }
 
-export function referenceContextNeedsEnrichment(post) {
-  return replyContextNeedsEnrichment(post) || quoteContextNeedsEnrichment(post);
+export function referenceContextNeedsEnrichment(post, options = {}) {
+  return replyContextNeedsEnrichment(post, options) || quoteContextNeedsEnrichment(post, options);
 }
 
 function boundedInteger(value, fallback, minimum, maximum) {
@@ -99,38 +100,6 @@ async function withTimeout(operation, timeoutMs, parentSignal = null) {
   } finally {
     clearTimeout(timer);
     parentSignal?.removeEventListener('abort', onAbort);
-  }
-}
-
-function translationText(payload) {
-  if (!Array.isArray(payload?.[0])) return '';
-  return payload[0]
-    .map((item) => Array.isArray(item) ? String(item[0] || '') : '')
-    .join('')
-    .trim();
-}
-
-export async function translateXReplyToChinese(content, {
-  fetchImpl = globalThis.fetch,
-  timeoutMs = 2_000,
-  signal = null
-} = {}) {
-  const text = String(content || '').trim();
-  if (!text || typeof fetchImpl !== 'function') return '';
-  try {
-    return await withTimeout(async (requestSignal) => {
-      const body = new URLSearchParams({ client: 'gtx', sl: 'auto', tl: 'zh-CN', dt: 't', q: text });
-      const response = await fetchImpl('https://translate.googleapis.com/translate_a/single', {
-        method: 'POST',
-        signal: requestSignal,
-        headers: { 'content-type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-        body
-      });
-      if (!response?.ok || typeof response.json !== 'function') return '';
-      return translationText(await response.json());
-    }, boundedInteger(timeoutMs, 2_000, 100, 10_000), signal);
-  } catch {
-    return '';
   }
 }
 
@@ -215,10 +184,11 @@ async function fetchFxTwitterQuote(externalId, { fetchImpl, timeoutMs, maxJsonBy
 
 export async function fetchXQuoteContext(post, {
   fetchImpl = globalThis.fetch,
-  translateImpl = translateXReplyToChinese,
+  translateImpl = null,
   timeoutMs = 4_000,
   translationTimeoutMs = 2_000,
   maxJsonBytes = 2 * 1024 * 1024,
+  onOriginal = null,
   signal = null
 } = {}) {
   if (!post || String(post.kind || '').toLowerCase() !== 'quote') return null;
@@ -271,22 +241,12 @@ export async function fetchXQuoteContext(post, {
   const quoteUrl = X_STATUS_URL.test(suppliedQuoteUrl) && statusIdFromUrl(suppliedQuoteUrl) === quoteId
     ? suppliedQuoteUrl
     : `https://x.com/${quoteHandle}/status/${quoteId}`;
-  const existingTranslation = existingId === quoteId
-    ? String(existingContext.translatedContent || '').trim()
-    : '';
-  const translatedContent = existingTranslation || (typeof translateImpl === 'function'
-    ? await translateImpl(quoteContent, {
-        fetchImpl,
-        timeoutMs: translationTimeoutMs,
-        signal
-      })
-    : '');
   const createdTimestamp = Number(quote.created_timestamp || 0);
   const parsedCreatedAt = Date.parse(String(quote.created_at || ''));
   const publishedAt = Number.isFinite(createdTimestamp) && createdTimestamp > 0
     ? Math.trunc(createdTimestamp * 1_000)
     : Number.isFinite(parsedCreatedAt) ? parsedCreatedAt : 0;
-  return {
+  const original = {
     source: 'twitter',
     externalId,
     kind: 'quote',
@@ -300,12 +260,26 @@ export async function fetchXQuoteContext(post, {
         avatarUrl: String(quote.author?.avatar_url || '')
       },
       content: quoteContent,
-      translatedContent,
+      translatedContent: '',
       url: quoteUrl,
       publishedAt
     },
     sourceUpdatedAt: Number(post.sourceUpdatedAt || post.publishedAt || Date.now())
   };
+  const existingTranslation = existingId === quoteId
+    ? String(existingContext.translatedContent || '').trim()
+    : '';
+  if (!existingTranslation && typeof onOriginal === 'function') await onOriginal(original);
+  const translatedContent = existingTranslation || (typeof translateImpl === 'function'
+    ? await translateImpl(quoteContent, {
+        fetchImpl,
+        timeoutMs: translationTimeoutMs,
+        signal
+      })
+    : '');
+  return translatedContent
+    ? { ...original, quoteContext: { ...original.quoteContext, translatedContent } }
+    : original;
 }
 
 export async function fetchXReferenceContext(post, options = {}) {
@@ -316,10 +290,11 @@ export async function fetchXReferenceContext(post, options = {}) {
 
 export async function fetchXReplyContext(post, {
   fetchImpl = globalThis.fetch,
-  translateImpl = translateXReplyToChinese,
+  translateImpl = null,
   timeoutMs = 4_000,
   translationTimeoutMs = 2_000,
   maxHtmlBytes = 2 * 1024 * 1024,
+  onOriginal = null,
   signal = null
 } = {}) {
   if (!post || String(post.kind || '').toLowerCase() !== 'reply') return null;
@@ -387,15 +362,8 @@ export async function fetchXReplyContext(post, {
   }
   if (!parent?.content) return null;
 
-  const translatedContent = String(parent.translatedContent || '').trim() || (typeof translateImpl === 'function'
-    ? await translateImpl(parent.content, {
-        fetchImpl,
-        timeoutMs: translationTimeoutMs,
-        signal
-      })
-    : '');
   const parentHandle = String(parent.author?.handle || post.target?.handle || '').replace(/^@/, '');
-  return {
+  const original = {
     source: 'twitter',
     externalId,
     kind: 'reply',
@@ -417,23 +385,37 @@ export async function fetchXReplyContext(post, {
         avatarUrl: ''
       },
       content: parent.content,
-      translatedContent,
+      translatedContent: '',
       url: parent.url,
       publishedAt: parent.publishedAt
     },
     sourceUpdatedAt: Number(post.sourceUpdatedAt || post.publishedAt || Date.now())
   };
+  const existingTranslation = String(parent.translatedContent || '').trim();
+  if (!existingTranslation && typeof onOriginal === 'function') await onOriginal(original);
+  const translatedContent = existingTranslation || (typeof translateImpl === 'function'
+    ? await translateImpl(parent.content, {
+        fetchImpl,
+        timeoutMs: translationTimeoutMs,
+        signal
+      })
+    : '');
+  return translatedContent
+    ? { ...original, replyContext: { ...original.replyContext, translatedContent } }
+    : original;
 }
 
 export function createXReplyEnricher({
   fetchImpl = globalThis.fetch,
-  translateImpl = translateXReplyToChinese,
+  translateImpl = null,
   onEnriched,
   concurrency = 2,
   maxQueue = 200,
   timeoutMs = 4_000,
   translationTimeoutMs = 2_000,
-  retryDelaysMs = [2_000, 4_000, 8_000]
+  retryDelaysMs = [2_000, 4_000, 8_000],
+  emitOriginalFirst = false,
+  translationRequired = true
 } = {}) {
   if (typeof onEnriched !== 'function') throw new TypeError('onEnriched is required');
   const limit = boundedInteger(concurrency, 2, 1, 4);
@@ -448,6 +430,7 @@ export function createXReplyEnricher({
   let active = 0;
   let closed = false;
   const stats = { enriched: 0, failures: 0, retries: 0, exhausted: 0 };
+  const needsEnrichment = (post) => referenceContextNeedsEnrichment(post, { translationRequired });
 
   const normalizedRetryDelays = (Array.isArray(retryDelaysMs) ? retryDelaysMs : [])
     .map((value) => boundedInteger(value, 2_000, 10, 60_000))
@@ -473,7 +456,7 @@ export function createXReplyEnricher({
       retryTimers.delete(key);
       const latest = retryPosts.get(key);
       retryPosts.delete(key);
-      if (!closed && latest && referenceContextNeedsEnrichment(latest)) queue.set(key, latest);
+      if (!closed && latest && needsEnrichment(latest)) queue.set(key, latest);
       drain();
     }, normalizedRetryDelays[attempt - 1]);
     timer.unref?.();
@@ -494,6 +477,7 @@ export function createXReplyEnricher({
         translateImpl,
         timeoutMs,
         translationTimeoutMs,
+        onOriginal: emitOriginalFirst ? onEnriched : null,
         signal: controller.signal
       }).then(async (enriched) => {
         if (!enriched || closed) return;
@@ -506,7 +490,7 @@ export function createXReplyEnricher({
           quoteContext: enriched.quoteContext || post.quoteContext
         };
         await onEnriched(enriched);
-        completed = !referenceContextNeedsEnrichment(enriched);
+        completed = !needsEnrichment(enriched);
         if (completed) {
           stats.enriched += 1;
           retryAttempts.delete(key);
@@ -518,7 +502,7 @@ export function createXReplyEnricher({
         activeKeys.delete(key);
         const pending = pendingByKey.get(key);
         pendingByKey.delete(key);
-        if (pending && referenceContextNeedsEnrichment(pending)) {
+        if (pending && needsEnrichment(pending)) {
           queue.set(key, pending);
         } else if (!completed && !closed) {
           scheduleRetry(key, retryPost);
@@ -533,7 +517,7 @@ export function createXReplyEnricher({
       if (closed) return 0;
       let added = 0;
       for (const post of Array.isArray(posts) ? posts : [posts]) {
-        if (!referenceContextNeedsEnrichment(post)) continue;
+        if (!needsEnrichment(post)) continue;
         const key = `${String(post.source || 'twitter')}:${String(post.externalId || '')}`;
         if (key.endsWith(':')) continue;
         if (activeKeys.has(key)) {

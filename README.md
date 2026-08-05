@@ -25,6 +25,7 @@ chain-specific. Base and Solana keep independent address libraries.
 - 四链 Holder 分析、人工金狗、钱包命中次数与买币频率排序
 - 实时市值、币龄，以及 Robinhood 专属的流动性、持仓和合约风险补全
 - 通过本地 Chrome 扩展同步已登录 DeBot 的个人社媒监控名单
+- X 主帖、回复、引用和 Telegram 消息由 VPS 异步使用 DeepSeek Flash 翻译，原文立即显示
 - Telegram 只读消息流：保留原文并异步显示中文翻译；可访问的频道目录会自动
   排除明显成人/受限聊天，勾选状态在保存前不会被轮询覆盖
 
@@ -105,8 +106,9 @@ selected-chat configuration, avatars, and downloaded media remain only in
 `/var/lib/robinhood-radar/telegram`. The release archive deliberately excludes
 those runtime files. Translation is best-effort and asynchronous: the original
 message is available immediately, and a `translated_text` field is filled in
-when the public Google endpoint responds. A dedicated real-time translation lane
-keeps new messages from waiting behind historical backfill. Chat filtering uses
+when the configured DeepSeek Flash request completes. A dedicated real-time
+translation lane keeps new messages from waiting behind historical backfill,
+and successful translations are cached persistently to avoid repeat API cost. Chat filtering uses
 adult/restriction metadata, conservative title/username rules, and the optional
 `TG_VIEWER_BLOCKED_CHAT_IDS` setting in `telegram.env`.
 
@@ -147,6 +149,10 @@ Configuration is supplied through environment variables. Common settings are:
 | `SOCIAL_RETENTION_DAYS` | `7` | Social post and completed-command retention |
 | `SOCIAL_BRIDGE_OFFLINE_MS` | `90000` | Time without a browser heartbeat before the bridge is shown offline; allows for Chrome background-tab timer throttling |
 | `SOCIAL_DEBOT_JOB_LEASE_MS` | `120000` | Browser analysis claim lease; longer than the bridge deadline so hidden-tab throttling can recover |
+| `DEEPSEEK_TRANSLATION_API_KEY` | Empty | Private server-side key for X and Telegram translation; store only in `/etc/robinhood-radar/translation.env` |
+| `DEEPSEEK_TRANSLATION_MODEL` | `deepseek-v4-flash` | Low-latency, non-reasoning model used for real-time translation |
+| `DEEPSEEK_TRANSLATION_TIMEOUT_MS` | `4000` | Per-attempt translation timeout; original content remains available on failure |
+| `DEEPSEEK_TRANSLATION_CONCURRENCY` | `3` | Maximum concurrent real-time translation requests |
 
 See `src/robinhood/config.js` for all bounded settings and defaults.
 

@@ -1021,6 +1021,18 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
     );
     CREATE INDEX IF NOT EXISTS social_changes_created_idx ON social_changes(created_at, id);
 
+    CREATE TABLE IF NOT EXISTS social_translation_cache (
+      source_hash TEXT NOT NULL,
+      source_length INTEGER NOT NULL,
+      model TEXT NOT NULL,
+      translated_content TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY(source_hash, model)
+    );
+    CREATE INDEX IF NOT EXISTS social_translation_cache_updated_idx
+      ON social_translation_cache(updated_at DESC);
+
     CREATE TABLE IF NOT EXISTS social_bridge_state (
       singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
       bridge_id TEXT NOT NULL DEFAULT '',
@@ -1675,6 +1687,70 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       return postFromRow(db.prepare('SELECT * FROM social_posts WHERE source = ? AND external_id = ?')
         .get(normalizeSocialSource(source), String(externalId)));
     },
+    listPostsForTranslation({ beforeId = null, limit = 100 } = {}) {
+      const numericBeforeId = beforeId === null ? null : Number(beforeId);
+      if (numericBeforeId !== null && (!Number.isSafeInteger(numericBeforeId) || numericBeforeId < 1)) {
+        throw new TypeError('Invalid social translation cursor');
+      }
+      const boundedLimit = Math.min(250, Math.max(1, Math.floor(Number(limit) || 100)));
+      return db.prepare(`
+        SELECT *
+        FROM social_posts
+        WHERE deleted_at IS NULL
+          AND (? IS NULL OR id < ?)
+          AND EXISTS (
+            SELECT 1
+            FROM social_watchlist AS watched
+            WHERE watched.desired_state = 'active'
+              AND watched.platform = social_posts.source
+              AND (
+                lower(watched.account_key) = lower(social_posts.author_handle)
+                OR lower(watched.handle) = lower(social_posts.author_handle)
+              )
+          )
+        ORDER BY id DESC
+        LIMIT ?
+      `).all(numericBeforeId, numericBeforeId, boundedLimit).map(postFromRow);
+    },
+    getSocialTranslation(sourceHash, sourceLength, model) {
+      const hash = String(sourceHash || '').trim().toLowerCase();
+      const length = Number(sourceLength);
+      const selectedModel = String(model || '').trim();
+      if (!/^[a-f0-9]{64}$/.test(hash)
+        || !Number.isSafeInteger(length) || length < 1
+        || !selectedModel) return '';
+      const row = db.prepare(`
+        SELECT translated_content
+        FROM social_translation_cache
+        WHERE source_hash = ? AND source_length = ? AND model = ?
+      `).get(hash, length, selectedModel);
+      if (!row?.translated_content) return '';
+      db.prepare(`
+        UPDATE social_translation_cache SET updated_at = ?
+        WHERE source_hash = ? AND model = ?
+      `).run(now(), hash, selectedModel);
+      return String(row.translated_content);
+    },
+    putSocialTranslation(sourceHash, sourceLength, model, translatedContent) {
+      const hash = String(sourceHash || '').trim().toLowerCase();
+      const length = Number(sourceLength);
+      const selectedModel = String(model || '').trim().slice(0, 120);
+      const translated = String(translatedContent || '').trim().slice(0, 100_000);
+      if (!/^[a-f0-9]{64}$/.test(hash)
+        || !Number.isSafeInteger(length) || length < 1
+        || !selectedModel || !translated) return false;
+      const timestamp = now();
+      db.prepare(`
+        INSERT INTO social_translation_cache(
+          source_hash, source_length, model, translated_content, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_hash, model) DO UPDATE SET
+          source_length = excluded.source_length,
+          translated_content = excluded.translated_content,
+          updated_at = excluded.updated_at
+      `).run(hash, length, selectedModel, translated, timestamp, timestamp);
+      return true;
+    },
     addWatchAccounts(inputs) {
       if (!Array.isArray(inputs)) throw new TypeError('accounts must be an array');
       const timestamp = now();
@@ -2255,12 +2331,16 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
             AND completed_at < ?
             AND (cache_expires_at IS NULL OR cache_expires_at <= ?)
         `).run(debotCutoff, timestamp);
+        const translations = db.prepare(`
+          DELETE FROM social_translation_cache WHERE updated_at < ?
+        `).run(timestamp - 90 * 24 * 60 * 60 * 1_000);
         return {
           cutoff,
           postsDeleted: Number(posts.changes),
           changesDeleted: Number(changes.changes),
           commandsDeleted: Number(commands.changes),
-          debotJobsDeleted: Number(debotJobs.changes)
+          debotJobsDeleted: Number(debotJobs.changes),
+          translationsDeleted: Number(translations.changes)
         };
       });
     },

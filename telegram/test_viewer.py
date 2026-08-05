@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,11 +11,17 @@ from viewer import (
     MessageStore,
     TelegramCaAlertService,
     TelegramCaAlertStore,
+    TRANSLATION_MAX_ATTEMPTS,
+    TRANSLATION_RETRY_DELAYS_SECONDS,
+    TranslationCacheStore,
+    TranslationRequestError,
     TranslationResolver,
+    _translation_source_text,
     blocked_chat_reason,
+    extract_deepseek_translation,
     extract_contract_addresses,
-    extract_google_translation,
     filter_allowed_dialogs,
+    initialize_translation_resolver,
     parse_blocked_chat_ids,
     translate_text_to_chinese,
 )
@@ -36,6 +43,10 @@ class FakeDialog:
 
 
 class ViewerUtilityTests(unittest.TestCase):
+    def test_default_translation_retry_policy_matches_shared_environment(self):
+        self.assertEqual(TRANSLATION_MAX_ATTEMPTS, 2)
+        self.assertEqual(TRANSLATION_RETRY_DELAYS_SECONDS, (0.0, 0.2))
+
     def test_blocked_ids_accept_common_separators_and_ignore_bad_values(self):
         self.assertEqual(
             parse_blocked_chat_ids("-1001, -1002; -1001 not-an-id"),
@@ -70,11 +81,11 @@ class ViewerUtilityTests(unittest.TestCase):
         chat = FakeDialog(-1009, "ordinary title")
         self.assertEqual(blocked_chat_reason(chat, {-1009}), "configured")
 
-    def test_google_payload_is_flattened_without_network(self):
-        payload = [[["你好", "hello"], ["世界", "world"]], None, "en"]
-        self.assertEqual(extract_google_translation(payload), "你好世界")
+    def test_deepseek_payload_extracts_message_content(self):
+        payload = {"choices": [{"message": {"content": "你好世界"}}]}
+        self.assertEqual(extract_deepseek_translation(payload), "你好世界")
 
-    def test_google_translation_uses_get_query_endpoint(self):
+    def test_deepseek_translation_uses_chat_completion_endpoint(self):
         requests = []
 
         class Response:
@@ -87,18 +98,49 @@ class ViewerUtilityTests(unittest.TestCase):
                 return False
 
             def read(self):
-                return b'[[["\xe4\xbd\xa0\xe5\xa5\xbd","hello",null,null,10]],null,"en"]'
+                return json.dumps({
+                    "choices": [{"message": {"content": "你好"}}],
+                }).encode("utf-8")
 
         def opener(request, timeout):
             requests.append((request, timeout))
             return Response()
 
-        result = translate_text_to_chinese("hello", timeout=1.25, opener=opener)
+        result = translate_text_to_chinese(
+            "hello",
+            timeout=1.25,
+            opener=opener,
+            api_key="test-key",
+        )
         self.assertEqual(result, "你好")
-        self.assertEqual(requests[0][0].method, "GET")
-        self.assertIn("tl=zh-CN", requests[0][0].full_url)
-        self.assertIn("q=hello", requests[0][0].full_url)
+        request = requests[0][0]
+        self.assertEqual(request.method, "POST")
+        self.assertTrue(request.full_url.endswith("/chat/completions"))
+        self.assertEqual(request.headers["Authorization"], "Bearer test-key")
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(body["model"], "deepseek-v4-flash")
+        self.assertEqual(body["messages"][-1]["content"], "hello")
+        self.assertEqual(body["thinking"], {"type": "disabled"})
         self.assertEqual(requests[0][1], 1.25)
+
+    def test_deepseek_translation_without_key_is_non_fatal(self):
+        self.assertEqual(translate_text_to_chinese("hello", api_key=""), "")
+
+    def test_translation_eligibility_skips_urls_addresses_and_symbols(self):
+        evm = "0xAaaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa"
+        solana = "So11111111111111111111111111111111111111112"
+        for value in (
+            "https://example.com/token",
+            evm,
+            solana,
+            "@someone $TOKEN #alpha",
+        ):
+            self.assertEqual(_translation_source_text(value), "")
+        self.assertEqual(
+            _translation_source_text(f"check this {evm}"),
+            f"check this {evm}",
+        )
+        self.assertEqual(_translation_source_text("Μιλάς αγγλικά;"), "Μιλάς αγγλικά;")
 
     def test_translation_resolver_is_async_cached_and_failure_safe(self):
         calls = []
@@ -126,14 +168,177 @@ class ViewerUtilityTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_translation_failure_returns_empty_without_raising(self):
+        attempts = 0
+
         def failed_translate(_text, _timeout):
+            nonlocal attempts
+            attempts += 1
             raise OSError("translation service unavailable")
 
         async def exercise():
-            resolver = TranslationResolver(translate_impl=failed_translate)
+            resolver = TranslationResolver(
+                translate_impl=failed_translate,
+                retry_delays=(0, 0, 0),
+            )
             return await resolver.translate("hello")
 
         self.assertEqual(asyncio.run(exercise()), "")
+        self.assertEqual(attempts, 3)
+
+    def test_failed_translation_is_not_cached(self):
+        attempts = 0
+
+        def flaky_translate(_text, _timeout):
+            nonlocal attempts
+            attempts += 1
+            return "" if attempts <= 3 else "你好"
+
+        async def exercise():
+            resolver = TranslationResolver(
+                translate_impl=flaky_translate,
+                retry_delays=(0, 0, 0),
+            )
+            first = await resolver.translate("hello")
+            second = await resolver.translate("hello")
+            return first, second
+
+        self.assertEqual(asyncio.run(exercise()), ("", "你好"))
+        self.assertEqual(attempts, 4)
+
+    def test_permanent_translation_error_is_not_retried(self):
+        attempts = 0
+
+        def unauthorized(_text, _timeout):
+            nonlocal attempts
+            attempts += 1
+            raise TranslationRequestError("http_401", False)
+
+        async def exercise():
+            resolver = TranslationResolver(
+                translate_impl=unauthorized,
+                retry_delays=(0, 0, 0),
+            )
+            result = await resolver.translate("hello")
+            return result, resolver.status
+
+        result, status = asyncio.run(exercise())
+        self.assertEqual(result, "")
+        self.assertEqual(attempts, 1)
+        self.assertEqual(status["state"], "error")
+        self.assertEqual(status["last_error"], "http_401")
+
+    def test_rate_limit_retries_then_recovers(self):
+        attempts = 0
+
+        def rate_limited(_text, _timeout):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise TranslationRequestError("http_429", True)
+            return "你好"
+
+        async def exercise():
+            resolver = TranslationResolver(
+                translate_impl=rate_limited,
+                retry_delays=(0, 0, 0),
+            )
+            result = await resolver.translate("hello")
+            return result, resolver.status
+
+        result, status = asyncio.run(exercise())
+        self.assertEqual(result, "你好")
+        self.assertEqual(attempts, 3)
+        self.assertEqual(status["state"], "ready")
+        self.assertEqual(status["retries"], 2)
+
+    def test_successful_translation_persists_across_resolvers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = TranslationCacheStore(Path(directory) / "translations.sqlite")
+            calls = 0
+
+            def translate_once(_text, _timeout):
+                nonlocal calls
+                calls += 1
+                return "你好"
+
+            async def exercise():
+                first = TranslationResolver(
+                    translate_impl=translate_once,
+                    persistent_cache=cache,
+                    retry_delays=(0,),
+                )
+                second = TranslationResolver(
+                    translate_impl=translate_once,
+                    persistent_cache=cache,
+                    retry_delays=(0,),
+                )
+                return (
+                    await first.translate("hello"),
+                    await second.translate("hello"),
+                    second.status,
+                )
+
+            first, second, status = asyncio.run(exercise())
+            cache.close()
+        self.assertEqual((first, second), ("你好", "你好"))
+        self.assertEqual(calls, 1)
+        self.assertEqual(status["persistent_cache_hits"], 1)
+
+    def test_translation_cache_init_failure_falls_back_to_memory_safely(self):
+        sensitive_error = "/private/runtime/secret/cache.sqlite is not a database"
+        calls = []
+
+        def failed_cache_factory():
+            raise RuntimeError(sensitive_error)
+
+        def fake_translate(text, _timeout):
+            calls.append(text)
+            return f"中文：{text}"
+
+        def resolver_factory(*, persistent_cache):
+            self.assertIsNone(persistent_cache)
+            return TranslationResolver(
+                translate_impl=fake_translate,
+                persistent_cache=persistent_cache,
+                retry_delays=(0,),
+                enabled=True,
+            )
+
+        with self.assertLogs(level="WARNING") as captured:
+            resolver, cache = initialize_translation_resolver(
+                cache_factory=failed_cache_factory,
+                resolver_factory=resolver_factory,
+            )
+
+        self.assertIsNone(cache)
+        logs = "\n".join(captured.output)
+        self.assertIn("已降级为仅内存缓存", logs)
+        self.assertNotIn(sensitive_error, logs)
+
+        async def exercise():
+            first = await resolver.translate("hello")
+            second = await resolver.translate("hello")
+            return first, second
+
+        first, second = asyncio.run(exercise())
+        self.assertEqual(first, "中文：hello")
+        self.assertEqual(second, first)
+        self.assertEqual(calls, ["hello"])
+
+    def test_translation_cache_initializes_normally_when_available(self):
+        cache = object()
+
+        class Resolver:
+            def __init__(self, *, persistent_cache):
+                self.persistent_cache = persistent_cache
+
+        resolver, initialized_cache = initialize_translation_resolver(
+            cache_factory=lambda: cache,
+            resolver_factory=Resolver,
+        )
+
+        self.assertIs(initialized_cache, cache)
+        self.assertIs(resolver.persistent_cache, cache)
 
     def test_translation_updates_message_and_reply_without_replacing_original(self):
         store = MessageStore(10)

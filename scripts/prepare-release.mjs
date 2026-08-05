@@ -125,7 +125,7 @@ function tarHeader({ archivePath, mode, size, mtime, type }) {
   return header;
 }
 
-function publicEntries(directory, prefix = '') {
+function publicEntries(directory, prefix = '', include = () => true) {
   const entries = [];
   for (const name of fs.readdirSync(directory).sort(compareNames)) {
     const absolutePath = path.join(directory, name);
@@ -134,9 +134,10 @@ function publicEntries(directory, prefix = '') {
     if (stats.isSymbolicLink()) {
       throw new Error(`symbolic links are not allowed in public assets: ${archivePath}`);
     }
+    if (!include(archivePath, stats)) continue;
     if (stats.isDirectory()) {
       entries.push({ absolutePath, archivePath: `${archivePath}/`, directory: true });
-      entries.push(...publicEntries(absolutePath, archivePath));
+      entries.push(...publicEntries(absolutePath, archivePath, include));
     } else if (stats.isFile()) {
       entries.push({ absolutePath, archivePath, directory: false });
     } else {
@@ -146,9 +147,9 @@ function publicEntries(directory, prefix = '') {
   return entries;
 }
 
-function createPublicArchive(sourceDirectory, destination, mtime) {
+function createPublicArchive(sourceDirectory, destination, mtime, { include } = {}) {
   const parts = [];
-  for (const entry of publicEntries(sourceDirectory)) {
+  for (const entry of publicEntries(sourceDirectory, '', include)) {
     const contents = entry.directory ? Buffer.alloc(0) : fs.readFileSync(entry.absolutePath);
     parts.push(tarHeader({
       archivePath: entry.archivePath,
@@ -168,6 +169,19 @@ function createPublicArchive(sourceDirectory, destination, mtime) {
   compressed.writeUInt32LE(0, 4);
   compressed[9] = 255;
   fs.writeFileSync(destination, compressed, { mode: 0o644 });
+}
+
+const TELEGRAM_RELEASE_ROOT_FILES = new Set([
+  'README.md',
+  'forwarder.py',
+  'requirements.txt',
+  'viewer.py'
+]);
+
+function includeTelegramReleaseEntry(archivePath) {
+  return TELEGRAM_RELEASE_ROOT_FILES.has(archivePath)
+    || archivePath === 'web'
+    || archivePath.startsWith('web/');
 }
 
 function copyFile(source, destination, mode = 0o644) {
@@ -244,7 +258,7 @@ try {
     );
   }
 
-  for (const name of ['robinhood', 'base', 'bsc', 'solana', 'social']) {
+  for (const name of ['robinhood', 'base', 'bsc', 'solana', 'social', 'translation']) {
     copyFile(
       path.join(repoRoot, 'deploy', `${name}.env.example`),
       path.join(temporaryDirectory, `${name}.env.example`)
@@ -284,7 +298,8 @@ try {
   createPublicArchive(
     path.join(repoRoot, 'telegram'),
     path.join(temporaryDirectory, 'telegram.tar.gz'),
-    sourceDateEpoch
+    sourceDateEpoch,
+    { include: includeTelegramReleaseEntry }
   );
   fs.writeFileSync(
     path.join(temporaryDirectory, 'REVISION'),

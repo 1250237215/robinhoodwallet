@@ -82,7 +82,8 @@ test('release staging is complete, checksummed, and reproducible', (t) => {
     'solana.env.example',
     'telegram-viewer.service',
     'telegram.env.example',
-    'telegram.tar.gz'
+    'telegram.tar.gz',
+    'translation.env.example'
   ];
   for (const name of required) {
     assert.ok(fs.statSync(path.join(first, name)).isFile(), `release is missing ${name}`);
@@ -112,5 +113,10 @@ test('release staging is complete, checksummed, and reproducible', (t) => {
   assert.ok(telegramEntries.includes('viewer.py'));
   assert.ok(telegramEntries.includes('forwarder.py'));
   assert.ok(telegramEntries.includes('web/app.js'));
-  assert.equal(telegramEntries.some((name) => /(?:\.session|config\.json|proxy\.json|\.venv)/.test(name)), false);
+  assert.equal(telegramEntries.includes('test_viewer.py'), false);
+  assert.equal(telegramEntries.some((name) => /(?:__pycache__|\.py[co]$|\.session|config\.json|proxy\.json|\.venv|\.sqlite)/.test(name)), false);
+  assert.equal(telegramEntries.every((name) => (
+    ['README.md', 'forwarder.py', 'requirements.txt', 'viewer.py', 'web/'].includes(name)
+      || name.startsWith('web/')
+  )), true);
 });

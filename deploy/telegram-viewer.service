@@ -10,6 +10,7 @@ Group=robinhood-radar
 WorkingDirectory=/opt/robinhood-radar/telegram
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/etc/robinhood-radar/telegram.env
+EnvironmentFile=-/etc/robinhood-radar/translation.env
 Environment=TG_RUNTIME_DIR=/var/lib/robinhood-radar/telegram
 Environment=TG_VIEWER_RUNTIME_DIR=/var/lib/robinhood-radar/telegram
 Environment=TG_VIEWER_PUBLIC_PREFIX=/robinhood-radar/telegram

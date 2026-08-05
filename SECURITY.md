@@ -22,6 +22,7 @@ The following values must never be committed:
 - `SOCIAL_BRIDGE_TOKEN`
 - `HELIUS_API_KEY`
 - `SOLANA_HELIUS_AUTH_HEADER`
+- `DEEPSEEK_TRANSLATION_API_KEY` and any other DeepSeek API key
 - Bark device keys or complete `https://api.day.app/...` endpoints
 - DeBot cookies, storage state, authorization payloads, or `sub_token` values
 - VPS passwords, SSH private keys, and production environment files

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 
+import { createDeepSeekSocialTranslator, shouldTranslateSocialText } from './deepseekTranslator.js';
 import { createSocialStore } from './store.js';
 import { createXProfileMonitor } from './xProfileMonitor.js';
 import { createXReplyEnricher, referenceContextNeedsEnrichment } from './xReplyEnricher.js';
@@ -25,6 +26,23 @@ const DEBOT_REMOTE_ERRORS = new Set([
 const EVM_ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 const DEBOT_RESULT_MAX_BYTES = 256 * 1024;
+const TRANSLATION_FIELDS = ['translatedContent', 'translatedText', 'translation'];
+
+function removeTranslationFields(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const sanitized = { ...value };
+  for (const field of TRANSLATION_FIELDS) delete sanitized[field];
+  return sanitized;
+}
+
+function withoutInboundTranslations(post) {
+  if (!post || typeof post !== 'object' || Array.isArray(post)) return post;
+  const sanitized = removeTranslationFields(post);
+  for (const field of ['replyContext', 'reply_context', 'quoteContext', 'quote_context']) {
+    if (Object.hasOwn(sanitized, field)) sanitized[field] = removeTranslationFields(sanitized[field]);
+  }
+  return sanitized;
+}
 
 class DeBotBridgeError extends Error {
   constructor(message, code, statusCode = 503) {
@@ -205,7 +223,8 @@ export function createSocialService({
   now = () => Date.now(),
   fetchImpl = globalThis.fetch,
   xProfileMonitor = null,
-  xReplyEnricher = null
+  xReplyEnricher = null,
+  socialTranslator = null
 }) {
   if (!config) throw new TypeError('Social config is required');
   const activeStore = store || createSocialStore(config.dataFile, { now });
@@ -215,6 +234,13 @@ export function createSocialService({
   let xFastTimer = null;
   let xReferenceBackfillTimer = null;
   let xReferenceBackfillQueue = [];
+  let translationBackfillTimer = null;
+  let translationBackfillCursor = null;
+  const translationBackfill = {
+    scanned: 0,
+    scheduled: 0,
+    complete: false
+  };
   let xFastInFlight = 0;
   const xFastAbortController = new AbortController();
   const xFastStats = {
@@ -340,13 +366,151 @@ export function createSocialService({
       })
     : null);
   let service = null;
+  const activeSocialTranslator = socialTranslator || (config.translationApiKey
+    ? createDeepSeekSocialTranslator({
+        apiKey: config.translationApiKey,
+        baseUrl: config.translationBaseUrl,
+        model: config.translationModel,
+        fetchImpl,
+        timeoutMs: config.translationTimeoutMs,
+        maxAttempts: config.translationMaxAttempts,
+        retryDelayMs: config.translationRetryDelayMs,
+        concurrency: config.translationConcurrency,
+        maxQueue: config.translationMaxQueue,
+        cacheSize: config.translationCacheSize,
+        readCache: (...args) => activeStore.getSocialTranslation?.(...args),
+        writeCache: (...args) => activeStore.putSocialTranslation?.(...args)
+      })
+    : null);
+  const translateXContext = activeSocialTranslator
+    ? (content, { signal = null } = {}) => activeSocialTranslator.translate(content, {
+        priority: 'realtime',
+        signal
+      })
+    : async () => '';
   const activeXReplyEnricher = xReplyEnricher || (config.xReplyEnrichmentEnabled === true
     ? createXReplyEnricher({
         fetchImpl,
-        onEnriched: (post) => service?.ingestPosts([post], { skipReplyEnrichment: true })
+        translateImpl: translateXContext,
+        emitOriginalFirst: true,
+        translationRequired: Boolean(activeSocialTranslator),
+        onEnriched: (post) => service?.ingestPosts([post], {
+          skipReplyEnrichment: true,
+          trustedTranslations: true
+        })
       })
     : null);
   const allowedXFastHandles = new Set(xFastHandles.map((handle) => String(handle).toLowerCase()));
+
+  function updateTranslatedField(post, field, sourceText, translatedContent) {
+    if (closed || !translatedContent) return;
+    const latest = activeStore.getPost(String(post.source || ''), String(post.externalId || ''));
+    if (!latest) return;
+    const currentText = field === 'translatedContent'
+      ? String(latest.content || '').trim()
+      : String(latest[field]?.content || '').trim();
+    if (currentText !== sourceText) return;
+    const patch = {
+      source: latest.source,
+      externalId: latest.externalId,
+      sourceUpdatedAt: latest.sourceUpdatedAt
+    };
+    if (field === 'translatedContent') {
+      patch.translatedContent = translatedContent;
+    } else {
+      patch[field] = { ...latest[field], translatedContent };
+    }
+    service?.ingestPosts([patch], {
+      skipReplyEnrichment: true,
+      skipTranslation: true,
+      trustedTranslations: true
+    });
+  }
+
+  function schedulePostTranslations(post, priority = 'realtime') {
+    if (!activeSocialTranslator || !post || post.deleted) {
+      return { eligible: 0, scheduled: 0, rejected: 0 };
+    }
+    let scheduled = 0;
+    let eligible = 0;
+    let rejected = 0;
+    const tasks = [
+      ['translatedContent', String(post.content || '').trim()],
+      ['replyContext', String(post.replyContext?.content || '').trim()],
+      ['quoteContext', String(post.quoteContext?.content || '').trim()]
+    ];
+    for (const [field, sourceText] of tasks) {
+      if (!shouldTranslateSocialText(sourceText)) continue;
+      eligible += 1;
+      const accepted = activeSocialTranslator.enqueue(sourceText, {
+        priority,
+        onTranslated: (translatedContent) => updateTranslatedField(
+          post,
+          field,
+          sourceText,
+          translatedContent
+        ),
+        onDropped: priority === 'background'
+          ? () => {
+              translationBackfill.complete = false;
+              translationBackfillCursor = null;
+              scheduleTranslationBackfill(100);
+            }
+          : null
+      });
+      if (accepted) scheduled += 1;
+      else rejected += 1;
+    }
+    return { eligible, scheduled, rejected };
+  }
+
+  function scheduleTranslationBackfill(delayMs = 100) {
+    if (closed || !activeSocialTranslator || translationBackfill.complete || translationBackfillTimer) return;
+    translationBackfillTimer = setTimeout(() => {
+      translationBackfillTimer = null;
+      pumpTranslationBackfill();
+    }, Math.max(25, Number(delayMs) || 100));
+    translationBackfillTimer.unref?.();
+  }
+
+  function pumpTranslationBackfill() {
+    if (closed || !activeSocialTranslator || translationBackfill.complete) return;
+    const translatorStatus = activeSocialTranslator.status || {};
+    const activeLimit = Math.max(1, Number(config.translationConcurrency) || 3);
+    if (Number(translatorStatus.queued || 0) > activeLimit * 2) {
+      scheduleTranslationBackfill(250);
+      return;
+    }
+    const page = typeof activeStore.listPostsForTranslation === 'function'
+      ? activeStore.listPostsForTranslation({ beforeId: translationBackfillCursor, limit: 100 })
+      : [];
+    if (!page.length) {
+      translationBackfill.complete = true;
+      return;
+    }
+    let lastAcceptedId = null;
+    for (const post of page) {
+      const result = schedulePostTranslations(post, 'background');
+      if (result.rejected > 0) {
+        scheduleTranslationBackfill(250);
+        break;
+      }
+      translationBackfill.scanned += 1;
+      translationBackfill.scheduled += result.scheduled;
+      lastAcceptedId = Number(post.id);
+    }
+    if (lastAcceptedId !== null) translationBackfillCursor = lastAcceptedId;
+    const pageFullyAccepted = lastAcceptedId !== null && lastAcceptedId === Number(page.at(-1).id);
+    if (pageFullyAccepted && page.length < 100) {
+      translationBackfill.complete = true;
+      return;
+    }
+    if (!pageFullyAccepted) {
+      scheduleTranslationBackfill(250);
+      return;
+    }
+    scheduleTranslationBackfill(100);
+  }
 
   function scheduleReferenceBackfill(delayMs = 250) {
     if (closed || !activeXReplyEnricher || !xReferenceBackfillQueue.length || xReferenceBackfillTimer) return;
@@ -451,7 +615,9 @@ export function createSocialService({
       debotRequestTimeoutMs: debotConfig.requestTimeoutMs,
       debotPendingCap: debotConfig.pendingCap,
       xFastHandles: [...xFastHandles],
-      xFastPollIntervalMs: Number(config.xFastPollIntervalMs) || 500
+      xFastPollIntervalMs: Number(config.xFastPollIntervalMs) || 500,
+      translationEnabled: Boolean(activeSocialTranslator),
+      translationModel: activeSocialTranslator?.model || ''
     },
     store: activeStore,
     get paired() {
@@ -467,6 +633,7 @@ export function createSocialService({
         bridge: service.getConnection(),
         counts: activeStore.getCounts(),
         fastX: service.getFastXStatus(),
+        translation: service.getTranslationStatus(),
         posts: activeStore.listPosts({ limit: postLimit, watchlistOnly: true }),
         watchlist: activeStore.listWatchlist(),
         latestChangeId: activeStore.getLatestChangeId(),
@@ -489,6 +656,11 @@ export function createSocialService({
         inFlight: xFastInFlight,
         ...xFastStats
       };
+    },
+    getTranslationStatus() {
+      return activeSocialTranslator
+        ? { ...activeSocialTranslator.status, backfill: { ...translationBackfill } }
+        : { enabled: false, model: '', backfill: { ...translationBackfill, complete: true } };
     },
     addWatchAccounts(accounts) {
       const latestBefore = activeStore.getLatestChangeId();
@@ -516,14 +688,24 @@ export function createSocialService({
       publishAfter(latestBefore);
       return result ? { ok: true, ...result, counts: activeStore.getCounts() } : null;
     },
-    ingestPosts(posts, { skipReplyEnrichment = false } = {}) {
+    ingestPosts(posts, {
+      skipReplyEnrichment = false,
+      skipTranslation = false,
+      trustedTranslations = false
+    } = {}) {
       const latestBefore = activeStore.getLatestChangeId();
-      const results = activeStore.upsertPosts(posts);
+      const incoming = !trustedTranslations
+        ? (Array.isArray(posts) ? posts : [posts]).map(withoutInboundTranslations)
+        : posts;
+      const results = activeStore.upsertPosts(incoming);
       const changes = publishAfter(latestBefore);
       if (!skipReplyEnrichment) {
         activeXReplyEnricher?.enqueue(
           results.map((result) => result.post).filter(referenceContextNeedsEnrichment)
         );
+      }
+      if (!skipTranslation) {
+        for (const result of results) schedulePostTranslations(result.post, 'realtime');
       }
       const summary = { created: 0, updated: 0, deleted: 0, restored: 0, unchanged: 0, filtered: 0 };
       for (const result of results) summary[result.action] += 1;
@@ -741,6 +923,9 @@ export function createSocialService({
             - Number(String(left.kind).toLowerCase() === 'quote'));
         pumpReferenceBackfill();
       }
+      if (activeSocialTranslator) {
+        scheduleTranslationBackfill(0);
+      }
       if (activeXProfileMonitor && xFastHandles.length) {
         pollFastXProfiles();
         xFastTimer = setInterval(
@@ -760,8 +945,11 @@ export function createSocialService({
       if (xReferenceBackfillTimer) clearTimeout(xReferenceBackfillTimer);
       xReferenceBackfillTimer = null;
       xReferenceBackfillQueue = [];
+      if (translationBackfillTimer) clearTimeout(translationBackfillTimer);
+      translationBackfillTimer = null;
       xFastAbortController.abort(abortError());
       activeXReplyEnricher?.close?.();
+      activeSocialTranslator?.close?.();
       for (const waiters of debotWaiters.values()) {
         for (const waiter of [...waiters]) {
           waiter.reject(new DeBotBridgeError(

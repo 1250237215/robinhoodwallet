@@ -6,8 +6,7 @@ import {
   fetchXQuoteContext,
   fetchXReplyContext,
   quoteContextNeedsEnrichment,
-  replyContextNeedsEnrichment,
-  translateXReplyToChinese
+  replyContextNeedsEnrichment
 } from '../src/social/xReplyEnricher.js';
 
 const REPLY_ID = '2081700497174733126';
@@ -231,16 +230,26 @@ test('quote enrichment rejects missing quotes and responses for a different oute
   }
 });
 
-test('Google translation response is flattened and translation failures stay non-fatal', async () => {
-  const translated = await translateXReplyToChinese('hello world', {
-    fetchImpl: async () => new Response(JSON.stringify([
-      [['你好', 'hello'], ['世界', ' world']]
-    ]), { headers: { 'content-type': 'application/json' } })
+test('reply context translation is opt-in and has no external fallback translator', async () => {
+  let requests = 0;
+  const enriched = await fetchXReplyContext({
+    ...replyPost(),
+    replyToExternalId: PARENT_ID,
+    replyContext: {
+      externalId: PARENT_ID,
+      author: { handle: 'iruletrenches' },
+      content: "It's a dogs world",
+      url: `https://x.com/iruletrenches/status/${PARENT_ID}`,
+      publishedAt: Date.parse('2026-07-27T11:01:06.000Z')
+    }
+  }, {
+    fetchImpl: async () => {
+      requests += 1;
+      throw new Error('no fallback request expected');
+    }
   });
-  assert.equal(translated, '你好世界');
-  assert.equal(await translateXReplyToChinese('hello', {
-    fetchImpl: async () => { throw new Error('offline'); }
-  }), '');
+  assert.equal(requests, 0);
+  assert.equal(enriched.replyContext.translatedContent, '');
 });
 
 test('reply HTML timeout bounds a response body that never finishes', async () => {
