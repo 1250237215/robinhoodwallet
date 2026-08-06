@@ -65,6 +65,34 @@
     return String(value);
   }
 
+  function isChineseMajoritySocialText(value) {
+    const meaningful = String(value || "")
+      .replace(/https?:\/\/\S+/giu, " ")
+      .replace(/\b0x[a-f0-9]{40}\b/giu, " ")
+      .replace(/\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/gu, " ")
+      .replace(/[@#$][\p{L}\p{N}_-]+/gu, " ");
+    const letters = meaningful.match(/\p{L}/gu) || [];
+    if (!letters.length) return false;
+    const hanCount = letters.reduce(
+      (count, character) => count + (/\p{Script=Han}/u.test(character) ? 1 : 0),
+      0,
+    );
+    return hanCount * 2 >= letters.length;
+  }
+
+  function translationForDisplay(source, translated) {
+    const original = String(source || "").trim();
+    const translation = String(translated || "").trim();
+    if (
+      !translation ||
+      translation === original ||
+      isChineseMajoritySocialText(original)
+    ) {
+      return "";
+    }
+    return translation;
+  }
+
   function payloadVersion(payload) {
     const messages = Array.isArray(payload.messages) ? payload.messages : [];
     const firstId = messages.length ? normalizeId(messages[0].id) : "";
@@ -241,10 +269,11 @@
     text.textContent = reply.text;
     copy.appendChild(text);
 
-    if (reply.translatedText && reply.translatedText !== reply.text) {
+    const translatedText = translationForDisplay(reply.text, reply.translatedText);
+    if (translatedText) {
       const translated = document.createElement("span");
       translated.className = "reply-preview-translation";
-      translated.textContent = `中文：${reply.translatedText}`;
+      translated.textContent = `中文：${translatedText}`;
       copy.appendChild(translated);
     }
 
@@ -388,10 +417,11 @@
       bubble.appendChild(text);
     }
 
-    const translatedText = String(
-      message.translated_text || message.translatedText || "",
-    ).trim();
-    if (translatedText && translatedText !== String(messageText).trim()) {
+    const translatedText = translationForDisplay(
+      messageText,
+      message.translated_text || message.translatedText,
+    );
+    if (translatedText) {
       const translation = document.createElement("div");
       translation.className = "message-translation";
       const label = document.createElement("b");

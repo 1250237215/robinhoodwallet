@@ -79,6 +79,14 @@ test('DeepSeek social translator sends raw text to the flash model with natural-
 test('translation eligibility skips Chinese, media placeholders, addresses, links and emoji-only messages', () => {
   assert.equal(shouldTranslateSocialText('hello trader'), true);
   assert.equal(shouldTranslateSocialText('你好 hello'), true);
+  assert.equal(shouldTranslateSocialText('中文ab'), false);
+  assert.equal(shouldTranslateSocialText('主要内容已经是中文，只夹一个 bullish'), false);
+  assert.equal(shouldTranslateSocialText('你好 this sentence is mostly English'), true);
+  assert.equal(shouldTranslateSocialText(
+    '这是中文主体 @an_extremely_long_foreign_handle $VERYLONGTOKEN #foreignhashtag '
+      + 'https://example.com/a-very-long-english-path '
+      + '0x1111111111111111111111111111111111111111',
+  ), false);
   assert.equal(shouldTranslateSocialText('你好，今天怎么样？'), false);
   assert.equal(shouldTranslateSocialText('[图片]'), false);
   assert.equal(shouldTranslateSocialText('0x1111111111111111111111111111111111111111'), false);
@@ -88,6 +96,27 @@ test('translation eligibility skips Chinese, media placeholders, addresses, link
   assert.equal(shouldTranslateSocialText('Դու խոսո՞ւմ ես անգլերեն։'), true);
   assert.equal(shouldTranslateSocialText('ინგლისურად ლაპარაკობ?'), true);
   assert.equal(shouldTranslateSocialText('a'.repeat(30_001)), false);
+});
+
+test('Chinese-majority text bypasses both DeepSeek and the persistent translation cache', async (t) => {
+  let requests = 0;
+  let cacheReads = 0;
+  const translator = createDeepSeekSocialTranslator({
+    apiKey: 'translation-test-key',
+    readCache: () => {
+      cacheReads += 1;
+      return '不应读取的历史译文';
+    },
+    fetchImpl: async () => {
+      requests += 1;
+      return deepSeekResponse('不应请求的新译文');
+    }
+  });
+  t.after(() => translator.close());
+
+  assert.equal(await translator.translate('主要内容已经是中文，只夹一个 bullish'), '');
+  assert.equal(cacheReads, 0);
+  assert.equal(requests, 0);
 });
 
 test('X Premium long posts above twenty thousand characters are translated in bounded chunks', async (t) => {

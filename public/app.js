@@ -2264,12 +2264,34 @@ function socialMediaMarkup(media, {
   return `<div class="social-post-media${context ? ' is-context' : ''}" data-media-count="${elements.length}">${elements.join('')}</div>`;
 }
 
+function isChineseMajoritySocialText(value) {
+  const meaningful = String(value || '')
+    .replace(/https?:\/\/\S+/giu, ' ')
+    .replace(/\b0x[a-f0-9]{40}\b/giu, ' ')
+    .replace(/\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/gu, ' ')
+    .replace(/[@#$][\p{L}\p{N}_-]+/gu, ' ');
+  const letters = meaningful.match(/\p{L}/gu) || [];
+  if (!letters.length) return false;
+  const hanCount = letters.reduce(
+    (count, character) => count + (/\p{Script=Han}/u.test(character) ? 1 : 0),
+    0
+  );
+  return hanCount * 2 >= letters.length;
+}
+
+function socialTranslationForDisplay(source, translated) {
+  const original = String(source || '').trim();
+  const translation = String(translated || '').trim();
+  if (!translation || translation === original || isChineseMajoritySocialText(original)) return '';
+  return translation;
+}
+
 function socialReplyMarkup(post) {
   if (String(post?.kind || '').toLowerCase() !== 'reply') return '';
   const context = post.replyContext && typeof post.replyContext === 'object' ? post.replyContext : {};
   const identity = socialReplyIdentity(post);
   const content = String(context.content || '').trim();
-  const translatedContent = String(context.translatedContent || '').trim();
+  const translatedContent = socialTranslationForDisplay(content, context.translatedContent);
   const mediaMarkup = socialMediaMarkup(context.media, {
     postUrl: identity.parentUrl,
     context: true,
@@ -2300,7 +2322,7 @@ function socialReferenceMarkup(post) {
   const context = post.quoteContext && typeof post.quoteContext === 'object' ? post.quoteContext : {};
   const identity = socialQuoteIdentity(post);
   const content = String(context.content || '').trim();
-  const translatedContent = String(context.translatedContent || '').trim();
+  const translatedContent = socialTranslationForDisplay(content, context.translatedContent);
   const mediaMarkup = socialMediaMarkup(context.media, {
     postUrl: identity.parentUrl,
     context: true,
@@ -2333,17 +2355,17 @@ function visibleSocialPosts() {
     const watchEntry = socialWatchEntryForPost(post);
     const searchable = [
       post.content,
-      post.translatedContent,
+      socialTranslationForDisplay(post.content, post.translatedContent),
       post.author?.name,
       post.author?.handle,
       post.target?.name,
       post.target?.handle,
       post.replyContext?.content,
-      post.replyContext?.translatedContent,
+      socialTranslationForDisplay(post.replyContext?.content, post.replyContext?.translatedContent),
       post.replyContext?.author?.name,
       post.replyContext?.author?.handle,
       post.quoteContext?.content,
-      post.quoteContext?.translatedContent,
+      socialTranslationForDisplay(post.quoteContext?.content, post.quoteContext?.translatedContent),
       post.quoteContext?.author?.name,
       post.quoteContext?.author?.handle,
       activity?.targetHandle,
@@ -2400,15 +2422,19 @@ function visibleTelegramSocialMessages() {
     const reply = message?.reply_preview || message?.replyPreview || {};
     return [
       message?.text,
-      message?.translated_text,
-      message?.translatedText,
+      socialTranslationForDisplay(
+        message?.text,
+        message?.translated_text || message?.translatedText
+      ),
       message?.sender,
       chat?.name,
       chat?.kind,
       chat?.username,
       reply?.text,
-      reply?.translated_text,
-      reply?.translatedText,
+      socialTranslationForDisplay(
+        reply?.text,
+        reply?.translated_text || reply?.translatedText
+      ),
       reply?.sender,
       message?.media?.kind,
       reply?.media?.kind
@@ -2439,7 +2465,10 @@ function telegramSocialReplyMarkup(message) {
   const value = reply && typeof reply === 'object' ? reply : {};
   const sender = String(value.sender || value.author || '原消息');
   const content = String(value.text || value.raw_text || (replyId ? '正在读取原消息' : '')).trim();
-  const translated = String(value.translated_text || value.translatedText || '').trim();
+  const translated = socialTranslationForDisplay(
+    content,
+    value.translated_text || value.translatedText
+  );
   const mediaMarkup = telegramSocialMediaMarkup(value.media, { context: true });
   return `
     <aside class="social-reply-context" data-reference-kind="telegram-reply">
@@ -2474,8 +2503,11 @@ function telegramSocialPostMarkup(message) {
   const mediaMarkup = telegramSocialMediaMarkup(message?.media);
   const rawText = String(message?.text || '').trim();
   const content = mediaMarkup && /^\[(?:图片|贴纸|表情包|视频|媒体)\]$/.test(rawText) ? '' : rawText;
-  const translated = String(message?.translated_text || message?.translatedText || '').trim();
-  const translationMarkup = translated && translated !== rawText
+  const translated = socialTranslationForDisplay(
+    rawText,
+    message?.translated_text || message?.translatedText
+  );
+  const translationMarkup = translated
     ? `<div class="social-post-translation is-telegram"><b>中文翻译</b><p>${escapeHtml(translated)}</p></div>`
     : '';
   const publishedAt = message?.date || telegramSocialSnapshot().updated_at || Date.now();
@@ -2657,6 +2689,7 @@ function renderSocialFeed() {
     if (item.type === 'telegram') return telegramSocialPostMarkup(item.message);
     const post = item.post;
     const author = post.author || {};
+    const translatedContent = socialTranslationForDisplay(post.content, post.translatedContent);
     const watchEntry = socialWatchEntryForPost(post);
     const watchEntryId = Number(watchEntry?.id);
     const editableWatchEntry = Number.isSafeInteger(watchEntryId);
@@ -2705,7 +2738,7 @@ function renderSocialFeed() {
           ${socialLatencyMarkup(post)}
           ${String(post.kind || '').toLowerCase() === 'reply' ? referenceMarkup : ''}
           ${activityMarkup || profileActivityMarkup || (post.content ? `<p class="social-post-content">${escapeHtml(post.content)}</p>` : '')}
-          ${!nonPostActivity && post.translatedContent && post.translatedContent !== post.content ? `<p class="social-post-translation">${escapeHtml(post.translatedContent)}</p>` : ''}
+          ${!nonPostActivity && translatedContent ? `<p class="social-post-translation">${escapeHtml(translatedContent)}</p>` : ''}
           ${String(post.kind || '').toLowerCase() === 'quote' ? referenceMarkup : ''}
           ${!nonPostActivity && contractMarkup ? `<div class="social-post-contracts">${contractMarkup}</div>` : ''}
           ${!nonPostActivity ? mediaMarkup : ''}

@@ -10,7 +10,7 @@ const MEDIA_PLACEHOLDER = /^\[(?:图片|照片|视频|贴纸|文件|语音|音�
 const URL_PATTERN = /https?:\/\/\S+/giu;
 const EVM_ADDRESS_PATTERN = /\b0x[a-f0-9]{40}\b/giu;
 const SOLANA_ADDRESS_PATTERN = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/gu;
-const SYMBOL_PATTERN = /(?:^|\s)[@#$][\p{L}\p{N}_-]+/gu;
+const SYMBOL_PATTERN = /[@#$][\p{L}\p{N}_-]+/gu;
 
 function boundedInteger(value, fallback, minimum, maximum) {
   const number = Number(value);
@@ -42,10 +42,10 @@ export function shouldTranslateSocialText(value) {
     .replace(SOLANA_ADDRESS_PATTERN, ' ')
     .replace(SYMBOL_PATTERN, ' ')
     .trim();
-  if (!meaningful || !/\p{L}/u.test(meaningful)) return false;
-  return [...meaningful].some((character) => (
-    /\p{L}/u.test(character) && !/\p{Script=Han}/u.test(character)
-  ));
+  const letters = [...meaningful].filter((character) => /\p{L}/u.test(character));
+  if (!letters.length) return false;
+  const hanCount = letters.filter((character) => /\p{Script=Han}/u.test(character)).length;
+  return hanCount * 2 < letters.length;
 }
 
 function translationChunks(source) {

@@ -169,7 +169,7 @@ TRANSLATION_PLACEHOLDER_PATTERN = re.compile(
     r"^\[(?:媒体|图片|视频|语音|音频|贴纸|表情包|文件|投票|联系人|位置|无文字内容)]$"
 )
 TRANSLATION_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
-TRANSLATION_SYMBOL_PATTERN = re.compile(r"(?:^|\s)[@#$][\w.-]+", re.UNICODE)
+TRANSLATION_SYMBOL_PATTERN = re.compile(r"[@#$][\w-]+", re.UNICODE)
 
 
 def public_url(path):
@@ -321,17 +321,22 @@ def _translation_source_text(value):
     meaningful = EVM_CA_PATTERN.sub(" ", meaningful)
     meaningful = SOLANA_CA_PATTERN.sub(" ", meaningful)
     meaningful = TRANSLATION_SYMBOL_PATTERN.sub(" ", meaningful).strip()
-    if not meaningful or not any(character.isalpha() for character in meaningful):
+    letters = [character for character in meaningful if character.isalpha()]
+    if not letters:
         return ""
 
-    # Chinese-only messages do not need a duplicate translation. Mixed text and
-    # every other script are still sent through automatic language detection.
-    has_chinese = bool(re.search(r"[\u3400-\u9fff]", meaningful))
-    has_non_chinese_script = any(
-        character.isalpha() and not ("\u3400" <= character <= "\u9fff")
-        for character in meaningful
+    han_count = sum(
+        1
+        for character in letters
+        if (
+            "\u3400" <= character <= "\u4dbf"
+            or "\u4e00" <= character <= "\u9fff"
+            or "\uf900" <= character <= "\ufaff"
+            or "\U00020000" <= character <= "\U0002fa1f"
+            or "\U00030000" <= character <= "\U000323af"
+        )
     )
-    if has_chinese and not has_non_chinese_script:
+    if han_count * 2 >= len(letters):
         return ""
     return text
 
@@ -1132,6 +1137,20 @@ class MessageStore:
             sorted(self._messages.items(), key=self._sort_key)
         )
 
+    @staticmethod
+    def _snapshot_message(message):
+        snapshot = dict(message)
+        if not _translation_source_text(snapshot.get("text")):
+            snapshot["translated_text"] = ""
+
+        reply = snapshot.get("reply_preview")
+        if isinstance(reply, dict):
+            reply_snapshot = dict(reply)
+            if not _translation_source_text(reply_snapshot.get("text")):
+                reply_snapshot["translated_text"] = ""
+            snapshot["reply_preview"] = reply_snapshot
+        return snapshot
+
     def set_sources(self, sources):
         normalized = [dict(source) for source in sources]
         with self._lock:
@@ -1229,7 +1248,10 @@ class MessageStore:
                     if message.get("chat_id") == chat_id
                 ]
             matching_count = len(messages)
-            messages = messages[-limit:]
+            messages = [
+                self._snapshot_message(message)
+                for message in messages[-limit:]
+            ]
             return {
                 "messages": messages,
                 "source": dict(self.source),

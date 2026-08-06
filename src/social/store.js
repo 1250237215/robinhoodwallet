@@ -14,6 +14,7 @@ import {
   SOCIAL_PROFILE_CHANGES,
   SOCIAL_WATCH_EVENT_TYPES
 } from './normalize.js';
+import { shouldTranslateSocialText } from './deepseekTranslator.js';
 
 function json(value) {
   try {
@@ -250,12 +251,29 @@ function profileFromJson(value) {
   return { changes, detail };
 }
 
-function postFromRow(row) {
+function hideUnneededContextTranslation(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  if (!Object.hasOwn(value, 'translatedContent')) return value;
+  if (shouldTranslateSocialText(value.content)) return value;
+  return { ...value, translatedContent: '' };
+}
+
+function hideUnneededPostTranslations(post) {
+  if (!post || typeof post !== 'object' || Array.isArray(post)) return post;
+  return {
+    ...post,
+    translatedContent: shouldTranslateSocialText(post.content) ? post.translatedContent : '',
+    replyContext: hideUnneededContextTranslation(post.replyContext),
+    quoteContext: hideUnneededContextTranslation(post.quoteContext)
+  };
+}
+
+function postFromRow(row, { hideUnneededTranslations = true } = {}) {
   if (!row) return null;
   const debotDiscoveredAt = Number(row.discovered_at || row.received_at);
   const vpsIngestedAt = Number(row.ingested_at || row.stored_at);
   const profile = profileFromJson(row.profile_json);
-  return {
+  const post = {
     id: Number(row.id),
     source: row.source,
     externalId: row.external_id,
@@ -294,6 +312,7 @@ function postFromRow(row) {
     storedAt: Number(row.stored_at),
     updatedAt: Number(row.updated_at)
   };
+  return hideUnneededTranslations ? hideUnneededPostTranslations(post) : post;
 }
 
 function watchlistFromRow(row) {
@@ -360,12 +379,13 @@ function debotJobFromRow(row) {
 
 function changeFromRow(row) {
   if (!row) return null;
+  const data = parseJson(row.payload_json, {});
   return {
     id: Number(row.id),
     type: row.event_type,
     entityType: row.entity_type,
     entityId: row.entity_id,
-    data: parseJson(row.payload_json, {}),
+    data: row.entity_type === 'post' ? hideUnneededPostTranslations(data) : data,
     createdAt: Number(row.created_at)
   };
 }
@@ -1167,7 +1187,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       return { action: post.deleted ? 'deleted' : 'created', post, change: recordChange(type, 'post', post.id, post, timestamp) };
     }
 
-    const existing = postFromRow(existingRow);
+    const existing = postFromRow(existingRow, { hideUnneededTranslations: false });
     const provided = normalized._provided;
     const mergedFeedSources = provided.has('feedSources')
       ? normalizeFeedSources([existing.feedSources, normalized.feedSources])

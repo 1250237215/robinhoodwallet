@@ -142,6 +142,34 @@ class ViewerUtilityTests(unittest.TestCase):
         )
         self.assertEqual(_translation_source_text("Μιλάς αγγλικά;"), "Μιλάς αγγλικά;")
 
+    def test_translation_eligibility_skips_chinese_majority_mixed_text(self):
+        self.assertEqual(
+            _translation_source_text("主要内容已经是中文，只夹一个 bullish"),
+            "",
+        )
+        self.assertEqual(_translation_source_text("中文 ab"), "")
+
+    def test_translation_eligibility_translates_foreign_majority_mixed_text(self):
+        value = "你好 this sentence is mostly English"
+        self.assertEqual(_translation_source_text(value), value)
+        self.assertEqual(_translation_source_text("你好 hello"), "你好 hello")
+
+    def test_translation_ratio_ignores_links_addresses_and_social_metadata(self):
+        evm = "0xAaaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa"
+        solana = "So11111111111111111111111111111111111111112"
+        chinese_majority = (
+            "这条消息主要都是中文 bullish "
+            "@ExtremelyLongEnglishHandle $VERYLONGTOKEN #LongEnglishHashtag "
+            f"https://example.com/very/long/english/path {evm} {solana}"
+        )
+        self.assertEqual(_translation_source_text(chinese_majority), "")
+
+        foreign_majority = (
+            "中文 this update is mostly written in English "
+            "@中文用户名 $中文代币 #中文标签 https://example.com/中文"
+        )
+        self.assertEqual(_translation_source_text(foreign_majority), foreign_majority)
+
     def test_translation_resolver_is_async_cached_and_failure_safe(self):
         calls = []
 
@@ -437,6 +465,72 @@ class ViewerUtilityTests(unittest.TestCase):
         self.assertEqual(result["translated_text"], "你好")
         self.assertEqual(result["reply_preview"]["text"], "world")
         self.assertEqual(result["reply_preview"]["translated_text"], "世界")
+
+    def test_snapshot_hides_legacy_chinese_majority_translations_without_mutation(self):
+        store = MessageStore(10)
+        chinese_message = {
+            "id": 1,
+            "chat_id": -1001,
+            "stream_id": "-1001:1",
+            "date": "2026-01-01T00:00:00+00:00",
+            "text": "主要内容已经是中文，只夹一个 bullish",
+            "translated_text": "不应继续展示的历史翻译",
+            "reply_preview": {
+                "id": 11,
+                "text": "回复内容主要也是中文 alpha",
+                "translated_text": "回复的历史翻译",
+            },
+        }
+        foreign_message = {
+            "id": 2,
+            "chat_id": -1001,
+            "stream_id": "-1001:2",
+            "date": "2026-01-01T00:00:01+00:00",
+            "text": "你好 this sentence is mostly English",
+            "translated_text": "你好，这句话大部分是英文",
+            "reply_preview": {
+                "id": 12,
+                "text": "回复 this reply is mostly English",
+                "translated_text": "这条回复大部分是英文",
+            },
+        }
+        store.replace_for_sources([chinese_message, foreign_message], [])
+
+        messages = {
+            message["stream_id"]: message
+            for message in store.snapshot(10)["messages"]
+        }
+        chinese_snapshot = messages["-1001:1"]
+        foreign_snapshot = messages["-1001:2"]
+        self.assertEqual(chinese_snapshot["translated_text"], "")
+        self.assertEqual(chinese_snapshot["reply_preview"]["translated_text"], "")
+        self.assertEqual(
+            foreign_snapshot["translated_text"],
+            foreign_message["translated_text"],
+        )
+        self.assertEqual(
+            foreign_snapshot["reply_preview"]["translated_text"],
+            foreign_message["reply_preview"]["translated_text"],
+        )
+
+        self.assertEqual(
+            store._messages["-1001:1"]["translated_text"],
+            chinese_message["translated_text"],
+        )
+        self.assertEqual(
+            store._messages["-1001:1"]["reply_preview"]["translated_text"],
+            chinese_message["reply_preview"]["translated_text"],
+        )
+        chinese_snapshot["text"] = "changed snapshot"
+        chinese_snapshot["reply_preview"]["text"] = "changed reply snapshot"
+        self.assertEqual(
+            store._messages["-1001:1"]["text"],
+            chinese_message["text"],
+        )
+        self.assertEqual(
+            store._messages["-1001:1"]["reply_preview"]["text"],
+            chinese_message["reply_preview"]["text"],
+        )
 
     def test_extracts_evm_and_solana_addresses_without_hash_prefix_matches(self):
         evm = "0xAaaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa"

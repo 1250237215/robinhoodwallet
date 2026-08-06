@@ -287,6 +287,99 @@ test('social posts are normalized, deduplicated, updated and tombstoned in place
   );
 });
 
+test('social read APIs hide legacy Chinese-majority translations without changing stored data', (t) => {
+  const { store } = fixture(t);
+  const chineseLegacy = {
+    source: 'twitter',
+    id: 'legacy-chinese-majority',
+    authorHandle: 'alice',
+    text: '主要内容已经是中文，只夹一个 bullish',
+    translatedText: '这是一条不应继续展示的历史翻译',
+    replyContext: {
+      externalId: '2081696375595524505',
+      content: '回复原文主要也是中文 alpha',
+      translatedContent: '这条回复翻译也不应展示'
+    },
+    quoteContext: {
+      externalId: '2081481106281390183',
+      content: '引用原文主要仍然是中文 beta',
+      translatedContent: '这条引用翻译也不应展示'
+    }
+  };
+  const foreignLegacy = {
+    source: 'twitter',
+    id: 'legacy-foreign-majority',
+    authorHandle: 'bob',
+    text: '你好 this sentence is mostly English',
+    translatedText: '你好，这句话大部分是英文',
+    replyContext: {
+      externalId: '2081696375595524506',
+      content: '回复 this reply is mostly English',
+      translatedContent: '这条回复大部分是英文'
+    },
+    quoteContext: {
+      externalId: '2081481106281390184',
+      content: '引用 this quote is mostly English',
+      translatedContent: '这条引用大部分是英文'
+    }
+  };
+
+  const chineseResult = store.upsertPosts([chineseLegacy])[0];
+  const foreignResult = store.upsertPosts([foreignLegacy])[0];
+  const rawChineseChange = {
+    ...chineseResult.post,
+    content: chineseLegacy.text,
+    translatedContent: chineseLegacy.translatedText,
+    replyContext: chineseLegacy.replyContext,
+    quoteContext: chineseLegacy.quoteContext
+  };
+  const rawForeignChange = {
+    ...foreignResult.post,
+    content: foreignLegacy.text,
+    translatedContent: foreignLegacy.translatedText,
+    replyContext: foreignLegacy.replyContext,
+    quoteContext: foreignLegacy.quoteContext
+  };
+  store.db.prepare(`
+    UPDATE social_changes SET payload_json = ?
+    WHERE entity_type = 'post' AND entity_id = ?
+  `).run(JSON.stringify(rawChineseChange), String(chineseResult.post.id));
+  store.db.prepare(`
+    UPDATE social_changes SET payload_json = ?
+    WHERE entity_type = 'post' AND entity_id = ?
+  `).run(JSON.stringify(rawForeignChange), String(foreignResult.post.id));
+
+  const assertChineseTranslationsHidden = (post) => {
+    assert.equal(post.translatedContent, '');
+    assert.equal(post.replyContext.translatedContent, '');
+    assert.equal(post.quoteContext.translatedContent, '');
+  };
+  const assertForeignTranslationsPreserved = (post) => {
+    assert.equal(post.translatedContent, foreignLegacy.translatedText);
+    assert.equal(post.replyContext.translatedContent, foreignLegacy.replyContext.translatedContent);
+    assert.equal(post.quoteContext.translatedContent, foreignLegacy.quoteContext.translatedContent);
+  };
+
+  assertChineseTranslationsHidden(store.getPost('twitter', chineseLegacy.id));
+  assertForeignTranslationsPreserved(store.getPost('twitter', foreignLegacy.id));
+
+  const listedPosts = new Map(store.listPosts().map((post) => [post.externalId, post]));
+  assertChineseTranslationsHidden(listedPosts.get(chineseLegacy.id));
+  assertForeignTranslationsPreserved(listedPosts.get(foreignLegacy.id));
+
+  const changes = new Map(store.listChanges().map((change) => [change.entityId, change.data]));
+  assertChineseTranslationsHidden(changes.get(String(chineseResult.post.id)));
+  assertForeignTranslationsPreserved(changes.get(String(foreignResult.post.id)));
+
+  const storedChinese = store.db.prepare(`
+    SELECT translated_content, reply_context_json, quote_context_json
+    FROM social_posts WHERE id = ?
+  `).get(chineseResult.post.id);
+  assert.equal(storedChinese.translated_content, chineseLegacy.translatedText);
+  assert.equal(JSON.parse(storedChinese.reply_context_json).translatedContent, chineseLegacy.replyContext.translatedContent);
+  assert.equal(JSON.parse(storedChinese.quote_context_json).translatedContent, chineseLegacy.quoteContext.translatedContent);
+});
+
 test('older bridge retries cannot restore a newer deletion tombstone', (t) => {
   const { store } = fixture(t);
   const publishedAt = Date.parse('2026-07-17T11:59:00Z');

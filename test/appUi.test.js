@@ -6,6 +6,7 @@ const indexHtml = fs.readFileSync(new URL('../public/index.html', import.meta.ur
 const appJs = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 const telegramMonitorJs = fs.readFileSync(new URL('../public/telegram-monitor.js', import.meta.url), 'utf8');
 const telegramSocialJs = fs.readFileSync(new URL('../public/telegram-social.js', import.meta.url), 'utf8');
+const telegramViewerJs = fs.readFileSync(new URL('../telegram/web/app.js', import.meta.url), 'utf8');
 const stylesCss = fs.readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
 
 function appSourceBetween(start, end) {
@@ -40,18 +41,35 @@ function executableSocialMediaMarkup() {
 
 function executableVisibleSocialPosts({ posts, query, notesByPostId }) {
   const source = appSourceBetween('function visibleSocialPosts()', 'function renderSocialBridgeStatus()');
+  const translationSource = appSourceBetween(
+    'function isChineseMajoritySocialText(value)',
+    'function socialReplyMarkup(post)'
+  );
   return Function(
     'state',
     'isEnabledPersonalSocialEvent',
     'socialActivityIdentity',
     'socialWatchEntryForPost',
-    `${source}\nreturn visibleSocialPosts();`
+    `${translationSource}\n${source}\nreturn visibleSocialPosts();`
   )(
     { socialPosts: posts, socialSearchQuery: query },
     () => true,
     () => null,
     (post) => ({ note: notesByPostId[post.id] || '' })
   );
+}
+
+function executableSocialTranslationHelpers(source = appJs) {
+  const startIndex = source.indexOf('function isChineseMajoritySocialText(value)');
+  const endMarker = source === appJs ? 'function socialReplyMarkup(post)' : 'function payloadVersion(payload)';
+  const endIndex = source.indexOf(endMarker, startIndex);
+  assert.notEqual(startIndex, -1, 'missing Chinese-majority helper');
+  assert.notEqual(endIndex, -1, `missing helper end marker: ${endMarker}`);
+  const helperSource = source.slice(startIndex, endIndex);
+  const returnName = source === appJs ? 'socialTranslationForDisplay' : 'translationForDisplay';
+  return Function(
+    `${helperSource}\nreturn { isChineseMajoritySocialText, translationForDisplay: ${returnName} };`
+  )();
 }
 
 function executableSocialLatencyMarkup() {
@@ -1645,6 +1663,63 @@ test('social cards show only the final browser receipt latency in milliseconds',
   });
   assert.equal(markup, '<div class="social-latency-value" aria-label="延迟">-90ms</div>');
   assert.doesNotMatch(markup, /<time|<span|21:02|网页接收|VPS/);
+});
+
+test('historical social translations are hidden when meaningful source text is Chinese-majority', () => {
+  const mainHelpers = executableSocialTranslationHelpers();
+  const telegramViewerHelpers = executableSocialTranslationHelpers(telegramViewerJs);
+  const cases = [
+    ['主要内容已经是中文，只夹一个 bullish', true],
+    ['你好 this sentence is mostly English', false],
+    ['中文 ok', true],
+    [
+      '这是中文 https://example.com/english/path '
+        + '@very_long_english_handle $VERYLONGTOKEN #verylonghashtag '
+        + '0xAaaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa '
+        + 'So11111111111111111111111111111111111111112',
+      true
+    ]
+  ];
+
+  for (const [source, expected] of cases) {
+    assert.equal(mainHelpers.isChineseMajoritySocialText(source), expected);
+    assert.equal(telegramViewerHelpers.isChineseMajoritySocialText(source), expected);
+  }
+  assert.equal(
+    mainHelpers.translationForDisplay('主要内容已经是中文，只夹一个 bullish', '历史中文译文'),
+    ''
+  );
+  assert.equal(
+    telegramViewerHelpers.translationForDisplay('你好 this sentence is mostly English', '你好，这句话主要是英文。'),
+    '你好，这句话主要是英文。'
+  );
+
+  const renderReference = executableSocialReferenceMarkup();
+  const replyMarkup = renderReference({
+    kind: 'reply',
+    replyContext: {
+      author: { handle: 'parent_user' },
+      content: '主要内容已经是中文，只夹一个 bullish',
+      translatedContent: '不应显示的历史译文'
+    }
+  });
+  assert.doesNotMatch(replyMarkup, /不应显示的历史译文|原文翻译/);
+
+  const visible = executableVisibleSocialPosts({
+    posts: [{
+      id: 91,
+      kind: 'post',
+      content: '主要内容已经是中文，只夹一个 bullish',
+      translatedContent: '只存在于旧译文的隐藏关键词'
+    }],
+    query: '隐藏关键词',
+    notesByPostId: {}
+  });
+  assert.deepEqual(visible, []);
+
+  assert.match(appJs, /socialTranslationForDisplay\(\s*rawText,[\s\S]*message\?\.translated_text \|\| message\?\.translatedText/);
+  assert.match(telegramViewerJs, /translationForDisplay\(reply\.text, reply\.translatedText\)/);
+  assert.match(telegramViewerJs, /translationForDisplay\(\s*messageText,[\s\S]*message\.translated_text \|\| message\.translatedText/);
 });
 
 test('reply cards keep the displayed parent, profile link and post link on one identity', () => {
