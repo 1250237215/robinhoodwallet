@@ -2731,6 +2731,7 @@ function renderSocialFeed() {
             </div>
             <div class="social-post-head-tools">
               ${editableWatchEntry ? `<button class="inline-icon-button social-post-note-edit" type="button" data-social-feed-note-edit="${watchEntryId}" title="编辑 @${escapeHtml(author.handle || '')} 的备注" aria-label="编辑 @${escapeHtml(author.handle || '')} 的备注"${state.socialMutationBusy ? ' disabled' : ''}><i data-lucide="notebook-pen" aria-hidden="true"></i></button>` : ''}
+              ${editableWatchEntry ? `<button class="inline-icon-button social-post-watch-remove" type="button" data-social-feed-watch-remove="${watchEntryId}" title="停止监控 @${escapeHtml(author.handle || '')}" aria-label="停止监控 @${escapeHtml(author.handle || '')}"${state.socialMutationBusy ? ' disabled' : ''}><i data-lucide="user-round-x" aria-hidden="true"></i></button>` : ''}
               <time class="social-post-time" datetime="${escapeHtml(String(post.publishedAt ?? ''))}" data-live-timestamp="${escapeHtml(String(post.publishedAt ?? ''))}" title="${escapeHtml(formatDateTime(post.publishedAt))}" aria-live="off">${escapeHtml(formatMonitorAge(post.publishedAt))}</time>
             </div>
           </header>
@@ -3858,6 +3859,33 @@ async function deleteSelectedSocialWatchAccounts() {
   } finally {
     state.socialMutationBusy = false;
     renderSocialWatchlist();
+  }
+}
+
+async function removeSocialFeedAuthor(id) {
+  const numericId = Number(id);
+  const entry = state.socialWatchlist.find((item) => Number(item.id) === numericId);
+  if (!entry || !Number.isSafeInteger(numericId) || state.socialMutationBusy) return;
+  const handle = normalizeSocialHandle(entry.handle || entry.accountKey) || '该账号';
+  if (!window.confirm(`停止监控 @${handle}？该账号的动态会从主页时间线移除。`)) return;
+  state.socialMutationBusy = true;
+  renderSocialMonitor();
+  try {
+    const payload = await runSocialWrite('DELETE', `/watchlist/${numericId}`);
+    applySocialWatchlistEntry(payload?.entry || { ...entry, desiredState: 'removed' });
+    state.socialSelectedWatchlist.delete(numericId);
+    mergeSocialPosts([]);
+    state.socialCounts.watchlist = state.socialWatchlist.length;
+    state.socialCounts.unsyncedWatchlist = state.socialWatchlist
+      .filter((item) => item.syncStatus !== 'synced').length;
+    renderSocialMonitor();
+    await loadSocialSnapshot({ quiet: true });
+    showToast(`已停止监控 @${handle}`);
+  } catch (error) {
+    showToast(`停止监控 @${handle} 失败：${error.message}`, 'error');
+  } finally {
+    state.socialMutationBusy = false;
+    renderSocialMonitor();
   }
 }
 
@@ -7173,6 +7201,12 @@ elements.socialEventEditor.addEventListener('cancel', (event) => {
 });
 elements.socialEventEditor.addEventListener('close', resetSocialEventEditor);
 elements.socialFeed.addEventListener('click', (event) => {
+  const removeButton = event.target.closest('[data-social-feed-watch-remove]');
+  if (removeButton) {
+    event.preventDefault();
+    void removeSocialFeedAuthor(removeButton.dataset.socialFeedWatchRemove);
+    return;
+  }
   const editButton = event.target.closest('[data-social-feed-note-edit]');
   if (!editButton) return;
   openSocialEventEditor(editButton.dataset.socialFeedNoteEdit, { noteOnly: true });

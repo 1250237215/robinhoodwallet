@@ -4260,16 +4260,32 @@ button.telegram-reply {
   flex: 0 0 auto;
 }
 
-.social-post-note-edit {
+.social-post-note-edit,
+.social-post-watch-remove {
   width: 28px;
   height: 28px;
   flex: 0 0 28px;
+}
+
+.social-post-note-edit {
   color: #49725b;
 }
 
-.social-post-note-edit svg {
+.social-post-note-edit svg,
+.social-post-watch-remove svg {
   width: 13px;
   height: 13px;
+}
+
+.social-post-watch-remove {
+  color: #9b4650;
+}
+
+.social-post-watch-remove:hover:not(:disabled),
+.social-post-watch-remove:focus-visible:not(:disabled) {
+  border-color: #d9a8ad;
+  background: #fff2f3;
+  color: #b32636;
 }
 
 .social-post-author-line {

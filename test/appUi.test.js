@@ -1565,6 +1565,13 @@ test('each watched account exposes behavior controls and a searchable custom not
   assert.match(appJs, /runSocialWrite\('PATCH', `\/watchlist\/\$\{id\}`, patch\)/);
   assert.match(appJs, /data-social-feed-note-edit="\$\{watchEntryId\}"/);
   assert.match(appJs, /openSocialEventEditor\(editButton\.dataset\.socialFeedNoteEdit, \{ noteOnly: true \}\)/);
+  assert.match(appJs, /data-social-feed-watch-remove="\$\{watchEntryId\}"/);
+  assert.match(appJs, /title="停止监控 @\$\{escapeHtml\(author\.handle \|\| ''\)\}"/);
+  assert.match(appJs, /function removeSocialFeedAuthor\(id\)[\s\S]*window\.confirm\(`停止监控 @\$\{handle\}？该账号的动态会从主页时间线移除。`\)/);
+  assert.match(appJs, /runSocialWrite\('DELETE', `\/watchlist\/\$\{numericId\}`\)/);
+  assert.match(appJs, /applySocialWatchlistEntry\(payload\?\.entry \|\| \{ \.\.\.entry, desiredState: 'removed' \}\)/);
+  assert.match(appJs, /removeSocialFeedAuthor\(removeButton\.dataset\.socialFeedWatchRemove\)/);
+  assert.doesNotMatch(appSourceBetween('function telegramSocialPostMarkup(message)', 'function socialFeedItems()'), /data-social-feed-watch-remove/);
   assert.match(appJs, /elements\.socialEventOptions\.hidden = noteOnly/);
   assert.match(appJs, /function closeSocialEventEditor\(\{ force = false \} = \{\}\)[\s\S]*state\.socialMutationBusy && !force/);
   assert.match(appJs, /closeSocialEventEditor\(\{ force: true \}\)/);
@@ -1579,6 +1586,7 @@ test('each watched account exposes behavior controls and a searchable custom not
   assert.match(stylesCss, /\.social-event-note-field textarea \{[\s\S]*width: 100%;[\s\S]*max-height: 180px/);
   assert.match(stylesCss, /\.social-event-options \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(stylesCss, /\.social-post-note-edit \{[\s\S]*width: 28px;[\s\S]*height: 28px/);
+  assert.match(stylesCss, /\.social-post-note-edit,\s*\.social-post-watch-remove \{[\s\S]*width: 28px;[\s\S]*height: 28px;[\s\S]*flex: 0 0 28px/);
   assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.social-event-options \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.social-event-editor-actions \{[\s\S]*flex-direction: column/);
 
