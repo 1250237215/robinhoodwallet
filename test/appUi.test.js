@@ -105,13 +105,13 @@ function executableRenderMonitorTokenRisk(chainId = 'robinhood') {
     return renderMonitorTokenRisk;
   `;
   return Function(
-    'activeChain',
+    'monitorChainId',
     'formatMoney',
     'formatDateTime',
     'MONITOR_TOKEN_RISK_STATUSES',
     source
   )(
-    () => ({ id: chainId }),
+    (value) => String(value || chainId),
     (value) => `$${Number(value) / 1_000}K`,
     (value) => String(value),
     new Set(['pending', 'partial', 'ready', 'unavailable', 'error'])
@@ -817,7 +817,7 @@ test('a four-chain segmented switcher selects Robinhood, Base, BSC, and Solana i
 test('active-chain configuration drives API roots and browser settings keys', () => {
   const syncSource = appJs.slice(
     appJs.indexOf('function syncChainRuntimeVariables'),
-    appJs.indexOf('function explorerUrl')
+    appJs.indexOf('function explorerUrl(kind')
   );
   assert.match(syncSource, /API_ROOT = `\$\{APP_BASE\}\/api\/\$\{chain\.apiPath\}`/);
   assert.match(syncSource, /EXPLORER_ROOT = chain\.explorerRoot/);
@@ -875,16 +875,16 @@ test('Solana identities retain case while Robinhood, Base, and BSC identities no
   assert.match(solanaConfig, /addressPattern: \/\^\[1-9A-HJ-NP-Za-km-z\]\{32,44\}\$\//);
   assert.match(solanaConfig, /hashPattern: \/\^\[1-9A-HJ-NP-Za-km-z\]\{64,88\}\$\//);
   assert.match(appJs, /activeChain\(\)\.family === 'solana'[\s\S]*Solana Base58 Mint 地址/);
-  assert.match(appJs, /event\.assetType === 'native' \? activeChain\(\)\.nativeSymbol : 'TOKEN'/);
+  assert.match(appJs, /event\.assetType === 'native' \? eventChain\.nativeSymbol : 'TOKEN'/);
 });
 
-test('switching chains closes live transport, clears chain data, and invalidates stale requests', () => {
+test('switching the research chain preserves selected monitor feeds while invalidating stale research requests', () => {
   const stopSource = appJs.slice(
     appJs.indexOf('function stopMonitorTransport'),
     appJs.indexOf('function scheduleMonitorPoll')
   );
   assert.match(stopSource, /state\.monitorSequence \+= 1/);
-  assert.match(stopSource, /state\.monitorEventSource\.close\(\)/);
+  assert.match(stopSource, /for \(const session of state\.monitorSessions\.values\(\)\) stopMonitorSession\(session/);
   assert.match(stopSource, /state\.monitorEventSource = null/);
 
   const resetSource = appJs.slice(
@@ -892,7 +892,6 @@ test('switching chains closes live transport, clears chain data, and invalidates
     appJs.indexOf('function switchChain')
   );
   for (const operation of [
-    'stopMonitorTransport({ stopSocial: false });',
     'clearManualWinnerTracking();',
     'state.requestSequence += 1;',
     'state.detailSequence += 1;',
@@ -907,16 +906,13 @@ test('switching chains closes live transport, clears chain data, and invalidates
     'state.monitorVolume = 70;',
     "state.monitorBarkSound = 'alarm';",
     'state.monitorBarkVolume = 5;',
-    'state.monitorEvents = [];',
-    'state.monitorServerClusters = [];',
-    'state.monitorEventKeys.clear();',
-    'state.monitorAlertedTokens.clear();',
-    'state.monitorBarkTargets = [];',
-    'state.monitorBarkBusy.clear();',
     'setMonitorMutationControlsDisabled(true);'
   ]) {
     assert.equal(resetSource.includes(operation), true, `missing chain reset: ${operation}`);
   }
+  assert.match(resetSource, /function resetChainState\(\{ preserveMonitorFeed = false \} = \{\}\)/);
+  assert.match(resetSource, /if \(!preserveMonitorFeed\) stopMonitorTransport\(\{ stopSocial: false, clearEvents: true \}\)/);
+  assert.match(resetSource, /else \{\s+synchronizeCombinedMonitorEvents\(\);\s+synchronizeActiveMonitorSessionState\(\);/);
   for (const sharedSocialState of [
     'socialPosts',
     'socialWatchlist',
@@ -943,14 +939,14 @@ test('switching chains closes live transport, clears chain data, and invalidates
   assert.match(switchSource, /state\.chainAbortController = new AbortController\(\)/);
   assert.match(switchSource, /url\.hash = ''/);
   assert.match(switchSource, /startMonitorPage\(\{ preserveSocial: true \}\)/);
-  assert.match(switchSource, /resetChainState\(\)/);
+  assert.match(switchSource, /resetChainState\(\{ preserveMonitorFeed: true \}\)/);
   assert.doesNotMatch(switchSource, /(?:start|stop)SocialMonitor\(/);
   assert.ok(
     switchSource.indexOf('state.chainAbortController.abort();') < switchSource.indexOf('activeChainId = nextChainId'),
     'old-chain fetches must abort before the active chain changes'
   );
   assert.ok(
-    switchSource.indexOf('state.chainAbortController = new AbortController();') < switchSource.indexOf('resetChainState();'),
+    switchSource.indexOf('state.chainAbortController = new AbortController();') < switchSource.indexOf('resetChainState({ preserveMonitorFeed: true });'),
     'new-chain operations must receive a fresh signal before loading starts'
   );
 
@@ -958,16 +954,16 @@ test('switching chains closes live transport, clears chain data, and invalidates
     appJs.indexOf('async function pollMonitorEvents'),
     appJs.indexOf('function connectMonitorStream')
   );
-  assert.match(pollSource, /const context = captureChainRequestContext\(\)/);
-  assert.match(pollSource, /const sequence = state\.monitorSequence/);
-  assert.match(pollSource, /!chainRequestIsCurrent\(context\) \|\| sequence !== state\.monitorSequence/);
+  assert.match(pollSource, /const context = captureMonitorSessionContext\(session\)/);
+  assert.match(pollSource, /session\.pollBusy = true/);
+  assert.match(pollSource, /!monitorSessionRequestIsCurrent\(context\)/);
 
   const streamSource = appJs.slice(
     appJs.indexOf('function connectMonitorStream'),
     appJs.indexOf('async function startMonitorPage')
   );
   assert.match(streamSource, /new EventSource\(`\$\{context\.apiRoot\}\/monitor\/stream`\)/);
-  assert.match(streamSource, /const isCurrentSource = \(\) => state\.monitorEventSource === source && chainRequestIsCurrent\(context\)/);
+  assert.match(streamSource, /const isCurrentSource = \(\) => session\.eventSource === source && monitorSessionRequestIsCurrent\(context\)/);
   assert.match(streamSource, /if \(!isCurrentSource\(\)\) return/);
 
   const applyMonitorSource = appJs.slice(
@@ -985,8 +981,8 @@ test('switching chains closes live transport, clears chain data, and invalidates
   assert.match(loadSource, /const sequence = \+\+state\.requestSequence/);
   assert.match(loadSource, /if \(!chainRequestIsCurrent\(context\) \|\| sequence !== state\.requestSequence\) return/);
   assert.match(loadSource, /if \(data\.chain && data\.chain !== context\.chainId\) return/);
-  assert.match(appJs, /if \(record\.chain && String\(record\.chain\) !== activeChainId\) return/);
-  assert.match(appJs, /if \(rawEvent\.chain && String\(rawEvent\.chain\) !== activeChainId\) return/);
+  assert.match(appJs, /const declaredChainId = declaredMonitorChainId\(record\);\s+if \(declaredChainId !== null && declaredChainId !== session\.chainId\) return/);
+  assert.match(appJs, /const declaredChainId = declaredMonitorChainId\(rawEvent\)/);
 });
 
 test('all API reads and writes use an immutable abortable chain context', () => {
@@ -1009,7 +1005,8 @@ test('all API reads and writes use an immutable abortable chain context', () => 
   assert.match(requestHelpers, /fetchJson\(`\$\{context\.apiRoot\}\$\{path\}`/);
   assert.match(requestHelpers, /signal: context\.signal/);
 
-  assert.equal((appJs.match(/\bfetchJson\(/g) || []).length, 5, 'direct API calls must be limited to shared helpers and social root');
+  assert.equal((appJs.match(/\bfetchJson\(/g) || []).length, 6, 'direct API calls must be limited to shared helpers, monitor sessions, and social root');
+  assert.match(appJs, /function fetchMonitorSessionJson\(context, path, options = \{\}\)[\s\S]*fetchJson\(`\$\{context\.apiRoot\}\$\{path\}`/);
   assert.match(appJs, /fetchJson\(`\$\{SOCIAL_API_ROOT\}\?postLimit=100`/);
   assert.match(appJs, /fetchJson\(`\$\{SOCIAL_API_ROOT\}\/status`/);
   assert.doesNotMatch(appJs, /\$\{API_ROOT\}\//, 'async paths must not interpolate the mutable API root');
@@ -1018,7 +1015,6 @@ test('all API reads and writes use an immutable abortable chain context', () => 
     ['saveMonitorSoundSettings', 'saveBarkSoundSettings'],
     ['createBarkTarget', 'runBarkAction'],
     ['runBarkAction', 'refreshBarkTargets'],
-    ['startMonitorPage', 'saveMonitorSettings'],
     ['saveMonitorSettings', 'currentMinimumEntryUsd'],
     ['exportConfirmedWalletsToDebot', 'loadApiData'],
     ['loadWalletDetail', 'renderResultsSelection'],
@@ -1042,6 +1038,11 @@ test('all API reads and writes use an immutable abortable chain context', () => 
     assert.match(source, /const context = captureChainRequestContext\(\)/, `${name} must capture its chain before awaiting`);
     assert.match(source, /(?:chainRequestIsCurrent|requireCurrentChainRequest)\(context\)/, `${name} must reject stale completion`);
   }
+  const monitorSessionHelpers = appSourceBetween('function captureMonitorSessionContext(session)', 'function selectedMonitorEvents()');
+  assert.match(monitorSessionHelpers, /return Object\.freeze\(\{[\s\S]*chainId: session\.chainId[\s\S]*signal: session\.abortController\.signal/);
+  assert.match(monitorSessionHelpers, /context\.session\.sequence === context\.sequence/);
+  assert.match(monitorSessionHelpers, /context\.session\.abortController\.signal === context\.signal/);
+  assert.match(monitorSessionHelpers, /fetchJson\(`\$\{context\.apiRoot\}\$\{path\}`/);
 
   const resetSource = appJs.slice(
     appJs.indexOf('function resetChainState'),
@@ -1069,7 +1070,7 @@ test('all API reads and writes use an immutable abortable chain context', () => 
   }
 });
 
-test('DeBot and explorer links are generated from the active chain only', () => {
+test('DeBot and explorer links use the active chain for research and each event chain for the mixed monitor feed', () => {
   for (const [chain, debotAddress, debotToken, manager, explorer] of [
     ['robinhood', 'https://debot.ai/address/robinhood', 'https://debot.ai/token/robinhood/308574_', 'https://debot.ai/track?chain=robinhood&tab=manager', 'https://robinhoodchain.blockscout.com'],
     ['base', 'https://debot.ai/address/base', 'https://debot.ai/token/base/', 'https://debot.ai/track?chain=base&tab=manager', 'https://base.blockscout.com'],
@@ -1087,7 +1088,7 @@ test('DeBot and explorer links are generated from the active chain only', () => 
   }
 
   const explorerSource = appJs.slice(
-    appJs.indexOf('function explorerUrl'),
+    appJs.indexOf('function explorerUrl(kind'),
     appJs.indexOf('syncChainRuntimeVariables();')
   );
   assert.match(explorerSource, /const chain = activeChain\(\)/);
@@ -1100,9 +1101,10 @@ test('DeBot and explorer links are generated from the active chain only', () => 
     appJs.indexOf('function renderMonitorEvents'),
     appJs.indexOf('function renderMonitorPage')
   );
-  assert.match(monitorRender, /`\$\{DEBOT_ADDRESS_ROOT\}\/\$\{event\.walletAddress\}`/);
-  assert.match(monitorRender, /`\$\{DEBOT_TOKEN_ROOT\}\$\{event\.tokenAddress\}`/);
-  assert.match(monitorRender, /explorerUrl\('tx', event\.txHash\)/);
+  assert.match(monitorRender, /const eventChain = monitorChain\(event\.chain\)/);
+  assert.match(monitorRender, /`\$\{eventChain\.debotAddressRoot\}\/\$\{event\.walletAddress\}`/);
+  assert.match(monitorRender, /`\$\{eventChain\.debotTokenRoot\}\$\{event\.tokenAddress\}`/);
+  assert.match(monitorRender, /explorerUrlForChain\(eventChain\.id, 'tx', event\.txHash\)/);
   assert.doesNotMatch(monitorRender, /robinhoodchain|basescan|solscan/i);
   assert.match(appJs, /managerLink\.href = context\.debotWalletManagerUrl/);
   assert.match(appJs, /explorerUrl\('address', address\)/);
@@ -1455,11 +1457,110 @@ test('monitoring prefers SSE event delivery and falls back to two-second increme
   }
   assert.match(appJs, /MONITOR_POLL_INTERVAL_MS = 2_000/);
   assert.match(appJs, /MONITOR_RECENT_REFRESH_MS = 10_000/);
-  assert.match(appJs, /refreshRecent \? '0' : state\.monitorLastEventId/);
+  assert.match(appJs, /refreshRecent \? '0' : session\.lastEventId/);
   assert.match(appJs, /\/monitor\/events\?after=\$\{after\}&limit=200/);
   assert.match(appJs, /\/monitor\?since=\$\{after\}&limit=200/);
-  assert.match(appJs, /state\.monitorTransport === 'sse'/);
-  assert.match(appJs, /state\.monitorEvents\.sort\(\(left, right\) => monitorEventTimestamp\(right\) - monitorEventTimestamp\(left\)\)/);
+  assert.match(appJs, /session\.transport === 'sse'/);
+  assert.match(appJs, /session\.events\.sort\(\(left, right\) => monitorEventTimestamp\(right\) - monitorEventTimestamp\(left\)\)/);
+  assert.match(appJs, /source\.addEventListener\('error',[\s\S]*session\.eventSource = null[\s\S]*scheduleMonitorPoll\(session, 0\)/);
+});
+
+test('real-time chain flow independently multi-selects and persists all four chains', () => {
+  const filter = indexHtml.match(/<fieldset class="monitor-chain-filter"[\s\S]*?<\/fieldset>/)?.[0] || '';
+  assert.equal((filter.match(/type="checkbox"/g) || []).length, 4);
+  for (const [chainId, label] of [
+    ['robinhood', 'Robinhood'],
+    ['base', 'Base'],
+    ['bsc', 'BSC'],
+    ['solana', 'Solana']
+  ]) {
+    assert.match(filter, new RegExp(`data-monitor-chain="${chainId}"[\\s\\S]*?value="${chainId}"[\\s\\S]*?${label}`));
+  }
+  assert.match(appJs, /MONITOR_FEED_CHAINS_STORAGE_KEY = '1874catch-monitor-feed-chains'/);
+  assert.match(appJs, /localStorage\.getItem\(MONITOR_FEED_CHAINS_STORAGE_KEY\)/);
+  assert.match(appJs, /localStorage\.setItem\(MONITOR_FEED_CHAINS_STORAGE_KEY, JSON\.stringify\(ordered\)\)/);
+  assert.match(appJs, /state\.monitorFeedChainIds = readStoredMonitorFeedChainIds\(\)/);
+  assert.match(appJs, /if \(!next\.size\) \{[\s\S]*实时链上流水至少保留一条链/);
+  assert.match(appJs, /elements\.monitorChainFilter\?\.addEventListener\('change'/);
+  assert.match(appJs, /resetChainState\(\{ preserveMonitorFeed: true \}\)/);
+});
+
+test('multi-chain monitor sessions keep identities, cursors, streams and merged ordering isolated', () => {
+  const sessionSource = appSourceBetween('function createMonitorSession(chainId)', 'function captureMonitorSessionContext(session)');
+  for (const field of [
+    'abortController: new AbortController()',
+    'eventSource: null',
+    'pollTimer: null',
+    'events: []',
+    'eventKeys: new Set()',
+    "lastEventId: ''",
+    'recentRefreshAt: 0'
+  ]) {
+    assert.equal(sessionSource.includes(field), true, `missing per-chain monitor state: ${field}`);
+  }
+  assert.match(appJs, /monitorSessions: new Map\(\)/);
+  assert.match(appJs, /if \(event\.id\) return `\$\{chainId\}:id:\$\{event\.id\}`/);
+  assert.match(appJs, /return `\$\{chainId\}:\$\{identity\}`/);
+  assert.match(appJs, /const previous = Number\(session\.lastEventId\)/);
+  assert.match(appJs, /session\.lastEventId = String\(Math\.max/);
+
+  const selectedMonitorEvents = Function(
+    'state',
+    'monitorSession',
+    'monitorEventTimestamp',
+    'MONITOR_FEED_EVENT_LIMIT',
+    `${appSourceBetween('function selectedMonitorEvents()', 'function synchronizeCombinedMonitorEvents()')}\nreturn selectedMonitorEvents;`
+  )(
+    { monitorFeedChainIds: new Set(['robinhood', 'bsc']) },
+    (chainId) => ({
+      events: chainId === 'robinhood'
+        ? [{ chain: chainId, id: '1', timestamp: 100 }]
+        : [{ chain: chainId, id: '1', timestamp: 200 }]
+    }),
+    (event) => event.timestamp,
+    200
+  );
+  assert.deepEqual(selectedMonitorEvents().map((event) => `${event.chain}:${event.id}`), ['bsc:1', 'robinhood:1']);
+});
+
+test('mixed-chain events render chain-scoped links, notes, labels and distinct backgrounds', () => {
+  const renderSource = appSourceBetween('function renderMonitorEvents()', 'function monitorEventByKey(eventKey)');
+  assert.match(renderSource, /data-chain="\$\{eventChain\.id\}"/);
+  assert.match(renderSource, /class="monitor-chain-badge" data-chain="\$\{eventChain\.id\}"/);
+  assert.match(renderSource, /eventChain\.nativeSymbol/);
+  assert.match(renderSource, /eventChain\.debotAddressRoot/);
+  assert.match(renderSource, /eventChain\.debotTokenRoot/);
+  assert.match(renderSource, /explorerUrlForChain\(eventChain\.id, 'tx', event\.txHash\)/);
+  assert.match(renderSource, /data-monitor-note-chain="\$\{eventChain\.id\}"/);
+  assert.match(appJs, /fetchMonitorSessionJson\(context, `\/wallets\/\$\{encodeURIComponent\(editor\.address\)\}`, \{[\s\S]*method: 'PATCH'/);
+  assert.match(appJs, /const normalizeAddress = \(value\) => normalizeAddressForChain\(value, chainId\)/);
+  assert.match(appJs, /const normalizeTransactionHash = \(value\) => normalizeTransactionHashForChain\(value, chainId\)/);
+
+  for (const [chainId, color] of [
+    ['robinhood', '#edf8f1'],
+    ['base', '#eef5ff'],
+    ['bsc', '#fff8df'],
+    ['solana', '#f7f0fb']
+  ]) {
+    assert.match(stylesCss, new RegExp(`\\.monitor-event-item\\[data-chain="${chainId}"\\] \\{[\\s\\S]*?--chain-surface: ${color}`));
+    assert.match(stylesCss, new RegExp(`\\.monitor-chain-badge\\[data-chain="${chainId}"\\]`));
+  }
+  assert.match(stylesCss, /\.monitor-event-item\.is-profit-top-10::after \{[\s\S]*border: 2px solid #c99718/);
+  assert.match(stylesCss, /\.monitor-event-item\.is-manual-alias,[\s\S]*var\(--chain-surface\)[\s\S]*#ffe8e8/);
+});
+
+test('multi-chain flow controls remain readable in the desktop half-panel and narrow mobile layouts', () => {
+  assert.match(stylesCss, /\.monitor-chain-filter \{[\s\S]*display: flex[\s\S]*justify-content: flex-end/);
+  assert.match(appJs, /label\.dataset\.connection = connection/);
+  assert.match(appJs, /ready: '实时连接正常'/);
+  assert.match(appJs, /polling: '轮询补偿中'/);
+  assert.match(appJs, /error: `连接异常/);
+  for (const connection of ['ready', 'polling', 'loading', 'error']) {
+    assert.match(stylesCss, new RegExp(`\\.monitor-chain-filter label\\[data-selected="true"\\]\\[data-connection="${connection}"\\]::after`));
+  }
+  assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.monitor-chain-filter \{[\s\S]*grid-template-columns: repeat\(4, minmax\(0, 1fr\)\)/);
+  assert.match(stylesCss, /@media \(max-width: 440px\)[\s\S]*\.monitor-chain-filter \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(stylesCss, /\.monitor-chain-filter label \{[\s\S]*white-space: nowrap/);
 });
 
 test('social monitoring is a personal-watchlist feed without global feed, source, or chain filters', () => {
@@ -1984,7 +2085,7 @@ test('social media CSS provides bounded responsive grids and a visible load-erro
 test('chain and social elapsed times advance every second without rerendering either feed', () => {
   const formatterSource = appJs.slice(
     appJs.indexOf('function formatMonitorAge'),
-    appJs.indexOf('function normalizeTransactionHash')
+    appJs.indexOf('function normalizeTransactionHash(value)')
   );
   assert.match(formatterSource, /function formatMonitorAge\(value, now = Date\.now\(\)\)/);
   assert.match(formatterSource, /Math\.floor\(\(now - timestamp\) \/ 1000\)/);
@@ -1998,7 +2099,7 @@ test('chain and social elapsed times advance every second without rerendering ei
 
   const updaterSource = appJs.slice(
     appJs.indexOf('function updateLiveRelativeTimes'),
-    appJs.indexOf('function normalizeTransactionHash')
+    appJs.indexOf('function normalizeTransactionHash(value)')
   );
   assert.match(updaterSource, /document\.querySelectorAll\('time\[data-live-timestamp\]'\)/);
   assert.match(updaterSource, /const label = formatMonitorAge\(time\.dataset\.liveTimestamp, now\);\s+if \(time\.textContent !== label\) time\.textContent = label/);
@@ -2012,9 +2113,10 @@ test('chain and social elapsed times advance every second without rerendering ei
   );
   assert.match(tickSource, /synchronizeMonitorAlerts\(\);\s+updateLiveRelativeTimes\(\);\s+}, 1_000\)/);
   assert.doesNotMatch(tickSource, /renderMonitorEvents\(|renderSocialFeed\(|renderSocialMonitor\(|innerHTML/);
+  const monitorStartSource = appSourceBetween('async function startMonitorPage(', 'async function updateMonitorFeedChainSelection(');
   assert.ok(
-    appJs.indexOf('state.monitorTickTimer = setInterval') < appJs.indexOf("fetchChainJson(context, '/monitor?limit=200')"),
-    'the live UI clock must start before the initial monitor request'
+    monitorStartSource.indexOf('state.monitorTickTimer = setInterval') < monitorStartSource.indexOf('await synchronizeMonitorSessions'),
+    'the live UI clock must start before the initial monitor sessions'
   );
   assert.match(appJs, /function applySocialBridgeStatus\(bridge\)[\s\S]*state\.socialBridgeObservedAt = performance\.now\(\)/);
   assert.match(appJs, /const reportedHeartbeatAgeMs = finiteNumber\(bridge\.heartbeatAgeMs\);[\s\S]*performance\.now\(\) - bridgeObservedAt[\s\S]*reportedHeartbeatAgeMs \+ elapsedSinceObservationMs/);
@@ -2045,8 +2147,7 @@ test('social snapshot and SSE lifecycle stay pinned to the Robinhood host servic
   assert.match(appJs, /clearTimeout\(state\.socialReconnectTimer\)/);
   assert.match(appJs, /clearInterval\(state\.socialStatusTimer\)/);
   assert.match(appJs, /void startSocialMonitor\(\{ manual \}\)/);
-  assert.match(appJs, /function stopMonitorTransport\(\{ stopSocial = true \} = \{\}\)[\s\S]*if \(stopSocial\) stopSocialMonitor\(\)/);
-  assert.match(appJs, /stopMonitorTransport\(\{ stopSocial: !preserveSocial \}\)/);
+  assert.match(appJs, /function stopMonitorTransport\(\{ stopSocial = true, clearEvents = false \} = \{\}\)[\s\S]*if \(stopSocial\) stopSocialMonitor\(\)/);
   assert.match(appJs, /if \(!preserveSocial \|\| !state\.socialStarted\) void startSocialMonitor\(\{ manual \}\)/);
   assert.match(appJs, /state\.socialLatestChangeId = resetCursor\s+\? normalizedChangeId\s+: Math\.max\(state\.socialLatestChangeId, normalizedChangeId\)/);
   assert.match(appJs, /applySocialSnapshot\(parseSocialStreamEvent\(event\), \{ resetCursor: true \}\)/);
@@ -2091,10 +2192,12 @@ test('same-token alerts remain active as background logic after their panel is r
   assert.match(appJs, /if \(!cluster\.wallets\.has\(event\.walletAddress\)\) cluster\.wallets\.set/);
   assert.match(appJs, /walletCount: cluster\.wallets\.size/);
   assert.match(appJs, /if \(cluster\.walletCount < state\.monitorThreshold\) continue/);
-  assert.match(appJs, /if \(!state\.monitorAlertedTokens\.has\(cluster\.key\)\)/);
+  assert.match(appJs, /if \(!session\.alertedTokens\.has\(cluster\.key\)\)/);
   assert.match(appJs, /Array\.isArray\(record\.alertedTokenAddresses\)/);
-  assert.match(appJs, /state\.monitorAlertedTokens\.add\(normalized\)/);
-  assert.match(appJs, /synchronizeMonitorAlerts\(\{ playNew: !initial && added\.length > 0 \}\);[\s\S]{0,260}state\.monitorAlertedTokens\.add\(normalized\)/);
+  assert.match(appJs, /session\.alertedTokens\.add\(`\$\{session\.chainId\}:\$\{normalized\}`\)/);
+  assert.match(appJs, /synchronizeMonitorAlerts\(\{[\s\S]*playNew: !initial && added\.length > 0,[\s\S]*sessions: \[session\]/);
+  assert.match(appJs, /\[\.\.\.state\.monitorFeedChainIds\]\.map\(\(chainId\) => monitorSession\(chainId, \{ create: false \}\)\)/);
+  assert.match(appJs, /filter\(\(session\) => session && state\.monitorFeedChainIds\.has\(session\.chainId\)\)/);
   assert.doesNotMatch(appJs, /monitorAlertedTokens\.delete/);
   assert.match(appJs, /playNew && state\.monitorSoundEnabled/);
 });
@@ -2129,10 +2232,10 @@ test('real-time token events upsert asynchronous market cap and token-age enrich
   assert.match(appJs, /marketDataAt: pick\(\['marketDataAt', 'market_data_at'\], null\)/);
   const mergeSource = appJs.slice(appJs.indexOf('function mergeMonitorEvents'), appJs.indexOf('function markMonitorEventsFresh'));
   assert.match(mergeSource, /indexesByKey\.get\(key\)/);
-  assert.match(mergeSource, /normalizeMonitorEvent\(rawEvent, state\.monitorEvents\[existingIndex\]\)/);
+  assert.match(mergeSource, /normalizeMonitorEvent\(rawEvent, session\.events\[existingIndex\], session\.chainId\)/);
   assert.doesNotMatch(mergeSource, /state\.monitorEventKeys\.has\(key\)[^\n]+continue/);
-  assert.match(appJs, /source\.addEventListener\('event_update', \(event\) => \{[\s\S]*if \(isCurrentSource\(\)\) applyMonitorStreamEventUpdate\(event\)/);
-  assert.match(appJs, /eventIds\.map\(\(id\) => \(\{ \.\.\.source, id \}\)\)/);
+  assert.match(appJs, /source\.addEventListener\('event_update', \(event\) => \{[\s\S]*if \(isCurrentSource\(\)\) applyMonitorStreamEventUpdate\(event, session\)/);
+  assert.match(appJs, /eventIds\.map\(\(id\) => \(\{ \.\.\.scopedSource, id \}\)\)/);
   assert.match(appJs, /formatMonitorMarketCap\(event\.marketCapUsd\)/);
   assert.match(appJs, /monitorTimestampMs\(event\?\.blockTimestamp\)[\s\S]*monitorTimestampMs\(event\?\.tokenCreationTimestamp\)/);
   assert.match(appJs, /<dt>发现时市值<\/dt>/);
@@ -2142,7 +2245,7 @@ test('real-time token events upsert asynchronous market cap and token-age enrich
 });
 
 test('Robinhood token risk enrichment is progressive, nullable and isolated from other chains', () => {
-  const normalizeSource = appSourceBetween('function normalizeMonitorEvent(raw, current = null)', 'function generatedWalletProfitPosition(');
+  const normalizeSource = appSourceBetween('function normalizeMonitorEvent(raw, current = null, fallbackChainId = activeChainId)', 'function generatedWalletProfitPosition(');
   assert.match(normalizeSource, /const pickBoolean = \(keys\) => nullableBoolean\(pickPresent\(keys, null\)\)/);
   const normalizeBoolean = Function(`${appSourceBetween('function nullableBoolean(value)', 'function firstValue(source, keys, fallback = null)')}\nreturn nullableBoolean;`)();
   assert.equal(normalizeBoolean(false), false);
@@ -2247,7 +2350,7 @@ test('Robinhood token risk enrichment is progressive, nullable and isolated from
   assert.equal(executableRenderMonitorTokenRisk('solana')({ tokenAddress: 'mint', assetType: 'token', tokenRiskStatus: 'ready' }), '');
 
   const renderSource = appSourceBetween('function normalizedMonitorRiskPercent(value)', 'function monitorPlatformLabel(value)');
-  assert.match(renderSource, /activeChain\(\)\.id !== 'robinhood'/);
+  assert.match(renderSource, /monitorChainId\(event\?\.chain\) !== 'robinhood'/);
   assert.doesNotMatch(renderSource, /\bfetch\s*\(/);
   assert.match(stylesCss, /\.monitor-token-risk \{[\s\S]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
   assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.monitor-token-risk \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
@@ -2290,7 +2393,7 @@ test('real-time feed distinguishes proven top-profit buyers and manually named w
   assert.match(renderSource, /data-manual-alias="true"/);
 
   assert.match(stylesCss, /\.monitor-event-item\.is-profit-top-10::after \{[\s\S]*border: 2px solid #c99718/);
-  assert.match(stylesCss, /\.monitor-event-item\.is-manual-alias,[\s\S]*background: #fff1f1/);
+  assert.match(stylesCss, /\.monitor-event-item\.is-manual-alias,[\s\S]*background: color-mix\(in srgb, var\(--chain-surface\)/);
   assert.match(stylesCss, /\.monitor-event-meta \.monitor-profit-rank-badge \{[\s\S]*max-width: min\(150px, 100%\)/);
 });
 
@@ -2304,9 +2407,9 @@ test('real-time feed supports immediate wallet-note editing without a full dashb
     appJs.indexOf('function updateMonitorWalletAnnotation'),
     appJs.indexOf('function renderMonitorPage')
   );
-  assert.match(quickNoteSource, /fetchChainJson\(context, `\/wallets\/\$\{encodeURIComponent\(editor\.address\)\}`, \{[\s\S]*method: 'PATCH'/);
+  assert.match(quickNoteSource, /const session = monitorSession\(editor\.chainId\)[\s\S]*fetchMonitorSessionJson\(context, `\/wallets\/\$\{encodeURIComponent\(editor\.address\)\}`, \{[\s\S]*method: 'PATCH'/);
   assert.match(quickNoteSource, /body: JSON\.stringify\(\{ note \}\)/);
-  assert.match(quickNoteSource, /state\.monitorEvents = state\.monitorEvents\.map/);
+  assert.match(quickNoteSource, /session\.events = session\.events\.map/);
   assert.match(quickNoteSource, /walletNoteKnown: true/);
   assert.doesNotMatch(quickNoteSource, /loadData\(/);
   assert.match(stylesCss, /\.monitor-note-editor \{[\s\S]*grid-template-columns: 11px minmax\(0, 1fr\) 24px 24px/);
@@ -2358,10 +2461,10 @@ test('single-wallet browser sound is gesture-driven and strictly gated by soundA
   assert.match(appJs, /声音提醒已关闭/);
   assert.match(appJs, /const soundAlert = pick\(\['soundAlert', 'sound_alert'\], false\) === true/);
   assert.match(appJs, /if \(!events\.some\(\(event\) => event\.soundAlert === true\)\) return/);
-  assert.match(appJs, /if \(!initial\) playMonitorEventSounds\(added\)/);
-  assert.match(appJs, /playMonitorEventSounds\(added\);[\s\S]*synchronizeMonitorAlerts/);
-  assert.match(appJs, /const walletUrl = safeHttpUrl\(event\.debotAddressUrl\) \|\| `\$\{DEBOT_ADDRESS_ROOT\}\/\$\{event\.walletAddress\}`/);
-  assert.match(appJs, /const transactionUrl = safeHttpUrl\(event\.explorerTxUrl\) \|\| explorerUrl\('tx', event\.txHash\)/);
+  assert.match(appJs, /if \(!initial && state\.monitorFeedChainIds\.has\(session\.chainId\)\) playMonitorEventSounds\(added\)/);
+  assert.match(appJs, /playMonitorEventSounds\(added\);[\s\S]*synchronizeMonitorAlerts\(\{[\s\S]*sessions: \[session\]/);
+  assert.match(appJs, /const walletUrl = safeHttpUrl\(event\.debotAddressUrl\) \|\| `\$\{eventChain\.debotAddressRoot\}\/\$\{event\.walletAddress\}`/);
+  assert.match(appJs, /const transactionUrl = safeHttpUrl\(event\.explorerTxUrl\) \|\| explorerUrlForChain\(eventChain\.id, 'tx', event\.txHash\)/);
   assert.match(appJs, /金额不限/);
 });
 
@@ -2397,7 +2500,7 @@ test('Bark targets can be added, tested, paused, resumed, and deleted without ex
   assert.match(appJs, /fetchChainJson\(context, `\/monitor\/bark\/\$\{id\}\/test`, \{ method: 'POST' \}\)/);
   assert.match(appJs, /JSON\.stringify\(\{ enabled: !target\.enabled \}\)/);
   assert.match(appJs, /fetchChainJson\(context, `\/monitor\/bark\/\$\{id\}`, \{ method: 'DELETE' \}\)/);
-  assert.match(appJs, /source\.addEventListener\('bark', \(\) => \{[\s\S]*if \(isCurrentSource\(\)\) void refreshBarkTargets\(context\)/);
+  assert.match(appJs, /source\.addEventListener\('bark', \(\) => \{[\s\S]*isCurrentSource\(\) && session\.chainId === activeChainId[\s\S]*refreshBarkTargets\(\)/);
   for (const action of ['test', 'toggle', 'delete']) {
     assert.match(appJs, new RegExp(`data-bark-action="${action}"`));
   }

@@ -5048,6 +5048,117 @@ button.telegram-reply {
   white-space: nowrap;
 }
 
+.monitor-feed-panel .monitor-panel-head {
+  align-items: flex-start;
+}
+
+.monitor-feed-heading {
+  flex: 1 1 auto;
+}
+
+.monitor-chain-filter {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  margin: 0 0 0 auto;
+  padding: 0;
+  border: 0;
+}
+
+.monitor-chain-filter label {
+  --chain-control: #6a7a72;
+  min-width: 0;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.monitor-chain-filter label[data-monitor-chain="robinhood"] {
+  --chain-control: #16834b;
+}
+
+.monitor-chain-filter label[data-monitor-chain="base"] {
+  --chain-control: #397aaf;
+}
+
+.monitor-chain-filter label[data-monitor-chain="bsc"] {
+  --chain-control: #9a701d;
+}
+
+.monitor-chain-filter label[data-monitor-chain="solana"] {
+  --chain-control: #76539a;
+}
+
+.monitor-chain-filter label:has(input:checked) {
+  border-color: color-mix(in srgb, var(--chain-control) 55%, var(--line));
+  background: color-mix(in srgb, var(--chain-control) 9%, var(--surface));
+  color: var(--ink);
+}
+
+.monitor-chain-filter label[data-selected="true"]::after {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: #9ca8a2;
+  content: "";
+}
+
+.monitor-chain-filter label[data-selected="true"][data-connection="ready"]::after {
+  background: #20a765;
+  box-shadow: 0 0 0 2px #dff4e9;
+}
+
+.monitor-chain-filter label[data-selected="true"][data-connection="polling"]::after {
+  background: #d69725;
+  box-shadow: 0 0 0 2px #fff0cf;
+}
+
+.monitor-chain-filter label[data-selected="true"][data-connection="loading"]::after {
+  background: #7593a4;
+  animation: monitor-chain-connecting 1.1s ease-in-out infinite alternate;
+}
+
+.monitor-chain-filter label[data-selected="true"][data-connection="error"]::after {
+  background: #c84242;
+  box-shadow: 0 0 0 2px #ffe1e1;
+}
+
+@keyframes monitor-chain-connecting {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
+
+.monitor-chain-filter label:hover {
+  border-color: color-mix(in srgb, var(--chain-control) 45%, var(--line));
+}
+
+.monitor-chain-filter input {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+  margin: 0;
+  accent-color: var(--chain-control);
+}
+
+.monitor-chain-filter .chain-switch-dot {
+  width: 6px;
+  height: 6px;
+  flex-basis: 6px;
+}
+
 .monitor-window-chip {
   display: inline-flex;
   align-items: center;
@@ -5208,6 +5319,8 @@ button.telegram-reply {
 .monitor-event-item {
   --event-accent: #52615a;
   --event-soft: #f4f6f5;
+  --chain-surface: var(--surface);
+  --chain-hover: var(--event-soft);
   position: relative;
   min-width: 0;
   display: grid;
@@ -5218,9 +5331,29 @@ button.telegram-reply {
   min-height: 84px;
   padding: 9px 10px 9px 13px;
   border-bottom: 1px solid var(--line);
-  background: var(--surface);
+  background: var(--chain-surface);
   box-shadow: inset 3px 0 var(--event-accent);
   transition: background-color 140ms ease;
+}
+
+.monitor-event-item[data-chain="robinhood"] {
+  --chain-surface: #edf8f1;
+  --chain-hover: #e2f3e9;
+}
+
+.monitor-event-item[data-chain="base"] {
+  --chain-surface: #eef5ff;
+  --chain-hover: #e3effd;
+}
+
+.monitor-event-item[data-chain="bsc"] {
+  --chain-surface: #fff8df;
+  --chain-hover: #fff1c9;
+}
+
+.monitor-event-item[data-chain="solana"] {
+  --chain-surface: #f7f0fb;
+  --chain-hover: #efe4f7;
 }
 
 .monitor-event-item[data-event-type="buy"] {
@@ -5243,10 +5376,6 @@ button.telegram-reply {
   --event-soft: #fbf5e8;
 }
 
-.monitor-event-item.is-profit-top-10 {
-  background: #fffdf5;
-}
-
 .monitor-event-item.is-profit-top-10::after {
   content: "";
   position: absolute;
@@ -5257,17 +5386,17 @@ button.telegram-reply {
 }
 
 .monitor-event-item.is-profit-top-10:hover {
-  background: #fff8e4;
+  background: color-mix(in srgb, var(--chain-hover) 82%, #fff0b8 18%);
 }
 
 .monitor-event-item.is-manual-alias,
 .monitor-event-item.is-profit-top-10.is-manual-alias {
-  background: #fff1f1;
+  background: color-mix(in srgb, var(--chain-surface) 55%, #ffe8e8 45%);
 }
 
 .monitor-event-item.is-manual-alias:hover,
 .monitor-event-item.is-profit-top-10.is-manual-alias:hover {
-  background: #ffe7e7;
+  background: color-mix(in srgb, var(--chain-hover) 45%, #ffdddd 55%);
 }
 
 .monitor-event-item:last-child {
@@ -5275,7 +5404,7 @@ button.telegram-reply {
 }
 
 .monitor-event-item:hover {
-  background: var(--event-soft);
+  background: var(--chain-hover);
 }
 
 @keyframes monitor-event-arrival {
@@ -5284,7 +5413,7 @@ button.telegram-reply {
   }
 
   100% {
-    background-color: var(--surface);
+    background-color: var(--chain-surface);
   }
 }
 
@@ -5393,6 +5522,47 @@ button.telegram-reply {
   border-color: #d6bd85;
   background: #fbf4e4;
   color: #75581d;
+}
+
+.monitor-chain-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 4px;
+  border: 1px solid color-mix(in srgb, var(--chain-badge) 45%, var(--line));
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--chain-badge) 10%, #ffffff);
+  color: color-mix(in srgb, var(--chain-badge) 78%, #18241e);
+  font-size: 8px;
+  font-weight: 780;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.monitor-chain-badge::before {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 5px;
+  border-radius: 50%;
+  background: var(--chain-badge);
+  content: "";
+}
+
+.monitor-chain-badge[data-chain="robinhood"] {
+  --chain-badge: #16834b;
+}
+
+.monitor-chain-badge[data-chain="base"] {
+  --chain-badge: #397aaf;
+}
+
+.monitor-chain-badge[data-chain="bsc"] {
+  --chain-badge: #9a701d;
+}
+
+.monitor-chain-badge[data-chain="solana"] {
+  --chain-badge: #76539a;
 }
 
 .monitor-event-meta {
@@ -5989,6 +6159,26 @@ button.telegram-reply {
     padding: 0 4px;
     font-size: 10px;
     letter-spacing: 0;
+  }
+
+  .monitor-feed-panel .monitor-panel-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .monitor-chain-filter {
+    width: 100%;
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    order: 3;
+  }
+
+  .monitor-chain-filter label {
+    justify-content: center;
+    gap: 4px;
+    padding-inline: 4px;
+    font-size: 8px;
   }
 
   .brand-logo {
@@ -6740,6 +6930,13 @@ button.telegram-reply {
 }
 
 @media (max-width: 440px) {
+  .monitor-chain-filter {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .monitor-chain-filter label {
+    font-size: 9px;
+  }
   .brand-copy h1 {
     max-width: 210px;
     font-size: 15px;

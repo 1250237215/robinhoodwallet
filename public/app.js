@@ -89,6 +89,8 @@ const BUY_FREQUENCY_REFRESH_MS = 30_000;
 const MANUAL_WINNER_POLL_INTERVAL_MS = 1_500;
 const MONITOR_POLL_INTERVAL_MS = 2_000;
 const MONITOR_RECENT_REFRESH_MS = 10_000;
+const MONITOR_FEED_CHAINS_STORAGE_KEY = '1874catch-monitor-feed-chains';
+const MONITOR_FEED_EVENT_LIMIT = 200;
 const SOCIAL_API_ROOT = `${APP_BASE}/api/social`;
 const SOCIAL_DEVICE_TOKEN_STORAGE_KEY = 'robinhood-social-device-token';
 const SOCIAL_WRITE_CONTEXT_ALLOWED = window.location.protocol === 'https:'
@@ -148,6 +150,55 @@ const MONITOR_TOKEN_RISK_STATUSES = new Set(['pending', 'partial', 'ready', 'una
 
 function activeChain() {
   return CHAIN_CONFIGS[activeChainId] || CHAIN_CONFIGS.robinhood;
+}
+
+function monitorChain(chainId = activeChainId) {
+  return CHAIN_CONFIGS[chainId] || CHAIN_CONFIGS.robinhood;
+}
+
+function monitorChainId(value, fallback = activeChainId) {
+  const candidate = String(value || '').trim().toLowerCase();
+  return Object.hasOwn(CHAIN_CONFIGS, candidate) ? candidate : monitorChain(fallback).id;
+}
+
+function declaredMonitorChainId(source) {
+  const raw = firstValue(source, ['chain', 'chainId', 'chain_id'], null);
+  if (raw === null) return null;
+  const candidate = String(raw || '').trim().toLowerCase();
+  return Object.hasOwn(CHAIN_CONFIGS, candidate) ? candidate : '';
+}
+
+function monitorChainApiRoot(chainId) {
+  const chain = monitorChain(chainId);
+  return `${APP_BASE}/api/${chain.apiPath}`;
+}
+
+function normalizeAddressForChain(value, chainId) {
+  const chain = monitorChain(chainId);
+  const address = String(value || '').trim();
+  if (!chain.addressPattern.test(address)) return '';
+  return chain.family === 'evm' ? address.toLowerCase() : address;
+}
+
+function normalizeTransactionHashForChain(value, chainId) {
+  const chain = monitorChain(chainId);
+  const hash = String(value || '').trim();
+  if (!chain.hashPattern.test(hash)) return '';
+  return chain.family === 'evm' ? hash.toLowerCase() : hash;
+}
+
+function explorerUrlForChain(chainId, kind, value) {
+  const chain = monitorChain(chainId);
+  const normalized = kind === 'tx'
+    ? normalizeTransactionHashForChain(value, chain.id)
+    : normalizeAddressForChain(value, chain.id);
+  if (!normalized) return '';
+  const path = kind === 'token'
+    ? chain.explorerTokenPath
+    : kind === 'tx'
+      ? chain.explorerTxPath
+      : chain.explorerAddressPath;
+  return `${chain.explorerRoot}/${path}/${normalized}`;
 }
 
 function syncChainRuntimeVariables() {
@@ -362,6 +413,7 @@ const elements = {
   socialEventEditorSaveLabel: document.querySelector('#social-event-editor-save-label'),
   socialFeed: document.querySelector('#social-feed'),
   monitorFeedSummary: document.querySelector('#monitor-feed-summary'),
+  monitorChainFilter: document.querySelector('#monitor-chain-filter'),
   monitorEventFeed: document.querySelector('#monitor-event-feed'),
   monitorRefreshButton: document.querySelector('#monitor-refresh-button'),
   monitorBarkForm: document.querySelector('#monitor-bark-form'),
@@ -430,6 +482,8 @@ const state = {
   monitorBarkBusy: new Set(),
   monitorNoteEditor: null,
   monitorNoteSessionSequence: 0,
+  monitorFeedChainIds: new Set(),
+  monitorSessions: new Map(),
   socialStarted: false,
   socialConnected: false,
   socialTransport: 'idle',
@@ -471,6 +525,118 @@ const state = {
   detailAddress: '',
   loading: false
 };
+
+function normalizeMonitorFeedChainIds(values, fallback = activeChainId) {
+  const candidates = Array.isArray(values) ? values : values instanceof Set ? [...values] : [];
+  const normalized = [...new Set(candidates
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter((chainId) => Object.hasOwn(CHAIN_CONFIGS, chainId)))];
+  return normalized.length ? normalized : [monitorChainId(fallback)];
+}
+
+function readStoredMonitorFeedChainIds() {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(MONITOR_FEED_CHAINS_STORAGE_KEY) || '[]');
+    return new Set(normalizeMonitorFeedChainIds(stored));
+  } catch {
+    return new Set([activeChainId]);
+  }
+}
+
+function storeMonitorFeedChainIds() {
+  const ordered = Object.keys(CHAIN_CONFIGS).filter((chainId) => state.monitorFeedChainIds.has(chainId));
+  try {
+    window.localStorage.setItem(MONITOR_FEED_CHAINS_STORAGE_KEY, JSON.stringify(ordered));
+  } catch {
+    // The current selection remains active when browser storage is unavailable.
+  }
+}
+
+function createMonitorSession(chainId) {
+  const normalizedChainId = monitorChainId(chainId);
+  return {
+    chainId: normalizedChainId,
+    apiRoot: monitorChainApiRoot(normalizedChainId),
+    abortController: new AbortController(),
+    sequence: 0,
+    started: false,
+    eventSource: null,
+    streamSnapshotReceived: false,
+    pollTimer: null,
+    pollBusy: false,
+    transport: 'idle',
+    connected: false,
+    health: {},
+    events: [],
+    eventKeys: new Set(),
+    serverClusters: [],
+    alertedTokens: new Set(),
+    lastEventId: '',
+    recentRefreshAt: 0
+  };
+}
+
+function monitorSession(chainId = activeChainId, { create = true } = {}) {
+  const normalizedChainId = monitorChainId(chainId);
+  let session = state.monitorSessions.get(normalizedChainId) || null;
+  if (!session && create) {
+    session = createMonitorSession(normalizedChainId);
+    state.monitorSessions.set(normalizedChainId, session);
+  }
+  return session;
+}
+
+function captureMonitorSessionContext(session) {
+  return Object.freeze({
+    chainId: session.chainId,
+    apiRoot: session.apiRoot,
+    sequence: session.sequence,
+    signal: session.abortController.signal,
+    session
+  });
+}
+
+function monitorSessionRequestIsCurrent(context) {
+  return Boolean(context?.session)
+    && state.monitorSessions.get(context.chainId) === context.session
+    && context.session.sequence === context.sequence
+    && context.session.abortController.signal === context.signal
+    && !context.signal.aborted;
+}
+
+function fetchMonitorSessionJson(context, path, options = {}) {
+  return fetchJson(`${context.apiRoot}${path}`, {
+    ...options,
+    signal: context.signal
+  });
+}
+
+function selectedMonitorEvents() {
+  return [...state.monitorFeedChainIds]
+    .flatMap((chainId) => monitorSession(chainId, { create: false })?.events || [])
+    .sort((left, right) => monitorEventTimestamp(right) - monitorEventTimestamp(left)
+      || String(right.id || '').localeCompare(String(left.id || ''), undefined, { numeric: true }))
+    .slice(0, MONITOR_FEED_EVENT_LIMIT);
+}
+
+function synchronizeCombinedMonitorEvents() {
+  state.monitorEvents = selectedMonitorEvents();
+  state.monitorEventKeys = new Set(state.monitorEvents.map(monitorEventKey));
+}
+
+function synchronizeActiveMonitorSessionState() {
+  const session = monitorSession(activeChainId, { create: false });
+  state.monitorEventSource = session?.eventSource || null;
+  state.monitorStreamSnapshotReceived = session?.streamSnapshotReceived === true;
+  state.monitorPollBusy = session?.pollBusy === true;
+  state.monitorTransport = session?.transport || 'idle';
+  state.monitorConnected = session?.connected === true;
+  state.monitorHealth = session?.health || {};
+  state.monitorServerClusters = session?.serverClusters || [];
+  state.monitorLastEventId = session?.lastEventId || '';
+  state.monitorRecentRefreshAt = session?.recentRefreshAt || 0;
+  state.monitorAlertedTokens = session?.alertedTokens || new Set();
+}
 
 const numberFormatter = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 });
 const compactNumberFormatter = new Intl.NumberFormat('en-US', {
@@ -891,9 +1057,15 @@ function normalizeTransactionHash(value) {
   return activeChain().family === 'evm' ? hash.toLowerCase() : hash;
 }
 
-function normalizeMonitorEvent(raw, current = null) {
+function normalizeMonitorEvent(raw, current = null, fallbackChainId = activeChainId) {
   const source = raw && typeof raw === 'object' ? raw : {};
   const existing = current && typeof current === 'object' ? current : {};
+  const chainId = monitorChainId(
+    firstValue(source, ['chain', 'chainId', 'chain_id'], firstValue(existing, ['chain', 'chainId', 'chain_id'], fallbackChainId)),
+    fallbackChainId
+  );
+  const normalizeAddress = (value) => normalizeAddressForChain(value, chainId);
+  const normalizeTransactionHash = (value) => normalizeTransactionHashForChain(value, chainId);
   const pick = (keys, fallback = null) => firstValue(source, keys, firstValue(existing, keys, fallback));
   const pickPresent = (keys, fallback = null) => {
     for (const record of [source, existing]) {
@@ -924,6 +1096,7 @@ function normalizeMonitorEvent(raw, current = null) {
   return {
     ...existing,
     ...source,
+    chain: chainId,
     id: String(id ?? ''),
     eventType,
     assetType: String(pick(['assetType', 'asset_type'], 'token') || 'token').toLowerCase(),
@@ -987,52 +1160,60 @@ function monitorEventTimestamp(event) {
 }
 
 function monitorEventKey(event) {
-  if (event.id) return `id:${event.id}`;
-  return [event.eventType, event.txHash, event.walletAddress, event.tokenAddress, event.recipient, monitorEventTimestamp(event), event.blockNumber]
+  const chainId = monitorChainId(event?.chain);
+  if (event.id) return `${chainId}:id:${event.id}`;
+  return [chainId, event.eventType, event.txHash, event.walletAddress, event.tokenAddress, event.recipient, monitorEventTimestamp(event), event.blockNumber]
     .map((value) => String(value || ''))
     .join(':');
 }
 
 function monitorTokenKey(source) {
-  const address = normalizeAddress(firstValue(source, ['tokenAddress', 'token_address', 'address']));
-  if (address) return address;
-  return String(firstValue(source, ['tokenSymbol', 'token_symbol', 'symbol'], 'unknown')).trim().toLowerCase();
+  const chainId = monitorChainId(firstValue(source, ['chain', 'chainId', 'chain_id'], activeChainId));
+  const address = normalizeAddressForChain(firstValue(source, ['tokenAddress', 'token_address', 'address']), chainId);
+  const identity = address || String(firstValue(source, ['tokenSymbol', 'token_symbol', 'symbol'], 'unknown')).trim().toLowerCase();
+  return `${chainId}:${identity}`;
 }
 
-function advanceMonitorCursor(events) {
+function advanceMonitorCursor(events, session = monitorSession(activeChainId)) {
   const ids = events.map((event) => event.id).filter(Boolean);
   if (!ids.length) return;
   const numericIds = ids.map(Number);
   if (numericIds.every(Number.isFinite)) {
-    const previous = Number(state.monitorLastEventId);
-    state.monitorLastEventId = String(Math.max(Number.isFinite(previous) ? previous : 0, ...numericIds));
+    const previous = Number(session.lastEventId);
+    session.lastEventId = String(Math.max(Number.isFinite(previous) ? previous : 0, ...numericIds));
+    if (session.chainId === activeChainId) state.monitorLastEventId = session.lastEventId;
     return;
   }
-  state.monitorLastEventId = ids[0];
+  session.lastEventId = ids[0];
+  if (session.chainId === activeChainId) state.monitorLastEventId = session.lastEventId;
 }
 
-function mergeMonitorEvents(rawEvents) {
+function mergeMonitorEvents(rawEvents, session = monitorSession(activeChainId)) {
   const added = [];
-  const indexesByKey = new Map(state.monitorEvents.map((event, index) => [monitorEventKey(event), index]));
+  const indexesByKey = new Map(session.events.map((event, index) => [monitorEventKey(event), index]));
   for (const rawEvent of Array.isArray(rawEvents) ? rawEvents : []) {
-    const event = normalizeMonitorEvent(rawEvent);
+    const declaredChainId = declaredMonitorChainId(rawEvent);
+    if (declaredChainId !== null && declaredChainId !== session.chainId) continue;
+    const event = normalizeMonitorEvent(rawEvent, null, session.chainId);
+    if (event.chain !== session.chainId) continue;
     const key = monitorEventKey(event);
     const existingIndex = indexesByKey.get(key);
     if (existingIndex !== undefined) {
-      const merged = normalizeMonitorEvent(rawEvent, state.monitorEvents[existingIndex]);
-      state.monitorEvents[existingIndex] = merged;
+      const merged = normalizeMonitorEvent(rawEvent, session.events[existingIndex], session.chainId);
+      session.events[existingIndex] = merged;
       indexesByKey.set(monitorEventKey(merged), existingIndex);
       continue;
     }
     if (!event.walletAddress) continue;
-    indexesByKey.set(key, state.monitorEvents.length);
-    state.monitorEvents.push(event);
+    indexesByKey.set(key, session.events.length);
+    session.events.push(event);
     added.push(event);
   }
-  state.monitorEvents.sort((left, right) => monitorEventTimestamp(right) - monitorEventTimestamp(left));
-  state.monitorEvents = state.monitorEvents.slice(0, 200);
-  state.monitorEventKeys = new Set(state.monitorEvents.map(monitorEventKey));
-  advanceMonitorCursor(added);
+  session.events.sort((left, right) => monitorEventTimestamp(right) - monitorEventTimestamp(left));
+  session.events = session.events.slice(0, MONITOR_FEED_EVENT_LIMIT);
+  session.eventKeys = new Set(session.events.map(monitorEventKey));
+  advanceMonitorCursor(added, session);
+  synchronizeCombinedMonitorEvents();
   return added;
 }
 
@@ -1040,28 +1221,32 @@ function markMonitorEventsFresh(events) {
   for (const event of events) state.monitorFreshEventKeys.add(monitorEventKey(event));
 }
 
-function applyMonitorEventUpdatePayload(payload) {
+function applyMonitorEventUpdatePayload(payload, session = monitorSession(activeChainId)) {
   const source = payload && typeof payload === 'object'
     ? (payload.eventUpdate || payload.event_update || payload.update || payload)
     : {};
-  const rawIds = firstValue(source, ['eventIds', 'event_ids', 'ids'], []);
+  const declaredChainId = declaredMonitorChainId(source);
+  if (declaredChainId !== null && declaredChainId !== session.chainId) return;
+  const scopedSource = { ...source, chain: session.chainId };
+  const rawIds = firstValue(scopedSource, ['eventIds', 'event_ids', 'ids'], []);
   const eventIds = Array.isArray(rawIds) ? rawIds.filter((id) => id !== null && id !== undefined && id !== '') : [];
   if (eventIds.length) {
-    mergeMonitorEvents(eventIds.map((id) => ({ ...source, id })));
+    mergeMonitorEvents(eventIds.map((id) => ({ ...scopedSource, id })), session);
     return;
   }
-  const tokenAddress = normalizeAddress(firstValue(source, ['tokenAddress', 'token_address']));
+  const tokenAddress = normalizeAddressForChain(firstValue(scopedSource, ['tokenAddress', 'token_address']), session.chainId);
   if (!tokenAddress) return;
-  state.monitorEvents = state.monitorEvents.map((event) => event.tokenAddress === tokenAddress
-    ? normalizeMonitorEvent(source, event)
+  session.events = session.events.map((event) => event.tokenAddress === tokenAddress
+    ? normalizeMonitorEvent(scopedSource, event, session.chainId)
     : event);
-  state.monitorEventKeys = new Set(state.monitorEvents.map(monitorEventKey));
+  session.eventKeys = new Set(session.events.map(monitorEventKey));
+  synchronizeCombinedMonitorEvents();
 }
 
-function computedMonitorClusters(now = Date.now()) {
+function computedMonitorClusters(now = Date.now(), session = monitorSession(activeChainId)) {
   const windowMs = Math.max(1, state.monitorWindowSeconds) * 1000;
   const groups = new Map();
-  for (const event of state.monitorEvents) {
+  for (const event of session.events) {
     if (event.eventType !== 'buy') continue;
     const timestamp = monitorEventTimestamp(event);
     if (!timestamp || timestamp < now - windowMs || timestamp > now + 30_000) continue;
@@ -1088,26 +1273,29 @@ function computedMonitorClusters(now = Date.now()) {
     .sort((left, right) => right.walletCount - left.walletCount || right.latestAt - left.latestAt);
 }
 
-function normalizeServerMonitorCluster(raw) {
+function normalizeServerMonitorCluster(raw, session = monitorSession(activeChainId)) {
   const source = raw && typeof raw === 'object' ? raw : {};
+  const chainId = session.chainId;
   const walletValues = firstValue(source, ['wallets', 'walletAddresses', 'addresses'], []);
   const wallets = new Map();
   for (const value of Array.isArray(walletValues) ? walletValues : []) {
     if (value && typeof value === 'object') {
-      const address = normalizeAddress(firstValue(value, ['address', 'walletAddress', 'wallet']));
+      const address = normalizeAddressForChain(firstValue(value, ['address', 'walletAddress', 'wallet']), chainId);
       if (address) wallets.set(address, String(firstValue(value, ['alias', 'walletAlias', 'name'], shortAddress(address))));
     } else {
-      const address = normalizeAddress(value);
+      const address = normalizeAddressForChain(value, chainId);
       if (address) wallets.set(address, shortAddress(address));
     }
   }
-  const events = (getCollection(source, ['events', 'buys', 'items']) || []).map(normalizeMonitorEvent);
+  const events = (getCollection(source, ['events', 'buys', 'items']) || [])
+    .map((event) => normalizeMonitorEvent(event, null, chainId));
   for (const event of events) {
     if (event.walletAddress && !wallets.has(event.walletAddress)) wallets.set(event.walletAddress, event.walletAlias || shortAddress(event.walletAddress));
   }
   return {
-    key: monitorTokenKey(source),
-    tokenAddress: normalizeAddress(firstValue(source, ['tokenAddress', 'token_address', 'address'])),
+    chain: chainId,
+    key: monitorTokenKey({ ...source, chain: chainId }),
+    tokenAddress: normalizeAddressForChain(firstValue(source, ['tokenAddress', 'token_address', 'address']), chainId),
     tokenSymbol: String(firstValue(source, ['tokenSymbol', 'token_symbol', 'symbol'], 'TOKEN')),
     tokenName: String(firstValue(source, ['tokenName', 'token_name', 'name'], '')),
     debotTokenUrl: safeHttpUrl(firstValue(source, ['debotTokenUrl', 'debot_token_url'])),
@@ -1118,12 +1306,12 @@ function normalizeServerMonitorCluster(raw) {
   };
 }
 
-function currentMonitorClusters() {
-  const computed = computedMonitorClusters();
+function currentMonitorClusters(session = monitorSession(activeChainId)) {
+  const computed = computedMonitorClusters(Date.now(), session);
   const byKey = new Map(computed.map((cluster) => [cluster.key, cluster]));
   const cutoff = Date.now() - Math.max(1, state.monitorWindowSeconds) * 1000;
-  for (const source of state.monitorServerClusters) {
-    const cluster = normalizeServerMonitorCluster(source);
+  for (const source of session.serverClusters) {
+    const cluster = normalizeServerMonitorCluster(source, session);
     if (cluster.latestAt && cluster.latestAt < cutoff) continue;
     const existing = byKey.get(cluster.key);
     if (!existing || cluster.walletCount > existing.walletCount) byKey.set(cluster.key, cluster);
@@ -1234,7 +1422,7 @@ function monitorCreatorHistoryTitle(deadDefinition, partial) {
 }
 
 function renderMonitorTokenRisk(event) {
-  if (activeChain().id !== 'robinhood' || !event?.tokenAddress || event.assetType === 'native') return '';
+  if (monitorChainId(event?.chain) !== 'robinhood' || !event?.tokenAddress || event.assetType === 'native') return '';
   const status = monitorTokenRiskStatus(event);
   if (!status) return '';
   const dataTitle = event.tokenRiskDataAt
@@ -2764,6 +2952,34 @@ function renderMonitorWindowLabels() {
   elements.monitorThresholdLabel.textContent = `${windowLabel}同币提醒人数`;
 }
 
+function renderMonitorChainFilter() {
+  if (!elements.monitorChainFilter) return;
+  for (const label of elements.monitorChainFilter.querySelectorAll('[data-monitor-chain]')) {
+    const chainId = monitorChainId(label.dataset.monitorChain);
+    const selected = state.monitorFeedChainIds.has(chainId);
+    const input = label.querySelector('input[type="checkbox"]');
+    const session = monitorSession(chainId, { create: false });
+    if (input) input.checked = selected;
+    label.dataset.selected = String(selected);
+    const connection = !selected || !session?.started
+      ? 'idle'
+      : session.connected
+        ? session.transport === 'sse' ? 'ready' : 'polling'
+        : session.health?.lastError
+          ? 'error'
+          : session.transport === 'polling' ? 'polling' : 'loading';
+    const connectionLabels = {
+      ready: '实时连接正常',
+      polling: '轮询补偿中',
+      loading: '正在连接',
+      error: `连接异常${session?.health?.lastError ? `：${session.health.lastError}` : ''}`,
+      idle: selected ? '等待启动' : '未选择'
+    };
+    label.dataset.connection = connection;
+    label.title = `${monitorChain(chainId).label}：${connectionLabels[connection]}`;
+  }
+}
+
 function renderMonitorEvents() {
   const events = state.monitorEvents;
   const activeInput = document.activeElement?.closest?.('[data-monitor-note-input]');
@@ -2775,7 +2991,11 @@ function renderMonitorEvents() {
         scrollTop: activeInput.scrollTop
       }
     : null;
-  elements.monitorFeedSummary.textContent = `${events.length} 条记录 · 按检测时间倒序 · 金额不限`;
+  const selectedChains = Object.values(CHAIN_CONFIGS)
+    .filter((chain) => state.monitorFeedChainIds.has(chain.id))
+    .map((chain) => chain.label)
+    .join(' + ');
+  elements.monitorFeedSummary.textContent = `${selectedChains} · ${events.length} 条记录 · 按检测时间倒序 · 金额不限`;
   if (activeEditor && state.monitorNoteEditor?.composing && !state.monitorNoteEditor.saving) {
     state.monitorNoteEditor.value = activeInput.value;
     return;
@@ -2794,7 +3014,8 @@ function renderMonitorEvents() {
   elements.monitorEventFeed.innerHTML = events.map((event) => {
     const eventKey = monitorEventKey(event);
     const isFresh = state.monitorFreshEventKeys.delete(eventKey);
-    const wallet = walletForAddress(event.walletAddress);
+    const eventChain = monitorChain(event.chain);
+    const wallet = eventChain.id === activeChainId ? walletForAddress(event.walletAddress) : null;
     const walletLabel = String(event.walletNoteKnown ? event.walletAlias : wallet?.alias ?? event.walletAlias).trim()
       || shortAddress(event.walletAddress);
     const walletNote = String(event.walletNoteKnown ? event.walletNote : wallet?.note ?? event.walletNote ?? '').trim();
@@ -2811,13 +3032,13 @@ function renderMonitorEvents() {
       : null;
     const profitRank = profitPosition?.rank ?? null;
     const isProfitTopTen = profitPosition !== null;
-    const symbol = event.tokenSymbol || (event.assetType === 'native' ? activeChain().nativeSymbol : 'TOKEN');
+    const symbol = event.tokenSymbol || (event.assetType === 'native' ? eventChain.nativeSymbol : 'TOKEN');
     const eventTime = event.blockTimestamp || event.detectedAt;
-    const walletUrl = safeHttpUrl(event.debotAddressUrl) || `${DEBOT_ADDRESS_ROOT}/${event.walletAddress}`;
+    const walletUrl = safeHttpUrl(event.debotAddressUrl) || `${eventChain.debotAddressRoot}/${event.walletAddress}`;
     const tokenUrl = event.tokenAddress
-      ? safeHttpUrl(event.debotTokenUrl) || `${DEBOT_TOKEN_ROOT}${event.tokenAddress}`
+      ? safeHttpUrl(event.debotTokenUrl) || `${eventChain.debotTokenRoot}${event.tokenAddress}`
       : '';
-    const transactionUrl = safeHttpUrl(event.explorerTxUrl) || explorerUrl('tx', event.txHash);
+    const transactionUrl = safeHttpUrl(event.explorerTxUrl) || explorerUrlForChain(eventChain.id, 'tx', event.txHash);
     const recipientLabel = event.recipient ? shortAddress(event.recipient) : '';
     const hasTokenMetrics = Boolean(event.tokenAddress) && event.assetType !== 'native';
     const hasMarketCap = event.marketCapUsd !== null;
@@ -2835,7 +3056,7 @@ function renderMonitorEvents() {
         ? `<strong class="monitor-event-recipient-target" title="${escapeHtml(event.recipient)}">${escapeHtml(recipientLabel)}</strong>`
         : `<strong class="monitor-event-recipient-target monitor-event-token">${escapeHtml(symbol)}</strong>`;
     return `
-      <article class="monitor-event-item${isFresh ? ' is-new' : ''}${isProfitTopTen ? ' is-profit-top-10' : ''}${hasManualAlias ? ' is-manual-alias' : ''}" data-event-id="${escapeHtml(event.id)}" data-event-type="${eventType}"${isProfitTopTen ? ` data-profit-rank="${profitRank}"` : ''}${hasManualAlias ? ' data-manual-alias="true"' : ''}>
+      <article class="monitor-event-item${isFresh ? ' is-new' : ''}${isProfitTopTen ? ' is-profit-top-10' : ''}${hasManualAlias ? ' is-manual-alias' : ''}" data-event-id="${escapeHtml(event.id)}" data-event-type="${eventType}" data-chain="${eventChain.id}"${isProfitTopTen ? ` data-profit-rank="${profitRank}"` : ''}${hasManualAlias ? ' data-manual-alias="true"' : ''}>
         <time datetime="${escapeHtml(String(eventTime ?? ''))}" data-live-timestamp="${escapeHtml(String(eventTime ?? ''))}" title="${escapeHtml(formatDateTime(eventTime))}" aria-live="off">${escapeHtml(formatMonitorAge(eventTime))}</time>
         <div class="monitor-event-main">
           <div class="monitor-event-title">
@@ -2845,14 +3066,15 @@ function renderMonitorEvents() {
             ${target}
           </div>
           <div class="monitor-event-meta">
+            <span class="monitor-chain-badge" data-chain="${eventChain.id}">${escapeHtml(eventChain.label)}</span>
             ${isProfitTopTen ? `<span class="monitor-profit-rank-badge" title="${escapeHtml(profitRankTitle)}" aria-label="${escapeHtml(profitRankTitle)}"><i data-lucide="trophy" aria-hidden="true"></i>${escapeHtml(profitTokenSymbol)} #${profitRank}</span>` : ''}
             <span>${escapeHtml(event.tokenName || (event.tokenAddress ? shortAddress(event.tokenAddress) : symbol))}</span>
             ${event.recipient ? `<span title="${escapeHtml(event.recipient)}">接收方 ${escapeHtml(recipientLabel)}</span>` : ''}
             ${event.platform ? `<span title="${escapeHtml(event.platform)}">平台 ${escapeHtml(monitorPlatformLabel(event.platform))}</span>` : ''}
-            ${walletNote ? `<button class="monitor-note-chip" type="button" data-monitor-note-edit="${escapeHtml(event.walletAddress)}" data-monitor-note-event="${escapeHtml(eventKey)}" title="修改地址备注"><i data-lucide="sticky-note" aria-hidden="true"></i><span>${escapeHtml(walletNote)}</span></button>` : ''}
+            ${walletNote ? `<button class="monitor-note-chip" type="button" data-monitor-note-edit="${escapeHtml(event.walletAddress)}" data-monitor-note-event="${escapeHtml(eventKey)}" data-monitor-note-chain="${eventChain.id}" title="修改地址备注"><i data-lucide="sticky-note" aria-hidden="true"></i><span>${escapeHtml(walletNote)}</span></button>` : ''}
           </div>
           ${noteEditor ? `
-            <form class="monitor-note-editor" data-monitor-note-form="${escapeHtml(eventKey)}" data-monitor-note-address="${escapeHtml(event.walletAddress)}">
+            <form class="monitor-note-editor" data-monitor-note-form="${escapeHtml(eventKey)}" data-monitor-note-address="${escapeHtml(event.walletAddress)}" data-monitor-note-chain="${eventChain.id}">
               <i data-lucide="sticky-note" aria-hidden="true"></i>
               <textarea rows="1" maxlength="4000" placeholder="地址备注" aria-label="地址备注" data-monitor-note-input="${escapeHtml(eventKey)}" ${noteEditor.saving ? 'disabled' : ''}>${escapeHtml(noteEditor.value)}</textarea>
               <button class="inline-icon-button" type="submit" title="保存备注" aria-label="保存备注" ${noteEditor.saving ? 'disabled' : ''}><i data-lucide="check" aria-hidden="true"></i></button>
@@ -2875,10 +3097,10 @@ function renderMonitorEvents() {
         ` : ''}
         ${renderMonitorTokenRisk(event)}
         <div class="monitor-event-links">
-          <button class="inline-icon-button monitor-note-button" type="button" data-monitor-note-edit="${escapeHtml(event.walletAddress)}" data-monitor-note-event="${escapeHtml(eventKey)}" title="${walletNote ? '修改备注' : '添加备注'}" aria-label="${walletNote ? '修改' : '添加'} ${escapeHtml(walletLabel)} 的备注"><i data-lucide="notebook-pen" aria-hidden="true"></i></button>
+          <button class="inline-icon-button monitor-note-button" type="button" data-monitor-note-edit="${escapeHtml(event.walletAddress)}" data-monitor-note-event="${escapeHtml(eventKey)}" data-monitor-note-chain="${eventChain.id}" title="${walletNote ? '修改备注' : '添加备注'}" aria-label="${walletNote ? '修改' : '添加'} ${escapeHtml(walletLabel)} 的备注"><i data-lucide="notebook-pen" aria-hidden="true"></i></button>
           <a class="inline-icon-button" href="${escapeHtml(walletUrl)}" target="_blank" rel="noopener noreferrer" title="DeBot 地址" aria-label="在 DeBot 查看地址"><i data-lucide="wallet" aria-hidden="true"></i></a>
           ${tokenUrl ? `<a class="inline-icon-button" href="${escapeHtml(tokenUrl)}" target="_blank" rel="noopener noreferrer" title="DeBot 代币" aria-label="在 DeBot 查看代币"><i data-lucide="coins" aria-hidden="true"></i></a>` : ''}
-          ${transactionUrl ? `<a class="inline-icon-button" href="${escapeHtml(transactionUrl)}" target="_blank" rel="noopener noreferrer" title="Blockscout 交易" aria-label="在 Blockscout 查看交易"><i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a>` : ''}
+          ${transactionUrl ? `<a class="inline-icon-button" href="${escapeHtml(transactionUrl)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(eventChain.label)} 浏览器交易" aria-label="在 ${escapeHtml(eventChain.label)} 浏览器查看交易"><i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a>` : ''}
         </div>
       </article>
     `;
@@ -2901,8 +3123,9 @@ function monitorEventByKey(eventKey) {
   return state.monitorEvents.find((event) => monitorEventKey(event) === eventKey) || null;
 }
 
-function updateMonitorWalletAnnotation(address, annotation = {}) {
-  const normalized = normalizeAddress(address);
+function updateMonitorWalletAnnotation(address, annotation = {}, chainId = activeChainId) {
+  const normalizedChainId = monitorChainId(chainId);
+  const normalized = normalizeAddressForChain(address, normalizedChainId);
   if (!normalized) return;
   const hasAlias = Object.hasOwn(annotation, 'alias');
   const hasAliasSource = Object.hasOwn(annotation, 'aliasSource') || Object.hasOwn(annotation, 'alias_source');
@@ -2913,7 +3136,8 @@ function updateMonitorWalletAnnotation(address, annotation = {}) {
     ? String(annotation.aliasSource || annotation.alias_source || '').trim().toLowerCase()
     : null;
   const note = hasNote ? String(annotation.note || '') : null;
-  state.monitorEvents = state.monitorEvents.map((event) => event.walletAddress === normalized ? {
+  const session = monitorSession(normalizedChainId);
+  session.events = session.events.map((event) => event.walletAddress === normalized ? {
     ...event,
     ...(hasAlias ? { walletAlias: alias } : {}),
     ...(hasAliasSource ? {
@@ -2922,8 +3146,10 @@ function updateMonitorWalletAnnotation(address, annotation = {}) {
     } : {}),
     ...(hasNote ? { walletNote: note, walletNoteKnown: true } : {})
   } : event);
+  session.eventKeys = new Set(session.events.map(monitorEventKey));
+  synchronizeCombinedMonitorEvents();
   const updateWallets = (wallets) => Array.isArray(wallets) ? wallets.map((wallet) => (
-    normalizeAddress(wallet.address) === normalized
+    normalizeAddressForChain(wallet.address, normalizedChainId) === normalized
       ? {
           ...wallet,
           ...(hasAlias ? { alias } : {}),
@@ -2932,10 +3158,10 @@ function updateMonitorWalletAnnotation(address, annotation = {}) {
         }
       : wallet
   )) : wallets;
-  if (state.data && Array.isArray(state.data.wallets)) {
+  if (normalizedChainId === activeChainId && state.data && Array.isArray(state.data.wallets)) {
     state.data = { ...state.data, wallets: updateWallets(state.data.wallets) };
   }
-  state.visibleWallets = updateWallets(state.visibleWallets);
+  if (normalizedChainId === activeChainId) state.visibleWallets = updateWallets(state.visibleWallets);
 }
 
 function focusMonitorNoteEditor(eventKey) {
@@ -2948,13 +3174,15 @@ function focusMonitorNoteEditor(eventKey) {
 }
 
 async function openMonitorNoteEditor(button) {
-  const context = captureChainRequestContext();
   const sessionId = ++state.monitorNoteSessionSequence;
-  const address = normalizeAddress(button?.dataset.monitorNoteEdit);
   const eventKey = String(button?.dataset.monitorNoteEvent || '');
   const monitorEvent = monitorEventByKey(eventKey);
-  if (!address || !monitorEvent || monitorEvent.walletAddress !== address) return;
-  const cachedWallet = walletForAddress(address);
+  const chainId = monitorChainId(button?.dataset.monitorNoteChain || monitorEvent?.chain);
+  const session = monitorSession(chainId);
+  const context = captureMonitorSessionContext(session);
+  const address = normalizeAddressForChain(button?.dataset.monitorNoteEdit, chainId);
+  if (!address || !monitorEvent || monitorEvent.chain !== chainId || monitorEvent.walletAddress !== address) return;
+  const cachedWallet = chainId === activeChainId ? walletForAddress(address) : null;
   let note = monitorEvent.walletNoteKnown
     ? String(monitorEvent.walletNote || '')
     : typeof cachedWallet?.note === 'string'
@@ -2963,22 +3191,22 @@ async function openMonitorNoteEditor(button) {
   if (note === null) {
     button.disabled = true;
     try {
-      const payload = await fetchChainJson(context, `/wallets/${encodeURIComponent(address)}`);
-      requireCurrentChainRequest(context);
+      const payload = await fetchMonitorSessionJson(context, `/wallets/${encodeURIComponent(address)}`);
+      if (!monitorSessionRequestIsCurrent(context)) return;
       const record = unwrapRecord(payload);
       const wallet = record.wallet && typeof record.wallet === 'object' ? record.wallet : record;
       note = String(wallet.note || '');
-      updateMonitorWalletAnnotation(address, wallet);
-      state.detailCache.set(address, payload);
+      updateMonitorWalletAnnotation(address, wallet, chainId);
+      if (chainId === activeChainId) state.detailCache.set(address, payload);
     } catch (error) {
-      if (chainRequestIsCurrent(context)) showToast(`读取备注失败：${error.message}`, 'error');
+      if (monitorSessionRequestIsCurrent(context)) showToast(`读取备注失败：${error.message}`, 'error');
       return;
     } finally {
-      if (chainRequestIsCurrent(context)) button.disabled = false;
+      if (monitorSessionRequestIsCurrent(context)) button.disabled = false;
     }
   }
-  if (!chainRequestIsCurrent(context) || sessionId !== state.monitorNoteSessionSequence) return;
-  state.monitorNoteEditor = { address, eventKey, sessionId, value: note, saving: false, composing: false };
+  if (!monitorSessionRequestIsCurrent(context) || sessionId !== state.monitorNoteSessionSequence) return;
+  state.monitorNoteEditor = { address, chainId, eventKey, sessionId, value: note, saving: false, composing: false };
   renderMonitorEvents();
   focusMonitorNoteEditor(eventKey);
 }
@@ -2993,28 +3221,29 @@ async function saveMonitorNote(event) {
   const editor = state.monitorNoteEditor;
   const form = event.target.closest('[data-monitor-note-form]');
   if (!editor || form?.dataset.monitorNoteForm !== editor.eventKey || editor.saving) return;
-  const context = captureChainRequestContext();
+  const session = monitorSession(editor.chainId);
+  const context = captureMonitorSessionContext(session);
   const noteInput = form.querySelector('[data-monitor-note-input]');
   const note = String(noteInput?.value ?? editor.value ?? '').trim();
   const sessionId = editor.sessionId;
   state.monitorNoteEditor = { ...editor, value: note, saving: true, composing: false };
   renderMonitorEvents();
   try {
-    const payload = await fetchChainJson(context, `/wallets/${encodeURIComponent(editor.address)}`, {
+    const payload = await fetchMonitorSessionJson(context, `/wallets/${encodeURIComponent(editor.address)}`, {
       method: 'PATCH',
       body: JSON.stringify({ note })
     });
-    requireCurrentChainRequest(context);
+    if (!monitorSessionRequestIsCurrent(context)) return;
     const record = unwrapRecord(payload);
     const wallet = record.wallet && typeof record.wallet === 'object' ? record.wallet : record;
     const savedNote = typeof wallet.note === 'string' ? wallet.note : note;
-    updateMonitorWalletAnnotation(editor.address, { ...wallet, note: savedNote });
-    state.detailCache.set(editor.address, payload);
+    updateMonitorWalletAnnotation(editor.address, { ...wallet, note: savedNote }, editor.chainId);
+    if (editor.chainId === activeChainId) state.detailCache.set(editor.address, payload);
     if (state.monitorNoteEditor?.sessionId === sessionId) state.monitorNoteEditor = null;
     renderMonitorEvents();
     showToast(savedNote ? '地址备注已保存' : '地址备注已清除');
   } catch (error) {
-    if (!chainRequestIsCurrent(context)) return;
+    if (!monitorSessionRequestIsCurrent(context)) return;
     if (state.monitorNoteEditor?.sessionId === sessionId) {
       state.monitorNoteEditor = { ...editor, value: note, saving: false, composing: false };
       renderMonitorEvents();
@@ -3038,6 +3267,7 @@ function renderMonitorPage() {
   renderMonitorBarkTargets();
   renderMonitorHealth();
   renderMonitorWindowLabels();
+  renderMonitorChainFilter();
   renderMonitorEvents();
   renderSocialMonitor();
   refreshIcons(elements.monitorPage);
@@ -3050,68 +3280,92 @@ function setMonitorMutationControlsDisabled(disabled) {
   elements.monitorBarkAddButton.disabled = disabled;
 }
 
-function applyMonitorPayload(payload, { initial = false } = {}) {
+function applyMonitorPayload(payload, {
+  initial = false,
+  session = monitorSession(activeChainId),
+  applySettings = session.chainId === activeChainId
+} = {}) {
   const record = unwrapRecord(payload || {});
-  if (record.chain && String(record.chain) !== activeChainId) return;
+  const declaredChainId = declaredMonitorChainId(record);
+  if (declaredChainId !== null && declaredChainId !== session.chainId) return;
   const settings = record.settings && typeof record.settings === 'object' ? record.settings : {};
-  const serverThreshold = finiteNumber(settings.threshold, record.threshold);
-  if (serverThreshold !== null) {
-    state.monitorThreshold = clampMonitorThreshold(serverThreshold);
-    storeMonitorThreshold(state.monitorThreshold);
+  if (applySettings && session.chainId === activeChainId) {
+    const serverThreshold = finiteNumber(settings.threshold, record.threshold);
+    if (serverThreshold !== null) {
+      state.monitorThreshold = clampMonitorThreshold(serverThreshold);
+      storeMonitorThreshold(state.monitorThreshold);
+    }
+    if (typeof settings.enabled === 'boolean') state.monitorEnabled = settings.enabled;
+    else if (typeof record.enabled === 'boolean') state.monitorEnabled = record.enabled;
+    state.monitorSound = normalizeMonitorSound(settings.sound ?? record.sound ?? state.monitorSound);
+    state.monitorVolume = clampMonitorVolume(settings.volume ?? record.volume, state.monitorVolume);
+    state.monitorBarkSound = String(settings.barkSound ?? record.barkSound ?? state.monitorBarkSound);
+    state.monitorBarkVolume = clampBarkVolume(settings.barkVolume ?? record.barkVolume, state.monitorBarkVolume);
+    applyBarkTargets(record);
+    const serverWindowSeconds = finiteNumber(
+      settings.windowSeconds,
+      settings.window_seconds,
+      record.windowSeconds,
+      record.window_seconds
+    );
+    if (serverWindowSeconds !== null) {
+      state.monitorWindowSeconds = clampMonitorWindowSeconds(serverWindowSeconds, state.monitorWindowSeconds);
+    }
   }
-  if (typeof settings.enabled === 'boolean') state.monitorEnabled = settings.enabled;
-  else if (typeof record.enabled === 'boolean') state.monitorEnabled = record.enabled;
-  state.monitorSound = normalizeMonitorSound(settings.sound ?? record.sound ?? state.monitorSound);
-  state.monitorVolume = clampMonitorVolume(settings.volume ?? record.volume, state.monitorVolume);
-  state.monitorBarkSound = String(settings.barkSound ?? record.barkSound ?? state.monitorBarkSound);
-  state.monitorBarkVolume = clampBarkVolume(settings.barkVolume ?? record.barkVolume, state.monitorBarkVolume);
-  applyBarkTargets(record);
-  const serverWindowSeconds = finiteNumber(
-    settings.windowSeconds,
-    settings.window_seconds,
-    record.windowSeconds,
-    record.window_seconds
-  );
-  if (serverWindowSeconds !== null) {
-    state.monitorWindowSeconds = clampMonitorWindowSeconds(serverWindowSeconds, state.monitorWindowSeconds);
-  }
-  if (record.health && typeof record.health === 'object') state.monitorHealth = { ...state.monitorHealth, status: record.status, ...record.health };
-  else if (record.status) state.monitorHealth = { ...state.monitorHealth, status: record.status };
-  if (record.ok === true && !record.health?.lastError) state.monitorHealth.lastError = '';
-  if (Array.isArray(record.clusters)) state.monitorServerClusters = record.clusters;
+  if (record.health && typeof record.health === 'object') session.health = { ...session.health, status: record.status, ...record.health };
+  else if (record.status) session.health = { ...session.health, status: record.status };
+  if (record.ok === true && !record.health?.lastError) session.health.lastError = '';
+  if (Array.isArray(record.clusters)) session.serverClusters = record.clusters;
   const alertedTokenAddresses = Array.isArray(record.alertedTokenAddresses)
     ? record.alertedTokenAddresses
     : Array.isArray(record.alerted_token_addresses)
       ? record.alerted_token_addresses
       : [];
   const events = getCollection(record, ['events', 'buys', 'items']) || [];
-  const added = mergeMonitorEvents(events);
-  if (!initial) markMonitorEventsFresh(added);
-  state.monitorConnected = record.ok !== false;
-  if (!initial) playMonitorEventSounds(added);
-  synchronizeMonitorAlerts({ playNew: !initial && added.length > 0 });
+  const added = mergeMonitorEvents(events, session);
+  if (!initial && state.monitorFeedChainIds.has(session.chainId)) markMonitorEventsFresh(added);
+  session.connected = record.ok !== false;
+  if (!initial && state.monitorFeedChainIds.has(session.chainId)) playMonitorEventSounds(added);
+  synchronizeMonitorAlerts({
+    playNew: !initial && added.length > 0,
+    sessions: [session]
+  });
   for (const tokenAddress of alertedTokenAddresses) {
-    const normalized = normalizeAddress(tokenAddress);
-    if (normalized) state.monitorAlertedTokens.add(normalized);
+    const normalized = normalizeAddressForChain(tokenAddress, session.chainId);
+    if (normalized) session.alertedTokens.add(`${session.chainId}:${normalized}`);
   }
-  state.monitorSettingsLoaded = true;
-  setMonitorMutationControlsDisabled(false);
-  renderMonitorPage();
+  if (session.chainId === activeChainId) {
+    synchronizeActiveMonitorSessionState();
+    if (applySettings) {
+      state.monitorSettingsLoaded = true;
+      setMonitorMutationControlsDisabled(false);
+    }
+    renderMonitorPage();
+  } else {
+    renderMonitorChainFilter();
+    renderMonitorEvents();
+  }
 }
 
-function synchronizeMonitorAlerts({ playNew = false } = {}) {
-  for (const cluster of currentMonitorClusters()) {
-    if (cluster.walletCount < state.monitorThreshold) continue;
-    if (!state.monitorAlertedTokens.has(cluster.key)) {
-      state.monitorAlertedTokens.add(cluster.key);
-      if (playNew && state.monitorSoundEnabled) {
-        const requestContext = captureChainRequestContext();
-        void playMonitorAlertSound(requestContext).catch((error) => {
-          if (!chainRequestIsCurrent(requestContext)) return;
-          state.monitorSoundEnabled = false;
-          renderMonitorSoundStatus();
-          showToast(`声音提醒播放失败：${error.message}`, 'error');
-        });
+function synchronizeMonitorAlerts({ playNew = false, sessions = null } = {}) {
+  const selectedSessions = (Array.isArray(sessions)
+    ? sessions
+    : [...state.monitorFeedChainIds].map((chainId) => monitorSession(chainId, { create: false })))
+    .filter((session) => session && state.monitorFeedChainIds.has(session.chainId));
+  for (const session of selectedSessions) {
+    for (const cluster of currentMonitorClusters(session)) {
+      if (cluster.walletCount < state.monitorThreshold) continue;
+      if (!session.alertedTokens.has(cluster.key)) {
+        session.alertedTokens.add(cluster.key);
+        if (playNew && state.monitorSoundEnabled) {
+          const requestContext = captureChainRequestContext();
+          void playMonitorAlertSound(requestContext).catch((error) => {
+            if (!chainRequestIsCurrent(requestContext)) return;
+            state.monitorSoundEnabled = false;
+            renderMonitorSoundStatus();
+            showToast(`声音提醒播放失败：${error.message}`, 'error');
+          });
+        }
       }
     }
   }
@@ -3346,25 +3600,39 @@ function parseMonitorStreamPayload(event) {
   }
 }
 
-function applyMonitorStreamEvent(event) {
+function applyMonitorStreamEvent(event, session = monitorSession(activeChainId)) {
   const payload = parseMonitorStreamPayload(event);
-  const rawEvent = payload.event || payload.buy || payload.sell || payload.transfer || payload.token_create || payload;
-  if (rawEvent.chain && String(rawEvent.chain) !== activeChainId) return;
-  const added = mergeMonitorEvents([rawEvent]);
-  markMonitorEventsFresh(added);
-  state.monitorConnected = true;
-  state.monitorTransport = 'sse';
-  playMonitorEventSounds(added);
-  synchronizeMonitorAlerts({ playNew: added.length > 0 });
-  renderMonitorPage();
+  const source = payload.event || payload.buy || payload.sell || payload.transfer || payload.token_create || payload;
+  const declaredChainId = declaredMonitorChainId(source);
+  if (declaredChainId !== null && declaredChainId !== session.chainId) return;
+  const rawEvent = { ...source, chain: session.chainId };
+  const added = mergeMonitorEvents([rawEvent], session);
+  if (state.monitorFeedChainIds.has(session.chainId)) markMonitorEventsFresh(added);
+  session.connected = true;
+  session.transport = 'sse';
+  if (state.monitorFeedChainIds.has(session.chainId)) playMonitorEventSounds(added);
+  synchronizeMonitorAlerts({
+    playNew: added.length > 0,
+    sessions: [session]
+  });
+  if (session.chainId === activeChainId) {
+    synchronizeActiveMonitorSessionState();
+    renderMonitorPage();
+  } else {
+    renderMonitorChainFilter();
+    renderMonitorEvents();
+  }
 }
 
-function applyMonitorStreamEventUpdate(event) {
+function applyMonitorStreamEventUpdate(event, session = monitorSession(activeChainId)) {
   const payload = parseMonitorStreamPayload(event);
-  if (payload.chain && String(payload.chain) !== activeChainId) return;
-  applyMonitorEventUpdatePayload(payload);
-  state.monitorConnected = true;
-  state.monitorTransport = 'sse';
+  const declaredChainId = declaredMonitorChainId(payload);
+  if (declaredChainId !== null && declaredChainId !== session.chainId) return;
+  applyMonitorEventUpdatePayload({ ...payload, chain: session.chainId }, session);
+  session.connected = true;
+  session.transport = 'sse';
+  if (session.chainId === activeChainId) synchronizeActiveMonitorSessionState();
+  renderMonitorChainFilter();
   renderMonitorEvents();
 }
 
@@ -3889,13 +4157,36 @@ async function removeSocialFeedAuthor(id) {
   }
 }
 
-function stopMonitorTransport({ stopSocial = true } = {}) {
+function stopMonitorSession(session, { clearEvents = false } = {}) {
+  session.sequence += 1;
+  session.abortController.abort();
+  session.abortController = new AbortController();
+  clearTimeout(session.pollTimer);
+  session.pollTimer = null;
+  if (session.eventSource) session.eventSource.close();
+  session.eventSource = null;
+  session.streamSnapshotReceived = false;
+  session.recentRefreshAt = 0;
+  session.pollBusy = false;
+  session.started = false;
+  session.transport = 'idle';
+  session.connected = false;
+  if (clearEvents) {
+    session.events = [];
+    session.eventKeys.clear();
+    session.serverClusters = [];
+    session.lastEventId = '';
+  }
+}
+
+function stopMonitorTransport({ stopSocial = true, clearEvents = false } = {}) {
   state.monitorSequence += 1;
   clearTimeout(state.monitorPollTimer);
   state.monitorPollTimer = null;
   clearInterval(state.monitorTickTimer);
   state.monitorTickTimer = null;
   if (state.monitorEventSource) state.monitorEventSource.close();
+  for (const session of state.monitorSessions.values()) stopMonitorSession(session, { clearEvents });
   state.monitorEventSource = null;
   state.monitorStreamSnapshotReceived = false;
   state.monitorRecentRefreshAt = 0;
@@ -3903,78 +4194,95 @@ function stopMonitorTransport({ stopSocial = true } = {}) {
   state.monitorStarted = false;
   state.monitorTransport = 'idle';
   state.monitorConnected = false;
+  if (clearEvents) synchronizeCombinedMonitorEvents();
   if (stopSocial) stopSocialMonitor();
 }
 
-function scheduleMonitorPoll(delay = MONITOR_POLL_INTERVAL_MS) {
-  clearTimeout(state.monitorPollTimer);
-  if (!state.monitorStarted || state.activeTab !== 'monitor' || state.monitorTransport === 'sse') return;
-  state.monitorPollTimer = setTimeout(() => void pollMonitorEvents(), delay);
+function scheduleMonitorPoll(session = monitorSession(activeChainId), delay = MONITOR_POLL_INTERVAL_MS) {
+  clearTimeout(session.pollTimer);
+  if (!state.monitorStarted || !session.started || state.activeTab !== 'monitor' || session.transport === 'sse') return;
+  session.pollTimer = setTimeout(() => void pollMonitorEvents(session), delay);
+  if (session.chainId === activeChainId) state.monitorPollTimer = session.pollTimer;
 }
 
 async function fetchIncrementalMonitorEvents(context) {
-  const refreshRecent = Date.now() - state.monitorRecentRefreshAt >= MONITOR_RECENT_REFRESH_MS;
-  const after = encodeURIComponent(refreshRecent ? '0' : state.monitorLastEventId || '0');
+  const session = context.session;
+  const refreshRecent = Date.now() - session.recentRefreshAt >= MONITOR_RECENT_REFRESH_MS;
+  const after = encodeURIComponent(refreshRecent ? '0' : session.lastEventId || '0');
   try {
-    const payload = await fetchChainJson(context, `/monitor/events?after=${after}&limit=200`);
-    if (refreshRecent && chainRequestIsCurrent(context)) state.monitorRecentRefreshAt = Date.now();
+    const payload = await fetchMonitorSessionJson(context, `/monitor/events?after=${after}&limit=200`);
+    if (refreshRecent && monitorSessionRequestIsCurrent(context)) session.recentRefreshAt = Date.now();
     return payload;
   } catch (error) {
     if (![404, 405].includes(error.status)) throw error;
-    const payload = await fetchChainJson(context, `/monitor?since=${after}&limit=200`);
-    if (refreshRecent && chainRequestIsCurrent(context)) state.monitorRecentRefreshAt = Date.now();
+    const payload = await fetchMonitorSessionJson(context, `/monitor?since=${after}&limit=200`);
+    if (refreshRecent && monitorSessionRequestIsCurrent(context)) session.recentRefreshAt = Date.now();
     return payload;
   }
 }
 
-async function pollMonitorEvents() {
-  if (!state.monitorStarted || state.activeTab !== 'monitor' || state.monitorPollBusy) return;
-  const context = captureChainRequestContext();
-  const sequence = state.monitorSequence;
-  state.monitorPollBusy = true;
-  state.monitorTransport = 'polling';
+async function pollMonitorEvents(session = monitorSession(activeChainId)) {
+  if (!state.monitorStarted || !session.started || state.activeTab !== 'monitor' || session.pollBusy) return;
+  const context = captureMonitorSessionContext(session);
+  session.pollBusy = true;
+  session.transport = 'polling';
+  if (session.chainId === activeChainId) synchronizeActiveMonitorSessionState();
   try {
     const payload = await fetchIncrementalMonitorEvents(context);
-    if (!chainRequestIsCurrent(context) || sequence !== state.monitorSequence ||
-      !state.monitorStarted || state.activeTab !== 'monitor') return;
-    applyMonitorPayload(payload);
+    if (!monitorSessionRequestIsCurrent(context) || !state.monitorStarted ||
+      !session.started || state.activeTab !== 'monitor') return;
+    applyMonitorPayload(payload, { session, applySettings: session.chainId === activeChainId });
   } catch (error) {
-    if (!chainRequestIsCurrent(context) || sequence !== state.monitorSequence) return;
-    state.monitorConnected = false;
-    state.monitorHealth = { ...state.monitorHealth, lastError: error.message };
-    renderMonitorHealth();
+    if (!monitorSessionRequestIsCurrent(context)) return;
+    session.connected = false;
+    session.health = { ...session.health, lastError: error.message };
+    if (session.chainId === activeChainId) {
+      synchronizeActiveMonitorSessionState();
+      renderMonitorHealth();
+    }
+    renderMonitorChainFilter();
   } finally {
-    if (chainRequestIsCurrent(context) && sequence === state.monitorSequence) {
-      state.monitorPollBusy = false;
-      scheduleMonitorPoll();
+    if (monitorSessionRequestIsCurrent(context)) {
+      session.pollBusy = false;
+      scheduleMonitorPoll(session);
     }
   }
 }
 
-function connectMonitorStream(context = captureChainRequestContext()) {
-  if (!state.monitorStarted || state.activeTab !== 'monitor') return;
+function connectMonitorStream(session = monitorSession(activeChainId)) {
+  if (!state.monitorStarted || !session.started || state.activeTab !== 'monitor') return;
   if (!('EventSource' in window)) {
-    state.monitorTransport = 'polling';
-    scheduleMonitorPoll(0);
+    session.transport = 'polling';
+    scheduleMonitorPoll(session, 0);
     return;
   }
+  const context = captureMonitorSessionContext(session);
   const source = new EventSource(`${context.apiRoot}/monitor/stream`);
-  state.monitorEventSource = source;
-  const isCurrentSource = () => state.monitorEventSource === source && chainRequestIsCurrent(context);
+  session.eventSource = source;
+  if (session.chainId === activeChainId) state.monitorEventSource = source;
+  const isCurrentSource = () => session.eventSource === source && monitorSessionRequestIsCurrent(context);
   source.addEventListener('open', () => {
     if (!isCurrentSource()) return;
-    state.monitorConnected = true;
-    state.monitorTransport = 'sse';
-    renderMonitorHealth();
+    session.connected = true;
+    session.transport = 'sse';
+    if (session.chainId === activeChainId) {
+      synchronizeActiveMonitorSessionState();
+      renderMonitorHealth();
+    }
+    renderMonitorChainFilter();
   });
   source.addEventListener('snapshot', (event) => {
     if (!isCurrentSource()) return;
-    const initial = !state.monitorStreamSnapshotReceived;
-    state.monitorStreamSnapshotReceived = true;
-    applyMonitorPayload(parseMonitorStreamPayload(event), { initial });
+    const initial = !session.streamSnapshotReceived;
+    session.streamSnapshotReceived = true;
+    applyMonitorPayload(parseMonitorStreamPayload(event), {
+      initial,
+      session,
+      applySettings: session.chainId === activeChainId
+    });
   });
   const applyCurrentEvent = (event) => {
-    if (isCurrentSource()) applyMonitorStreamEvent(event);
+    if (isCurrentSource()) applyMonitorStreamEvent(event, session);
   };
   source.addEventListener('event', applyCurrentEvent);
   source.addEventListener('buy', applyCurrentEvent);
@@ -3982,72 +4290,140 @@ function connectMonitorStream(context = captureChainRequestContext()) {
   source.addEventListener('transfer', applyCurrentEvent);
   source.addEventListener('token_create', applyCurrentEvent);
   source.addEventListener('event_update', (event) => {
-    if (isCurrentSource()) applyMonitorStreamEventUpdate(event);
+    if (isCurrentSource()) applyMonitorStreamEventUpdate(event, session);
   });
   source.addEventListener('health', (event) => {
     if (!isCurrentSource()) return;
     const payload = parseMonitorStreamPayload(event);
-    state.monitorHealth = { ...state.monitorHealth, ...(payload.health || payload) };
-    state.monitorConnected = true;
-    renderMonitorHealth();
+    session.health = { ...session.health, ...(payload.health || payload) };
+    session.connected = true;
+    if (session.chainId === activeChainId) {
+      synchronizeActiveMonitorSessionState();
+      renderMonitorHealth();
+    }
+    renderMonitorChainFilter();
   });
   source.addEventListener('bark', () => {
-    if (isCurrentSource()) void refreshBarkTargets(context);
+    if (isCurrentSource() && session.chainId === activeChainId) void refreshBarkTargets();
   });
   source.addEventListener('message', (event) => {
     if (!isCurrentSource()) return;
     const payload = parseMonitorStreamPayload(event);
-    if (payload.event || payload.buy || payload.sell || payload.transfer || payload.token_create || payload.walletAddress) applyMonitorStreamEvent(event);
-    else applyMonitorPayload(payload);
+    if (payload.event || payload.buy || payload.sell || payload.transfer || payload.token_create || payload.walletAddress) {
+      applyMonitorStreamEvent(event, session);
+    } else {
+      applyMonitorPayload(payload, { session, applySettings: session.chainId === activeChainId });
+    }
   });
   source.addEventListener('error', () => {
     if (!isCurrentSource() || state.activeTab !== 'monitor') return;
     source.close();
-    state.monitorEventSource = null;
-    state.monitorConnected = false;
-    state.monitorTransport = 'polling';
-    state.monitorRecentRefreshAt = 0;
-    renderMonitorHealth();
-    scheduleMonitorPoll(0);
+    session.eventSource = null;
+    session.connected = false;
+    session.transport = 'polling';
+    session.recentRefreshAt = 0;
+    if (session.chainId === activeChainId) {
+      synchronizeActiveMonitorSessionState();
+      renderMonitorHealth();
+    }
+    renderMonitorChainFilter();
+    scheduleMonitorPoll(session, 0);
   });
 }
 
+async function loadMonitorSession(session, { manual = false, refresh = false } = {}) {
+  if (manual && session.started) stopMonitorSession(session);
+  const wasStarted = session.started;
+  if (!wasStarted) {
+    session.started = true;
+    session.transport = 'loading';
+    session.connected = false;
+  } else if (!refresh) {
+    return;
+  }
+  const context = captureMonitorSessionContext(session);
+  if (manual) session.health = {};
+  try {
+    const payload = await fetchMonitorSessionJson(context, '/monitor?limit=200');
+    if (!monitorSessionRequestIsCurrent(context) || !state.monitorStarted ||
+      !session.started || state.activeTab !== 'monitor') return;
+    applyMonitorPayload(payload, {
+      initial: true,
+      session,
+      applySettings: session.chainId === activeChainId
+    });
+  } catch (error) {
+    if (!monitorSessionRequestIsCurrent(context)) return;
+    session.connected = false;
+    session.health = { ...session.health, lastError: error.message };
+    if (session.chainId === activeChainId) {
+      synchronizeActiveMonitorSessionState();
+      renderMonitorHealth();
+    }
+    renderMonitorChainFilter();
+  }
+  if (!monitorSessionRequestIsCurrent(context) || !state.monitorStarted ||
+    !session.started || state.activeTab !== 'monitor' || wasStarted) return;
+  connectMonitorStream(session);
+}
+
+function desiredMonitorChainIds() {
+  return new Set([...state.monitorFeedChainIds, activeChainId]);
+}
+
+async function synchronizeMonitorSessions({ manual = false, refreshActive = false } = {}) {
+  const desired = desiredMonitorChainIds();
+  for (const session of state.monitorSessions.values()) {
+    if (!desired.has(session.chainId) && session.started) stopMonitorSession(session);
+  }
+  await Promise.allSettled([...desired].map((chainId) => {
+    const session = monitorSession(chainId);
+    return loadMonitorSession(session, {
+      manual,
+      refresh: refreshActive && chainId === activeChainId
+    });
+  }));
+  synchronizeCombinedMonitorEvents();
+  synchronizeActiveMonitorSessionState();
+  renderMonitorPage();
+}
+
 async function startMonitorPage({ manual = false, preserveSocial = false } = {}) {
-  stopMonitorTransport({ stopSocial: !preserveSocial });
-  const context = captureChainRequestContext();
-  const sequence = state.monitorSequence;
+  if (!state.monitorFeedChainIds.size) state.monitorFeedChainIds = readStoredMonitorFeedChainIds();
+  if (!state.monitorStarted) state.monitorSequence += 1;
   state.monitorStarted = true;
   state.monitorThreshold = readStoredMonitorThreshold();
-  state.monitorTransport = 'loading';
-  state.monitorHealth = manual ? {} : state.monitorHealth;
   setMonitorMutationControlsDisabled(!state.monitorSettingsLoaded);
-  renderMonitorPage();
+  clearInterval(state.monitorTickTimer);
   state.monitorTickTimer = setInterval(() => {
     synchronizeMonitorAlerts();
     updateLiveRelativeTimes();
   }, 1_000);
   if (!preserveSocial || !state.socialStarted) void startSocialMonitor({ manual });
   elements.monitorRefreshButton.disabled = true;
-  try {
-    const payload = await fetchChainJson(context, '/monitor?limit=200');
-    if (!chainRequestIsCurrent(context) || sequence !== state.monitorSequence ||
-      !state.monitorStarted || state.activeTab !== 'monitor') return;
-    applyMonitorPayload(payload, { initial: true });
-    if (manual) showToast('实时监控已刷新');
-  } catch (error) {
-    if (!chainRequestIsCurrent(context) || sequence !== state.monitorSequence) return;
-    state.monitorConnected = false;
-    state.monitorHealth = { ...state.monitorHealth, lastError: error.message };
-    renderMonitorHealth();
-    if (manual) showToast(`刷新失败：${error.message}`, 'error');
-  } finally {
-    if (chainRequestIsCurrent(context) && sequence === state.monitorSequence) {
-      elements.monitorRefreshButton.disabled = false;
-    }
+  renderMonitorPage();
+  await synchronizeMonitorSessions({ manual, refreshActive: true });
+  elements.monitorRefreshButton.disabled = false;
+  if (manual && state.monitorStarted && state.activeTab === 'monitor') showToast('实时监控已刷新');
+}
+
+async function updateMonitorFeedChainSelection(chainId, selected) {
+  const normalizedChainId = monitorChainId(chainId);
+  const next = new Set(state.monitorFeedChainIds);
+  if (selected) next.add(normalizedChainId);
+  else next.delete(normalizedChainId);
+  if (!next.size) {
+    renderMonitorChainFilter();
+    showToast('实时链上流水至少保留一条链', 'error');
+    return;
   }
-  if (!chainRequestIsCurrent(context) || sequence !== state.monitorSequence ||
-    !state.monitorStarted || state.activeTab !== 'monitor') return;
-  connectMonitorStream(context);
+  state.monitorFeedChainIds = next;
+  storeMonitorFeedChainIds();
+  if (state.monitorNoteEditor && !next.has(state.monitorNoteEditor.chainId)) state.monitorNoteEditor = null;
+  synchronizeCombinedMonitorEvents();
+  renderMonitorChainFilter();
+  renderMonitorEvents();
+  if (state.monitorStarted && state.activeTab === 'monitor') await synchronizeMonitorSessions();
 }
 
 async function saveMonitorSettings(event) {
@@ -6859,8 +7235,8 @@ function syncChainUi() {
   });
 }
 
-function resetChainState() {
-  stopMonitorTransport({ stopSocial: false });
+function resetChainState({ preserveMonitorFeed = false } = {}) {
+  if (!preserveMonitorFeed) stopMonitorTransport({ stopSocial: false, clearEvents: true });
   clearManualWinnerTracking();
   clearTimeout(state.pollTimer);
   clearTimeout(state.librarySearchTimer);
@@ -6884,16 +7260,21 @@ function resetChainState() {
   state.monitorBarkSound = 'alarm';
   state.monitorBarkVolume = 5;
   state.monitorHealth = {};
-  state.monitorEvents = [];
-  state.monitorServerClusters = [];
-  state.monitorEventKeys.clear();
-  state.monitorFreshEventKeys.clear();
-  state.monitorLastEventId = '';
-  state.monitorRecentRefreshAt = 0;
-  state.monitorAlertedTokens.clear();
-  state.monitorBarkTargets = [];
-  state.monitorBarkBusy.clear();
-  state.monitorNoteEditor = null;
+  if (!preserveMonitorFeed) {
+    state.monitorEvents = [];
+    state.monitorServerClusters = [];
+    state.monitorEventKeys.clear();
+    state.monitorFreshEventKeys.clear();
+    state.monitorLastEventId = '';
+    state.monitorRecentRefreshAt = 0;
+    state.monitorAlertedTokens.clear();
+    state.monitorBarkTargets = [];
+    state.monitorBarkBusy.clear();
+    state.monitorNoteEditor = null;
+  } else {
+    synchronizeCombinedMonitorEvents();
+    synchronizeActiveMonitorSessionState();
+  }
   state.detailView = 'placeholder';
   state.detailAddress = '';
   state.loading = false;
@@ -6951,7 +7332,7 @@ function switchChain(nextChainId) {
   else url.searchParams.set('chain', nextChainId);
   url.hash = '';
   window.history.replaceState(null, '', `${url.pathname}${url.search}`);
-  resetChainState();
+  resetChainState({ preserveMonitorFeed: true });
   syncChainUi();
   syncToolbarVisibility();
   showToast(`已切换到 ${activeChain().label}，数据与提醒独立加载`);
@@ -7090,6 +7471,11 @@ elements.monitorBarkVolume.addEventListener('input', () => {
 elements.monitorSoundButton.addEventListener('click', () => void enableAndPreviewMonitorSound());
 elements.monitorMuteButton.addEventListener('click', muteMonitorSound);
 elements.monitorRefreshButton.addEventListener('click', () => void startMonitorPage({ manual: true }));
+elements.monitorChainFilter?.addEventListener('change', (event) => {
+  const input = event.target.closest('input[type="checkbox"][name="monitorChain"]');
+  if (!input) return;
+  void updateMonitorFeedChainSelection(input.value, input.checked);
+});
 elements.monitorBarkForm.addEventListener('submit', createBarkTarget);
 elements.monitorBarkList.addEventListener('click', (event) => {
   const button = event.target.closest('[data-bark-action]');
@@ -7417,6 +7803,7 @@ window.addEventListener('pagehide', stopMonitorTransport);
 const initialAddress = normalizeAddress(window.location.hash.slice(1));
 if (initialAddress) state.selectedAddress = initialAddress;
 state.monitorThreshold = readStoredMonitorThreshold();
+state.monitorFeedChainIds = readStoredMonitorFeedChainIds();
 syncChainUi();
 syncToolbarVisibility();
 refreshIcons();

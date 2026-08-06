@@ -587,10 +587,33 @@
 
           <section class="monitor-feed-panel" aria-labelledby="monitor-feed-title">
             <header class="monitor-panel-head">
-              <div>
+              <div class="monitor-feed-heading">
                 <h3 id="monitor-feed-title">实时链上流水</h3>
                 <p id="monitor-feed-summary">按检测时间倒序</p>
               </div>
+              <fieldset class="monitor-chain-filter" id="monitor-chain-filter" aria-label="筛选实时链上流水">
+                <legend class="sr-only">选择要显示的链</legend>
+                <label data-monitor-chain="robinhood">
+                  <input type="checkbox" name="monitorChain" value="robinhood" checked />
+                  <span class="chain-switch-dot robinhood" aria-hidden="true"></span>
+                  <span>Robinhood</span>
+                </label>
+                <label data-monitor-chain="base">
+                  <input type="checkbox" name="monitorChain" value="base" />
+                  <span class="chain-switch-dot base" aria-hidden="true"></span>
+                  <span>Base</span>
+                </label>
+                <label data-monitor-chain="bsc">
+                  <input type="checkbox" name="monitorChain" value="bsc" />
+                  <span class="chain-switch-dot bsc" aria-hidden="true"></span>
+                  <span>BSC</span>
+                </label>
+                <label data-monitor-chain="solana">
+                  <input type="checkbox" name="monitorChain" value="solana" />
+                  <span class="chain-switch-dot solana" aria-hidden="true"></span>
+                  <span>Solana</span>
+                </label>
+              </fieldset>
               <button class="inline-icon-button" id="monitor-refresh-button" type="button" title="刷新实时监控" aria-label="刷新实时监控">
                 <i data-lucide="refresh-cw" aria-hidden="true"></i>
               </button>
