@@ -1537,10 +1537,10 @@ test('mixed-chain events render chain-scoped links, notes, labels and distinct b
   assert.match(appJs, /const normalizeTransactionHash = \(value\) => normalizeTransactionHashForChain\(value, chainId\)/);
 
   for (const [chainId, color] of [
-    ['robinhood', '#edf8f1'],
-    ['base', '#eef5ff'],
-    ['bsc', '#fff8df'],
-    ['solana', '#f7f0fb']
+    ['robinhood', '#f7fcf9'],
+    ['base', '#f7faff'],
+    ['bsc', '#fffdf5'],
+    ['solana', '#fcf9fe']
   ]) {
     assert.match(stylesCss, new RegExp(`\\.monitor-event-item\\[data-chain="${chainId}"\\] \\{[\\s\\S]*?--chain-surface: ${color}`));
     assert.match(stylesCss, new RegExp(`\\.monitor-chain-badge\\[data-chain="${chainId}"\\]`));

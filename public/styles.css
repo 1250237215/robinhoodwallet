@@ -5337,23 +5337,23 @@ button.telegram-reply {
 }
 
 .monitor-event-item[data-chain="robinhood"] {
-  --chain-surface: #edf8f1;
-  --chain-hover: #e2f3e9;
+  --chain-surface: #f7fcf9;
+  --chain-hover: #eff8f3;
 }
 
 .monitor-event-item[data-chain="base"] {
-  --chain-surface: #eef5ff;
-  --chain-hover: #e3effd;
+  --chain-surface: #f7faff;
+  --chain-hover: #edf5ff;
 }
 
 .monitor-event-item[data-chain="bsc"] {
-  --chain-surface: #fff8df;
-  --chain-hover: #fff1c9;
+  --chain-surface: #fffdf5;
+  --chain-hover: #fff8e8;
 }
 
 .monitor-event-item[data-chain="solana"] {
-  --chain-surface: #f7f0fb;
-  --chain-hover: #efe4f7;
+  --chain-surface: #fcf9fe;
+  --chain-hover: #f7f1fb;
 }
 
 .monitor-event-item[data-event-type="buy"] {
