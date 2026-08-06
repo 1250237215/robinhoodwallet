@@ -15,6 +15,7 @@ const telegramElements = {
   badgeLabel: document.querySelector('#telegram-connection-label'),
   summary: document.querySelector('#telegram-monitor-summary'),
   caWatchButton: document.querySelector('#telegram-ca-watch-button'),
+  latestButton: document.querySelector('#telegram-latest-button'),
   refreshButton: document.querySelector('#telegram-refresh-button'),
   sourceAvatar: document.querySelector('#telegram-source-avatar'),
   sourceName: document.querySelector('#telegram-source-name'),
@@ -483,6 +484,11 @@ function focusTelegramMessage(id) {
   window.setTimeout(() => row.classList.remove('is-target'), 1_400);
 }
 
+function scrollTelegramToLatest({ behavior = 'smooth' } = {}) {
+  const feed = telegramElements.feed;
+  feed.scrollTo({ top: feed.scrollHeight, behavior });
+}
+
 function createTelegramReply(message, availableIds) {
   const reply = telegramReply(message);
   if (!reply) return null;
@@ -903,6 +909,7 @@ if (Object.values(telegramElements).every(Boolean)) {
     renderTelegramCaWatch();
   });
   telegramElements.caWatchSave.addEventListener('click', () => void saveTelegramCaWatch());
+  telegramElements.latestButton.addEventListener('click', () => scrollTelegramToLatest());
   telegramElements.refreshButton.addEventListener('click', () => void loadTelegramMessages({ manual: true }));
   new MutationObserver(synchronizeTelegramLifecycle).observe(telegramElements.monitorPage, {
     attributes: true,
