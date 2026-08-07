@@ -411,6 +411,7 @@ export function createSocialService({
     const watchlists = activeStore.listWatchlist({ platform: source });
     return watchlists.some((entry) => {
       if (entry.desiredState !== 'active') return false;
+      if (entry.caBark !== true) return false;
       const watchedHandle = String(entry.handle || entry.accountKey || '').replace(/^@/, '').toLowerCase();
       if (watchedHandle !== handle) return false;
       return Array.isArray(entry.eventTypes) && entry.eventTypes.includes(kind);

@@ -405,6 +405,7 @@ const elements = {
   socialEventEditorId: document.querySelector('#social-event-editor-id'),
   socialEventNoteLabel: document.querySelector('#social-event-note-label'),
   socialEventNote: document.querySelector('#social-event-note'),
+  socialEventCaBark: document.querySelector('#social-event-ca-bark'),
   socialEventOptions: document.querySelector('#social-event-options'),
   socialEventSelectionActions: document.querySelector('#social-event-selection-actions'),
   socialEventSelectAll: document.querySelector('#social-event-select-all'),
@@ -2847,13 +2848,14 @@ function renderSocialWatchlist() {
       : eventTypes.length
         ? `${eventTypes.length} 项行为`
         : '已暂停';
+    const caBarkSummary = entry.caBark === true ? 'CA Bark 已开' : 'CA Bark 未开';
     return `
       <div class="social-watchlist-item" data-social-watchlist-id="${id}">
         <input type="checkbox" data-social-watchlist-select="${id}"${state.socialSelectedWatchlist.has(id) ? ' checked' : ''} />
         <span class="social-watchlist-avatar" aria-hidden="true">${escapeHtml(handle.slice(0, 2).toUpperCase())}</span>
         <span class="social-watchlist-copy">
           <strong>${escapeHtml(entry.name || `@${handle}`)}</strong>
-          <span>@${escapeHtml(handle)} · ${escapeHtml(eventSummary)}</span>
+          <span>@${escapeHtml(handle)} · ${escapeHtml(eventSummary)} · ${escapeHtml(caBarkSummary)}</span>
           ${note ? `<small class="social-watchlist-note" title="${escapeHtml(note)}">${escapeHtml(note)}</small>` : ''}
         </span>
         <span class="social-sync-chip" data-state="${escapeHtml(status)}" title="${escapeHtml(entry.lastError || '')}">${statusLabel}</span>
@@ -3999,6 +4001,7 @@ function addSocialWatchAccounts(event) {
   elements.socialEventEditorTitle.textContent = `新增 ${lines.length} 个账号`;
   elements.socialEventNoteLabel.textContent = lines.length === 1 ? '自定义备注' : `共同备注（${lines.length} 个账号）`;
   elements.socialEventNote.value = '';
+  elements.socialEventCaBark.checked = false;
   elements.socialEventNote.placeholder = lines.length === 1 ? '输入该账号的备注' : '输入本次账号共用的备注';
   elements.socialEventOptions.hidden = false;
   elements.socialEventSelectionActions.hidden = false;
@@ -4030,6 +4033,7 @@ function openSocialEventEditor(id, { noteOnly = false } = {}) {
   elements.socialEventEditorTitle.textContent = `@${handle}`;
   elements.socialEventNoteLabel.textContent = '自定义备注';
   elements.socialEventNote.value = String(entry.note || '');
+  elements.socialEventCaBark.checked = entry.caBark === true;
   elements.socialEventNote.placeholder = '输入该账号的备注';
   elements.socialEventOptions.hidden = noteOnly;
   elements.socialEventSelectionActions.hidden = noteOnly;
@@ -4046,6 +4050,7 @@ function resetSocialEventEditor() {
   state.socialPendingWatchAccounts = [];
   elements.socialEventEditorId.value = '';
   elements.socialEventNote.value = '';
+  elements.socialEventCaBark.checked = false;
   elements.socialEventNote.placeholder = '输入该账号的备注';
   elements.socialEventOptions.hidden = false;
   elements.socialEventSelectionActions.hidden = false;
@@ -4081,7 +4086,8 @@ async function saveSocialEventPreferences(event) {
           handle,
           platform: 'twitter',
           eventTypes,
-          note
+          note,
+          caBark: elements.socialEventCaBark.checked
         }))
       });
       if (Array.isArray(payload.entries)) {
@@ -4093,7 +4099,9 @@ async function saveSocialEventPreferences(event) {
       showToast(`已提交 ${pendingAccounts.length} 个社媒账号`);
       return;
     }
-    const patch = mode === 'note' ? { note } : { eventTypes, note };
+    const patch = mode === 'note'
+      ? { note }
+      : { eventTypes, note, caBark: elements.socialEventCaBark.checked };
     const payload = await runSocialWrite('PATCH', `/watchlist/${id}`, patch);
     if (payload?.entry) applySocialWatchlistEntry(payload.entry);
     mergeSocialPosts([]);

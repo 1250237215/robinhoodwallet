@@ -210,20 +210,24 @@ function normalizeWatchAccountPatch(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new TypeError('Watchlist patch must be an object');
   }
-  const supported = new Set(['eventTypes', 'note']);
+  const supported = new Set(['eventTypes', 'note', 'caBark']);
   const keys = Object.keys(value);
   const unknown = keys.find((key) => !supported.has(key));
   if (unknown) throw new TypeError(`Unsupported watchlist patch field: ${unknown}`);
   const eventTypesProvided = Object.hasOwn(value, 'eventTypes');
   const noteProvided = Object.hasOwn(value, 'note');
-  if (!eventTypesProvided && !noteProvided) {
-    throw new TypeError('Watchlist patch must include eventTypes or note');
+  const caBarkProvided = Object.hasOwn(value, 'caBark');
+  if (caBarkProvided && typeof value.caBark !== 'boolean') throw new TypeError('caBark must be a boolean');
+  if (!eventTypesProvided && !noteProvided && !caBarkProvided) {
+    throw new TypeError('Watchlist patch must include eventTypes, note or caBark');
   }
   return {
     eventTypesProvided,
     eventTypes: eventTypesProvided ? normalizeWatchEventTypes(value.eventTypes) : null,
     noteProvided,
-    note: noteProvided ? normalizeWatchNote(value.note) : null
+    note: noteProvided ? normalizeWatchNote(value.note) : null,
+    caBarkProvided,
+    caBark: caBarkProvided ? value.caBark : null
   };
 }
 
@@ -328,6 +332,7 @@ function watchlistFromRow(row) {
     metadata: parseJson(row.metadata_json, {}),
     eventTypes: watchEventTypesFromJson(row.event_types_json),
     note: row.local_note,
+    caBark: Boolean(row.ca_bark_enabled),
     desiredState: row.desired_state,
     syncStatus: row.sync_status,
     origin: row.origin,
@@ -1128,6 +1133,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
   if (!socialWatchlistColumns.has('local_note')) {
     db.exec("ALTER TABLE social_watchlist ADD COLUMN local_note TEXT NOT NULL DEFAULT ''");
   }
+  if (!socialWatchlistColumns.has('ca_bark_enabled')) {
+    db.exec('ALTER TABLE social_watchlist ADD COLUMN ca_bark_enabled INTEGER NOT NULL DEFAULT 0');
+  }
 
   const socialBridgeStateColumns = new Set(
     db.prepare('PRAGMA table_info(social_bridge_state)').all().map((column) => column.name)
@@ -1452,9 +1460,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       const initialNote = preserveLocalPreferences ? '' : suppliedNote;
       const result = db.prepare(`
         INSERT INTO social_watchlist(
-          platform, account_key, handle, name, url, remote_id, metadata_json, event_types_json, local_note, desired_state,
+          platform, account_key, handle, name, url, remote_id, metadata_json, event_types_json, local_note, ca_bark_enabled, desired_state,
           sync_status, origin, last_synced_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
       `).run(
         account.platform,
         account.accountKey,
@@ -1465,6 +1473,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         json(account.metadata),
         json(initialEventTypes),
         initialNote,
+        preserveLocalPreferences ? 0 : (account.caBark ? 1 : 0),
         synced ? 'synced' : 'pending',
         origin,
         synced ? timestamp : null,
@@ -1485,6 +1494,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       const nextNote = preserveLocalPreferences || !account._noteProvided
         ? existing.local_note
         : suppliedNote;
+      const nextCaBark = preserveLocalPreferences || !account._caBarkProvided
+        ? Boolean(existing.ca_bark_enabled)
+        : account.caBark;
       const nextStatus = synced ? 'synced' : existing.desired_state === 'active' && existing.sync_status === 'synced'
         ? 'synced'
         : 'pending';
@@ -1493,11 +1505,12 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         existing.metadata_json !== json(nextMetadata) ||
         existing.event_types_json !== json(nextEventTypes) ||
         existing.local_note !== nextNote ||
+        Boolean(existing.ca_bark_enabled) !== nextCaBark ||
         existing.sync_status !== nextStatus;
       if (changed) {
         db.prepare(`
           UPDATE social_watchlist SET
-            handle = ?, name = ?, url = ?, remote_id = ?, metadata_json = ?, event_types_json = ?, local_note = ?, desired_state = 'active',
+            handle = ?, name = ?, url = ?, remote_id = ?, metadata_json = ?, event_types_json = ?, local_note = ?, ca_bark_enabled = ?, desired_state = 'active',
             sync_status = ?, origin = ?, last_synced_at = ?, last_error = '', created_at = ?, updated_at = ?
           WHERE id = ?
         `).run(
@@ -1508,6 +1521,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
           json(nextMetadata),
           json(nextEventTypes),
           nextNote,
+          nextCaBark ? 1 : 0,
           nextStatus,
           origin === 'remote' ? 'remote' : existing.origin,
           synced ? timestamp : existing.last_synced_at,
@@ -1544,7 +1558,9 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       const currentEventTypes = watchEventTypesFromJson(existing.event_types_json);
       const nextEventTypes = normalized.eventTypesProvided ? normalized.eventTypes : currentEventTypes;
       const nextNote = normalized.noteProvided ? normalized.note : existing.local_note;
-      if (json(currentEventTypes) === json(nextEventTypes) && existing.local_note === nextNote) {
+      const nextCaBark = normalized.caBarkProvided ? normalized.caBark : Boolean(existing.ca_bark_enabled);
+      if (json(currentEventTypes) === json(nextEventTypes) && existing.local_note === nextNote
+        && Boolean(existing.ca_bark_enabled) === nextCaBark) {
         return {
           entry: watchlistFromRow(existing),
           change: null,
@@ -1552,8 +1568,8 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         };
       }
       db.prepare(`
-        UPDATE social_watchlist SET event_types_json = ?, local_note = ?, updated_at = ? WHERE id = ?
-      `).run(json(nextEventTypes), nextNote, timestamp, numericId);
+        UPDATE social_watchlist SET event_types_json = ?, local_note = ?, ca_bark_enabled = ?, updated_at = ? WHERE id = ?
+      `).run(json(nextEventTypes), nextNote, nextCaBark ? 1 : 0, timestamp, numericId);
       const entry = watchlistFromRow(db.prepare('SELECT * FROM social_watchlist WHERE id = ?').get(numericId));
       return {
         entry,

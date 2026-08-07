@@ -124,7 +124,7 @@ test('notifies once when a watched Twitter account first posts a contract addres
     service.close();
     fs.rmSync(directory, { recursive: true, force: true });
   });
-  service.addWatchAccounts([{ platform: 'twitter', handle: 'alice', eventTypes: ['post'] }]);
+  service.addWatchAccounts([{ platform: 'twitter', handle: 'alice', eventTypes: ['post'], caBark: true }]);
   const post = {
     source: 'twitter',
     externalId: '2081682293836656998',

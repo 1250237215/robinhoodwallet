@@ -1668,7 +1668,9 @@ test('each watched account exposes behavior controls and a searchable custom not
   assert.match(appJs, /const note = elements\.socialEventNote\.value\.trim\(\)/);
   assert.match(appJs, /state\.socialEventEditorMode = 'create'/);
   assert.match(appJs, /setSocialEventEditorSelection\(SOCIAL_EVENT_TYPES\)/);
-  assert.match(appJs, /const patch = mode === 'note' \? \{ note \} : \{ eventTypes, note \}/);
+  assert.match(appJs, /const patch = mode === 'note'[\s\S]*caBark: elements\.socialEventCaBark\.checked/);
+  assert.match(indexHtml, /id="social-event-ca-bark"[^>]*type="checkbox"/);
+  assert.match(appJs, /entry\.caBark === true/);
   assert.match(appJs, /runSocialWrite\('PATCH', `\/watchlist\/\$\{id\}`, patch\)/);
   assert.match(appJs, /data-social-feed-note-edit="\$\{watchEntryId\}"/);
   assert.match(appJs, /openSocialEventEditor\(editButton\.dataset\.socialFeedNoteEdit, \{ noteOnly: true \}\)/);

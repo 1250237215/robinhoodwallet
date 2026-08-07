@@ -714,6 +714,8 @@ export function normalizeWatchAccount(input, { defaultPlatform = 'twitter' } = {
   if (!accountKey) throw new TypeError('Watchlist account key is required');
   const eventTypesProvided = Object.hasOwn(value, 'eventTypes');
   const noteProvided = Object.hasOwn(value, 'note');
+  const caBarkProvided = Object.hasOwn(value, 'caBark');
+  if (caBarkProvided && typeof value.caBark !== 'boolean') throw new TypeError('caBark must be a boolean');
   return {
     platform,
     accountKey,
@@ -724,7 +726,9 @@ export function normalizeWatchAccount(input, { defaultPlatform = 'twitter' } = {
     metadata: value.metadata && typeof value.metadata === 'object' ? value.metadata : {},
     eventTypes: normalizeWatchEventTypes(eventTypesProvided ? value.eventTypes : undefined, { defaultAll: true }),
     note: noteProvided ? value.note : '',
+    caBark: caBarkProvided ? value.caBark : false,
     _eventTypesProvided: eventTypesProvided,
-    _noteProvided: noteProvided
+    _noteProvided: noteProvided,
+    _caBarkProvided: caBarkProvided
   };
 }

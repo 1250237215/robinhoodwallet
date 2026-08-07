@@ -4793,6 +4793,25 @@ button.telegram-reply {
   outline-offset: 0;
 }
 
+.social-event-ca-bark-toggle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 12px 0 4px;
+  color: #9a5b18;
+  font-weight: 700;
+}
+
+.social-event-ca-bark-toggle input {
+  accent-color: #c98222;
+}
+
+.social-event-ca-bark-toggle svg {
+  width: 15px;
+  height: 15px;
+  vertical-align: -3px;
+}
+
 .social-event-options {
   min-width: 0;
   display: grid;
