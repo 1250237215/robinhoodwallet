@@ -790,6 +790,25 @@ def configured_chat_ids(config):
     return selected_ids
 
 
+def configured_social_ca_bark_ids(config, selected_ids=None):
+    """Read the independent social-channel CA Bark selection."""
+    raw_ids = config.get("social_ca_bark_chat_ids", [])
+    if raw_ids is None:
+        raw_ids = []
+    if not isinstance(raw_ids, list):
+        raise RuntimeError("viewer_config.json 中的 social_ca_bark_chat_ids 必须是列表")
+    allowed = set(selected_ids if selected_ids is not None else configured_chat_ids(config))
+    result = []
+    seen = set()
+    for chat_id in raw_ids:
+        if isinstance(chat_id, bool) or not isinstance(chat_id, int):
+            raise RuntimeError("viewer_config.json 中的 CA Bark 聊天 ID 必须全部是数字")
+        if chat_id in allowed and chat_id not in seen:
+            result.append(chat_id)
+            seen.add(chat_id)
+    return result
+
+
 def _is_solana_address(value):
     number = 0
     try:
@@ -1114,6 +1133,7 @@ class MessageStore:
         self.source = {}
         self.sources = []
         self.selected_chat_ids = []
+        self.social_ca_bark_chat_ids = []
         self.updated_at = None
 
     @staticmethod
@@ -1168,6 +1188,10 @@ class MessageStore:
                 "kind": "社媒监控",
                 "avatar": None,
             }
+
+    def set_social_ca_bark_chat_ids(self, chat_ids):
+        with self._lock:
+            self.social_ca_bark_chat_ids = [int(chat_id) for chat_id in chat_ids]
 
     def replace_for_sources(self, messages, sources):
         normalized_sources = [dict(source) for source in sources]
@@ -1371,6 +1395,7 @@ class ViewerState:
                 if selected_source is not None:
                     chat.update(selected_source)
                 chat["selected"] = chat["id"] in selected_ids
+                chat["ca_bark_enabled"] = chat["id"] in set(self.store.social_ca_bark_chat_ids)
                 chats.append(chat)
         return {
             "chats": chats,
@@ -1384,19 +1409,23 @@ class ViewerState:
         return {
             "selected_chat_ids": metadata["selected_chat_ids"],
             "chat_ids": metadata["selected_chat_ids"],
+            "social_ca_bark_chat_ids": self.store.social_ca_bark_chat_ids,
             "sources": metadata["sources"],
             "mode": metadata["mode"],
             "loading": self.loading,
             "updated_at": metadata["updated_at"],
         }
 
-    def request_selection_update(self, chat_ids):
+    def request_selection_update(self, chat_ids, ca_bark_chat_ids=None):
         with self._lock:
             loop = self._selection_loop
             updater = self._selection_updater
         if loop is None or updater is None:
             raise RuntimeError("聊天选择服务尚未就绪")
-        future = asyncio.run_coroutine_threadsafe(updater(chat_ids), loop)
+        future = asyncio.run_coroutine_threadsafe(
+            updater(chat_ids, ca_bark_chat_ids=ca_bark_chat_ids),
+            loop,
+        )
         try:
             return future.result(timeout=SELECTION_UPDATE_TIMEOUT)
         except FutureTimeoutError as error:
@@ -1508,6 +1537,7 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                 "source": metadata["source"],
                 "sources": metadata["sources"],
                 "selected_chat_ids": metadata["selected_chat_ids"],
+                "social_ca_bark_chat_ids": state.store.social_ca_bark_chat_ids,
                 "mode": metadata["mode"],
                 "source_name": state.source_name,
                 "started_at": state.started_at,
@@ -1609,12 +1639,31 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                 raise ValueError(
                     f"at most {MAX_SELECTED_CHATS} chats may be selected"
                 )
+            ca_bark_ids = payload.get("ca_bark_chat_ids")
+            if ca_bark_ids is not None:
+                if not isinstance(ca_bark_ids, list):
+                    raise ValueError("ca_bark_chat_ids must be a list")
+                normalized_ca_bark_ids = []
+                seen_ca_bark_ids = set()
+                for chat_id in ca_bark_ids:
+                    if isinstance(chat_id, bool) or not isinstance(chat_id, int):
+                        raise ValueError("ca_bark_chat_ids must contain only integers")
+                    if chat_id not in seen:
+                        raise ValueError("CA Bark 频道必须先加入社媒监控")
+                    if chat_id not in seen_ca_bark_ids:
+                        normalized_ca_bark_ids.append(chat_id)
+                        seen_ca_bark_ids.add(chat_id)
+            else:
+                normalized_ca_bark_ids = None
         except ValueError as error:
             self._send_error(400, str(error))
             return
 
         try:
-            result = self.server.state.request_selection_update(normalized_ids)
+            result = self.server.state.request_selection_update(
+                normalized_ids,
+                normalized_ca_bark_ids,
+            )
         except ValueError as error:
             self._send_error(400, str(error))
             return
@@ -2886,6 +2935,13 @@ class TelegramSocialCaAlertService(TelegramCaAlertService):
         selected_ids = self.controller.selected_ids if self.controller is not None else self.selected_ids
         if chat_id is None or int(chat_id) not in set(selected_ids):
             return False
+        ca_bark_ids = (
+            self.controller.store.social_ca_bark_chat_ids
+            if self.controller is not None
+            else set()
+        )
+        if int(chat_id) not in set(ca_bark_ids):
+            return False
         if self.excluded_chat_id is not None and int(chat_id) == self.excluded_chat_id:
             return False
         if message_id is None:
@@ -3099,10 +3155,29 @@ class MultiChatController:
     async def initialize(self, chat_ids):
         return await self.update_selection(chat_ids, persist=False)
 
-    async def update_selection(self, chat_ids, persist=True):
+    async def update_selection(self, chat_ids, persist=True, ca_bark_chat_ids=None):
         selected_ids = self._validated_ids(chat_ids)
+        if ca_bark_chat_ids is None:
+            ca_bark_ids = configured_social_ca_bark_ids(
+                self.config,
+                selected_ids,
+            )
+        else:
+            ca_bark_ids = []
+            seen_ca_bark_ids = set()
+            for chat_id in ca_bark_chat_ids:
+                chat_id = int(chat_id)
+                if chat_id not in selected_ids:
+                    raise ValueError("CA Bark 频道必须先加入社媒监控")
+                if chat_id not in seen_ca_bark_ids:
+                    ca_bark_ids.append(chat_id)
+                    seen_ca_bark_ids.add(chat_id)
         async with self._selection_lock:
-            if tuple(selected_ids) == self.selected_ids and self.sources_by_id:
+            if (
+                tuple(selected_ids) == self.selected_ids
+                and ca_bark_ids == self.store.social_ca_bark_chat_ids
+                and self.sources_by_id
+            ):
                 return self.state.selection_snapshot()
 
             self.state.set_loading(True)
@@ -3151,6 +3226,7 @@ class MultiChatController:
                 next_config = dict(self.config)
                 next_config["source_id"] = selected_ids[0]
                 next_config["selected_chat_ids"] = selected_ids
+                next_config["social_ca_bark_chat_ids"] = ca_bark_ids
                 next_config["blocked_chat_ids"] = sorted(self.blocked_chat_ids)
                 config_changed = next_config != self.config
                 if persist or config_changed:
@@ -3160,6 +3236,7 @@ class MultiChatController:
                 self.reply_resolvers = next_reply_resolvers
                 self.sources_by_id = sources_by_id
                 self.selected_ids = tuple(selected_ids)
+                self.store.set_social_ca_bark_chat_ids(ca_bark_ids)
                 self._replace_translation_generation()
                 self.store.replace_for_sources(history, sources)
                 for serialized in history:

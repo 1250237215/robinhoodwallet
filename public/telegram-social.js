@@ -33,6 +33,8 @@ const telegramSocialState = {
   chats: [],
   selectedChatIds: new Set(),
   draftChatIds: new Set(),
+  caBarkChatIds: new Set(),
+  draftCaBarkChatIds: new Set(),
   // Keep local edits authoritative until the user explicitly saves them.
   // The catalog/messages endpoints are polled independently and may return a
   // response that was started before the latest selection write completed.
@@ -71,6 +73,7 @@ function telegramSocialNormalizeChat(chat) {
     unreadCount: Number(chat?.unread_count) || 0,
     avatar: chat?.avatar && typeof chat.avatar === 'object' ? chat.avatar : null,
     selected: Boolean(chat?.selected),
+    caBarkEnabled: Boolean(chat?.ca_bark_enabled ?? chat?.caBarkEnabled),
     blocked: chat?.blocked === true || chat?.adult === true || chat?.sensitive === true
   };
 }
@@ -87,6 +90,8 @@ function telegramSocialUpdatePinnedChat() {
   window.__telegramPinnedChatId = pinned.id;
   telegramSocialState.selectedChatIds.delete(pinned.id);
   telegramSocialState.draftChatIds.delete(pinned.id);
+  telegramSocialState.caBarkChatIds.delete(pinned.id);
+  telegramSocialState.draftCaBarkChatIds.delete(pinned.id);
 }
 
 function telegramSocialIsPinnedMessage(message) {
@@ -125,10 +130,27 @@ function telegramSocialSelectedIds(payload) {
     .filter((id) => id !== null && id !== pinnedId && !blockedIds.has(id)));
 }
 
+function telegramSocialCaBarkIds(payload) {
+  const raw = Array.isArray(payload?.social_ca_bark_chat_ids)
+    ? payload.social_ca_bark_chat_ids
+    : Array.isArray(payload?.ca_bark_chat_ids)
+      ? payload.ca_bark_chat_ids
+      : Array.isArray(payload?.chats)
+        ? payload.chats.filter((chat) => chat?.ca_bark_enabled === true).map((chat) => chat.id)
+        : null;
+  if (!raw) return null;
+  const pinnedId = telegramSocialPinnedId();
+  const blockedIds = new Set(telegramSocialState.chats.filter((chat) => chat.blocked).map((chat) => chat.id));
+  return new Set(raw
+    .map(telegramSocialNumericId)
+    .filter((id) => id !== null && id !== pinnedId && !blockedIds.has(id)));
+}
+
 function telegramSocialSyncCatalog(payload, { replace = false, ignoreSelection = false } = {}) {
   if (Array.isArray(payload?.chats)) telegramSocialMergeChats(payload.chats, { replace });
   if (Array.isArray(payload?.sources)) telegramSocialMergeChats(payload.sources);
   const selected = telegramSocialSelectedIds(payload);
+  const caBark = telegramSocialCaBarkIds(payload);
   if (selected && !ignoreSelection && !telegramSocialState.selectionBusy) {
     telegramSocialState.selectedChatIds = selected;
     // A 2-second message poll or 30-second catalog refresh must not erase an
@@ -136,6 +158,12 @@ function telegramSocialSyncCatalog(payload, { replace = false, ignoreSelection =
     // source of the intermittent "channel unchecks itself" behavior.
     if (!telegramSocialState.draftDirty) {
       telegramSocialState.draftChatIds = new Set(selected);
+    }
+  }
+  if (caBark && !ignoreSelection && !telegramSocialState.selectionBusy) {
+    telegramSocialState.caBarkChatIds = caBark;
+    if (!telegramSocialState.draftDirty) {
+      telegramSocialState.draftCaBarkChatIds = new Set(caBark);
     }
   }
   telegramSocialRenderManager();
@@ -152,6 +180,9 @@ function telegramSocialRecordDraftChange() {
   telegramSocialState.draftDirty = !telegramSocialSetsEqual(
     telegramSocialState.draftChatIds,
     telegramSocialState.selectedChatIds
+  ) || !telegramSocialSetsEqual(
+    telegramSocialState.draftCaBarkChatIds,
+    telegramSocialState.caBarkChatIds
   );
 }
 
@@ -203,10 +234,30 @@ function telegramSocialRenderManager() {
       checkbox.type = 'checkbox';
       checkbox.checked = telegramSocialState.draftChatIds.has(chat.id);
       checkbox.disabled = telegramSocialState.selectionBusy;
+      checkbox.title = '加入社媒监控';
+      checkbox.setAttribute('aria-label', `${chat.name} 加入社媒监控`);
       checkbox.addEventListener('change', () => {
         if (checkbox.checked) telegramSocialState.draftChatIds.add(chat.id);
-        else telegramSocialState.draftChatIds.delete(chat.id);
+        else {
+          telegramSocialState.draftChatIds.delete(chat.id);
+          telegramSocialState.draftCaBarkChatIds.delete(chat.id);
+        }
         telegramSocialRecordDraftChange();
+        telegramSocialRenderManager();
+      });
+
+      const caBarkCheckbox = document.createElement('input');
+      caBarkCheckbox.type = 'checkbox';
+      caBarkCheckbox.className = 'telegram-social-ca-bark-checkbox';
+      caBarkCheckbox.checked = telegramSocialState.draftCaBarkChatIds.has(chat.id);
+      caBarkCheckbox.disabled = telegramSocialState.selectionBusy
+        || !telegramSocialState.draftChatIds.has(chat.id);
+      caBarkCheckbox.title = '发现 CA 时 Bark';
+      caBarkCheckbox.setAttribute('aria-label', `${chat.name} 发现 CA 时 Bark`);
+      caBarkCheckbox.addEventListener('change', () => {
+        if (caBarkCheckbox.checked) telegramSocialState.draftCaBarkChatIds.add(chat.id);
+        else telegramSocialState.draftCaBarkChatIds.delete(chat.id);
+        telegramSocialState.draftDirty = true;
         telegramSocialRenderManager();
       });
 
@@ -225,8 +276,10 @@ function telegramSocialRenderManager() {
       const status = document.createElement('span');
       status.className = 'social-sync-chip';
       status.dataset.state = telegramSocialState.selectedChatIds.has(chat.id) ? 'synced' : 'pending';
-      status.textContent = telegramSocialState.selectedChatIds.has(chat.id) ? '监控中 · CA Bark' : '未选择';
-      option.append(checkbox, avatar, copy, status);
+      status.textContent = telegramSocialState.selectedChatIds.has(chat.id)
+        ? (telegramSocialState.caBarkChatIds.has(chat.id) ? '监控中 · CA Bark 已开' : '监控中 · CA Bark 未开')
+        : '未选择';
+      option.append(checkbox, avatar, copy, caBarkCheckbox, status);
       fragment.appendChild(option);
     }
     telegramSocialElements.chatList.appendChild(fragment);
@@ -235,7 +288,7 @@ function telegramSocialRenderManager() {
   const selectedCount = telegramSocialState.draftChatIds.size;
   telegramSocialElements.selectedCount.textContent = `已选 ${selectedCount} 个`;
   telegramSocialElements.summary.textContent = telegramSocialState.error
-    || `${telegramSocialState.chats.filter((chat) => chat.id !== telegramSocialPinnedId() && !chat.blocked).length} 个可选聊天 · ${telegramSocialState.selectedChatIds.size} 个监控中`;
+    || `${telegramSocialState.chats.filter((chat) => chat.id !== telegramSocialPinnedId() && !chat.blocked).length} 个可选聊天 · ${telegramSocialState.selectedChatIds.size} 个监控中 · 左侧监控 / 右侧 CA Bark`;
   const allSelected = visibleChats.length > 0
     && visibleChats.every((chat) => telegramSocialState.draftChatIds.has(chat.id));
   telegramSocialElements.selectAll.checked = allSelected;
@@ -243,7 +296,8 @@ function telegramSocialRenderManager() {
     && visibleChats.some((chat) => telegramSocialState.draftChatIds.has(chat.id));
   telegramSocialElements.selectAll.disabled = !visibleChats.length || telegramSocialState.selectionBusy;
   telegramSocialElements.save.disabled = telegramSocialState.selectionBusy
-    || telegramSocialSetsEqual(telegramSocialState.draftChatIds, telegramSocialState.selectedChatIds);
+    || (telegramSocialSetsEqual(telegramSocialState.draftChatIds, telegramSocialState.selectedChatIds)
+      && telegramSocialSetsEqual(telegramSocialState.draftCaBarkChatIds, telegramSocialState.caBarkChatIds));
 }
 
 async function telegramSocialFetchJson(path, { method = 'GET', body = null, signal } = {}) {
@@ -282,6 +336,9 @@ function telegramSocialPublish(payload, error = '', { ignoreSelection = false } 
   const selectedChatIds = ignoreSelection
     ? telegramSocialState.selectedChatIds
     : telegramSocialSelectedIds(payload) || telegramSocialState.selectedChatIds;
+  const caBarkChatIds = ignoreSelection
+    ? telegramSocialState.caBarkChatIds
+    : telegramSocialCaBarkIds(payload) || telegramSocialState.caBarkChatIds;
   const snapshot = {
     messages,
     sources: (Array.isArray(payload?.sources) ? payload.sources : previous.sources || [])
@@ -289,6 +346,7 @@ function telegramSocialPublish(payload, error = '', { ignoreSelection = false } 
         && source?.blocked !== true
         && source?.adult !== true),
     selected_chat_ids: [...selectedChatIds],
+    social_ca_bark_chat_ids: [...caBarkChatIds],
     updated_at: payload?.updated_at || previous.updated_at || null,
     received_at: Date.now(),
     connected: !error,
@@ -387,6 +445,10 @@ async function telegramSocialSaveSelection() {
   const selectedChatIds = telegramSocialState.chats
     .filter((chat) => telegramSocialState.draftChatIds.has(chat.id))
     .map((chat) => chat.id);
+  const caBarkChatIds = telegramSocialState.chats
+    .filter((chat) => telegramSocialState.draftCaBarkChatIds.has(chat.id)
+      && telegramSocialState.draftChatIds.has(chat.id))
+    .map((chat) => chat.id);
   const pinnedId = telegramSocialPinnedId();
   if (pinnedId === null) {
     telegramSocialState.error = `正在定位 ${TELEGRAM_SOCIAL_PINNED_NAME} 群组，请稍后重试`;
@@ -398,6 +460,7 @@ async function telegramSocialSaveSelection() {
 
   const saveRevision = telegramSocialState.draftRevision;
   const previousSelected = new Set(telegramSocialState.selectedChatIds);
+  const previousCaBark = new Set(telegramSocialState.caBarkChatIds);
   telegramSocialState.selectionEpoch += 1;
   telegramSocialState.selectionBusy = true;
   telegramSocialState.error = '';
@@ -412,14 +475,20 @@ async function telegramSocialSaveSelection() {
   try {
     const payload = await telegramSocialFetchJson('/selection', {
       method: 'POST',
-      body: { chat_ids: chatIds },
+      body: { chat_ids: chatIds, ca_bark_chat_ids: caBarkChatIds },
       signal: controller.signal
     });
     telegramSocialSyncCatalog(payload, { ignoreSelection: true });
     const acknowledged = telegramSocialSelectedIds(payload) || new Set(selectedChatIds);
     telegramSocialState.selectedChatIds = acknowledged;
+    telegramSocialState.caBarkChatIds = new Set(
+      (Array.isArray(payload.social_ca_bark_chat_ids) ? payload.social_ca_bark_chat_ids : caBarkChatIds)
+        .map(telegramSocialNumericId)
+        .filter((id) => id !== null)
+    );
     if (telegramSocialState.draftRevision === saveRevision) {
       telegramSocialState.draftChatIds = new Set(acknowledged);
+      telegramSocialState.draftCaBarkChatIds = new Set(telegramSocialState.caBarkChatIds);
       telegramSocialState.draftDirty = false;
     }
     telegramSocialState.catalogCheckedAt = 0;
@@ -432,6 +501,7 @@ async function telegramSocialSaveSelection() {
       telegramSocialState.error = `保存失败：${error.message}`;
       if (telegramSocialState.draftRevision === saveRevision) {
         telegramSocialState.selectedChatIds = previousSelected;
+        telegramSocialState.caBarkChatIds = previousCaBark;
       }
     }
   } finally {

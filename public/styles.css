@@ -4118,7 +4118,8 @@ button.telegram-reply {
 }
 
 .telegram-social-select-all input,
-.telegram-social-chat-option > input {
+.telegram-social-chat-option > input,
+.telegram-social-ca-bark-checkbox {
   width: 14px;
   height: 14px;
   margin: 0;
@@ -4137,7 +4138,7 @@ button.telegram-reply {
 .telegram-social-chat-option {
   min-width: 0;
   display: grid;
-  grid-template-columns: 14px 30px minmax(0, 1fr) auto;
+  grid-template-columns: 14px 30px minmax(0, 1fr) 14px auto;
   align-items: center;
   gap: 8px;
   min-height: 48px;

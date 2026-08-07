@@ -1284,7 +1284,7 @@ test('Telegram is a read-only source merged chronologically with X in the existi
   assert.match(telegramSocialJs, /telegramSocialFetchJson\('\/chats'/);
   assert.match(telegramSocialJs, /telegramSocialFetchJson\(`\/messages\?limit=\$\{TELEGRAM_SOCIAL_MESSAGE_LIMIT\}`/);
   assert.match(telegramSocialJs, /telegramSocialFetchJson\('\/selection',[\s\S]*method: 'POST'/);
-  assert.match(telegramSocialJs, /body: \{ chat_ids: chatIds \}/);
+  assert.match(telegramSocialJs, /body: \{ chat_ids: chatIds, ca_bark_chat_ids: caBarkChatIds \}/);
   assert.match(telegramSocialJs, /message\?\.stream_id \?\? message\?\.streamId/);
   assert.match(telegramSocialJs, /credentials: 'same-origin'/);
   assert.match(telegramSocialJs, /new CustomEvent\('telegram-social-update', \{ detail: snapshot \}\)/);
@@ -1340,7 +1340,7 @@ test('the pinned LazyCat chat stays out of the lower selector and feed but remai
   );
   assert.match(saveSource, /const pinnedId = telegramSocialPinnedId\(\)/);
   assert.match(saveSource, /const chatIds = \[pinnedId, \.\.\.selectedChatIds\.filter\(\(id\) => id !== pinnedId\)\]/);
-  assert.match(saveSource, /body: \{ chat_ids: chatIds \}/);
+  assert.match(saveSource, /body: \{ chat_ids: chatIds, ca_bark_chat_ids: caBarkChatIds \}/);
 });
 
 test('Telegram channel selection keeps unsaved edits across polling and rejects pre-save responses', () => {
