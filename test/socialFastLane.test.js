@@ -102,6 +102,53 @@ test('service fast lane ingests configured X posts immediately and closes every 
   assert.equal(replyEnricherClosed, true);
 });
 
+test('notifies once when a watched Twitter account first posts a contract address', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-social-ca-bark-'));
+  const notifications = [];
+  const service = createSocialService({
+    config: {
+      dataFile: path.join(directory, 'social.sqlite'),
+      bridgeToken: '',
+      retentionDays: 7,
+      bridgeOfflineMs: 90_000,
+      cleanupIntervalMs: 60_000,
+      commandLeaseMs: 30_000,
+      xFastHandles: [],
+      xReplyEnrichmentEnabled: false
+    },
+    notifySocialContract(payload) {
+      notifications.push(payload);
+    }
+  });
+  t.after(() => {
+    service.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  service.addWatchAccounts([{ platform: 'twitter', handle: 'alice', eventTypes: ['post'] }]);
+  const post = {
+    source: 'twitter',
+    externalId: '2081682293836656998',
+    kind: 'post',
+    author: { handle: 'alice', name: 'Alice' },
+    content: 'CA 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    url: 'https://x.com/alice/status/2081682293836656998',
+    publishedAt: Date.parse('2026-08-07T10:00:00.000Z')
+  };
+
+  service.ingestPosts([post]);
+  service.ingestPosts([post]);
+  service.ingestPosts([{ ...post, externalId: '2081682293836656999', author: { handle: 'bob' } }]);
+
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].platform, 'Twitter');
+  assert.equal(notifications[0].authorHandle, 'alice');
+  assert.deepEqual(
+    notifications[0].contractAddresses.map((item) => item.address),
+    ['0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa']
+  );
+  assert.equal(notifications[0].messageUrl, post.url);
+});
+
 test('service retries an X post after persistence fails and confirms it only after a successful write', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-social-fast-retry-'));
   const externalId = '2081682293836656999';

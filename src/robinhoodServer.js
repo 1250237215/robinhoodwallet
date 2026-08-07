@@ -827,7 +827,12 @@ export async function startRobinhoodStandaloneServer(
     barkLibraryFile: config.barkDataFile
   });
   const socialConfig = createSocialConfig(env, { fallbackDirectory: path.dirname(config.dataFile) });
-  const socialService = createSocialService({ config: socialConfig, fetchImpl });
+  let monitor = null;
+  const socialService = createSocialService({
+    config: socialConfig,
+    fetchImpl,
+    notifySocialContract: (payload) => monitor?.notifySocialContract?.(payload)
+  });
   const debotBridgeTimeoutMs = Math.min(
     110_000,
     Math.max(5_000, Number(env.ROBINHOOD_DEBOT_BRIDGE_TIMEOUT_MS) || 90_000)
@@ -904,7 +909,7 @@ export async function startRobinhoodStandaloneServer(
     store,
     timeoutMs: Math.min(15_000, config.requestTimeoutMs)
   });
-  const monitor = createRobinhoodWalletMonitor({
+  monitor = createRobinhoodWalletMonitor({
     store,
     rpcClient,
     pollIntervalMs: config.monitorPollIntervalMs,

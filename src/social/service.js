@@ -224,7 +224,8 @@ export function createSocialService({
   fetchImpl = globalThis.fetch,
   xProfileMonitor = null,
   xReplyEnricher = null,
-  socialTranslator = null
+  socialTranslator = null,
+  notifySocialContract = null
 }) {
   if (!config) throw new TypeError('Social config is required');
   const activeStore = store || createSocialStore(config.dataFile, { now });
@@ -401,6 +402,36 @@ export function createSocialService({
       })
     : null);
   const allowedXFastHandles = new Set(xFastHandles.map((handle) => String(handle).toLowerCase()));
+
+  function postIsWatched(post) {
+    const source = String(post?.source || '').toLowerCase();
+    const handle = String(post?.author?.handle || '').replace(/^@/, '').toLowerCase();
+    if (!source || !handle) return false;
+    const kind = String(post?.kind || 'post').toLowerCase();
+    const watchlists = activeStore.listWatchlist({ platform: source });
+    return watchlists.some((entry) => {
+      if (entry.desiredState !== 'active') return false;
+      const watchedHandle = String(entry.handle || entry.accountKey || '').replace(/^@/, '').toLowerCase();
+      if (watchedHandle !== handle) return false;
+      return Array.isArray(entry.eventTypes) && entry.eventTypes.includes(kind);
+    });
+  }
+
+  function notifyNewSocialContracts(posts) {
+    if (typeof notifySocialContract !== 'function') return;
+    for (const post of posts) {
+      if (!postIsWatched(post) || !Array.isArray(post.contractAddresses) || !post.contractAddresses.length) continue;
+      void Promise.resolve(notifySocialContract({
+        platform: post.source === 'twitter' ? 'Twitter' : post.source,
+        sourceName: post.source === 'twitter' ? 'Twitter' : post.source,
+        authorName: post.author?.name || post.author?.handle,
+        authorHandle: post.author?.handle,
+        text: post.content,
+        contractAddresses: post.contractAddresses,
+        messageUrl: post.url
+      })).catch(() => {});
+    }
+  }
 
   function updateTranslatedField(post, field, sourceText, translatedContent) {
     if (closed || !translatedContent) return;
@@ -699,6 +730,10 @@ export function createSocialService({
         : posts;
       const results = activeStore.upsertPosts(incoming);
       const changes = publishAfter(latestBefore);
+      notifyNewSocialContracts(results
+        .filter((result) => result.action === 'created')
+        .map((result) => result.post)
+        .filter(Boolean));
       if (!skipReplyEnrichment) {
         activeXReplyEnricher?.enqueue(
           results.map((result) => result.post).filter(referenceContextNeedsEnrichment)

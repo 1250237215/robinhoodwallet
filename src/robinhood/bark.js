@@ -294,6 +294,51 @@ export class RobinhoodBarkNotifier {
     };
   }
 
+  // Social sources (Twitter/X and Telegram) share the same Bark target
+  // library, but use a distinct notification group so they can be filtered
+  // independently in Bark clients.
+  async notifySocialContract({
+    platform = '社媒',
+    authorName = '',
+    authorHandle = '',
+    sourceName = '',
+    text = '',
+    contractAddresses = [],
+    messageUrl = '',
+    sound = 'alarm',
+    volume = 5
+  } = {}) {
+    const targets = this.store.listMonitorBarkTargets().filter((target) => target.enabled);
+    if (!targets.length) return { attempted: 0, sent: 0, failed: 0 };
+    const addresses = [...new Set(
+      (Array.isArray(contractAddresses) ? contractAddresses : [])
+        .map((item) => typeof item === 'object' ? item.address : item)
+        .map((address) => String(address || '').trim())
+        .filter(Boolean)
+    )].slice(0, 8);
+    if (!addresses.length) return { attempted: 0, sent: 0, failed: 0 };
+    const source = cleanLabel(sourceName || platform, platform);
+    const author = cleanLabel(authorName || (authorHandle ? `@${authorHandle}` : platform), platform);
+    const normalizedText = String(text || '').replace(/\s+/g, ' ').trim();
+    const textSummary = normalizedText.length > 220
+      ? `${normalizedText.slice(0, 219).trimEnd()}...`
+      : normalizedText;
+    const body = [source, addresses.join(' · '), textSummary].filter(Boolean).join('\n');
+    const results = await Promise.allSettled(targets.map((target) => this.#send(target, {
+      title: `${source} CA：${author}`,
+      body: body || '检测到新的合约地址',
+      sound,
+      volume,
+      url: String(messageUrl || ''),
+      group: '社媒 CA 监控'
+    })));
+    return {
+      attempted: targets.length,
+      sent: results.filter((result) => result.status === 'fulfilled').length,
+      failed: results.filter((result) => result.status === 'rejected').length
+    };
+  }
+
   async #send(target, payload) {
     try {
       const response = await this.fetch(notificationUrl(target.endpoint, {
