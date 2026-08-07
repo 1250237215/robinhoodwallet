@@ -490,7 +490,10 @@ function scrollTelegramToLatest({ behavior = 'smooth' } = {}) {
 
 function placeTelegramLatestButton() {
   const feed = telegramElements.feed;
-  feed.querySelectorAll('[data-telegram-latest]').forEach((button) => button.remove());
+  feed.querySelectorAll('[data-telegram-latest]').forEach((button) => {
+    button.closest('.telegram-message-text')?.classList.remove('has-latest-button');
+    button.remove();
+  });
   const bubble = feed.querySelector('.telegram-message-row:last-of-type .telegram-message-bubble');
   if (!bubble) return;
   const button = document.createElement('button');
@@ -505,7 +508,9 @@ function placeTelegramLatestButton() {
   icon.setAttribute('aria-hidden', 'true');
   button.appendChild(icon);
   button.addEventListener('click', () => scrollTelegramToLatest());
-  (bubble.querySelector('.telegram-message-text') || bubble).appendChild(button);
+  const text = bubble.querySelector('.telegram-message-text');
+  if (text) text.classList.add('has-latest-button');
+  (text || bubble).appendChild(button);
   window.lucide?.createIcons?.({ root: button });
 }
 

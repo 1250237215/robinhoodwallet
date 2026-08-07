@@ -3409,6 +3409,10 @@ select:hover {
   color: #397153;
 }
 
+.telegram-message-text.has-latest-button {
+  padding-right: 0;
+}
+
 .telegram-latest-button svg {
   width: 14px;
   height: 14px;
