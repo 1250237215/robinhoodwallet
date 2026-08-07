@@ -225,7 +225,7 @@ function telegramSocialRenderManager() {
       const status = document.createElement('span');
       status.className = 'social-sync-chip';
       status.dataset.state = telegramSocialState.selectedChatIds.has(chat.id) ? 'synced' : 'pending';
-      status.textContent = telegramSocialState.selectedChatIds.has(chat.id) ? '监控中' : '未选择';
+      status.textContent = telegramSocialState.selectedChatIds.has(chat.id) ? '监控中 · CA Bark' : '未选择';
       option.append(checkbox, avatar, copy, status);
       fragment.appendChild(option);
     }
