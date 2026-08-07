@@ -93,6 +93,18 @@ function telegramBarkPayload(body) {
   const contractAddresses = [...new Set(body.contractAddresses.map((value) => (
     cleanInternalText(value, 'contract address', 100)
   )))];
+  const debotUrls = body.debotUrls === undefined ? [] : body.debotUrls;
+  if (!Array.isArray(debotUrls) || debotUrls.length > 8) {
+    throw new HttpError(400, 'debotUrls must contain 0 to 8 entries', 'INVALID_TELEGRAM_BARK_PAYLOAD');
+  }
+  const normalizedDebotUrls = [...new Set(debotUrls.map((value) => (
+    cleanInternalText(value, 'DeBot URL', 500)
+  )))];
+  for (const debotUrl of normalizedDebotUrls) {
+    if (!/^https:\/\/debot\.ai\/token\/(?:robinhood\/308574_|solana\/)/i.test(debotUrl)) {
+      throw new HttpError(400, 'debotUrls must be DeBot token URLs', 'INVALID_TELEGRAM_BARK_PAYLOAD');
+    }
+  }
   const messageUrl = body.messageUrl === undefined || body.messageUrl === ''
     ? ''
     : cleanInternalText(body.messageUrl, 'messageUrl', 500);
@@ -108,6 +120,7 @@ function telegramBarkPayload(body) {
     chatName: cleanInternalText(body.chatName, 'chatName', 120),
     text: typeof body.text === 'string' ? body.text.slice(0, 2_000) : '',
     contractAddresses,
+    debotUrls: normalizedDebotUrls,
     messageUrl
   };
 }

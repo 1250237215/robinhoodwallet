@@ -842,6 +842,24 @@ def extract_contract_addresses(text, limit=CA_ALERT_ADDRESS_LIMIT):
     return [value for _, value in matches[: max(1, int(limit))]]
 
 
+def debot_token_urls(addresses):
+    """Build DeBot token pages for CA values detected in Telegram text."""
+    urls = []
+    seen = set()
+    for address in addresses or []:
+        value = str(address or "").strip()
+        if not value:
+            continue
+        if value.lower().startswith("0x"):
+            url = f"https://debot.ai/token/robinhood/308574_{value.lower()}"
+        else:
+            url = f"https://debot.ai/token/solana/{value}"
+        if url not in seen:
+            urls.append(url)
+            seen.add(url)
+    return urls[: max(1, int(CA_ALERT_ADDRESS_LIMIT))]
+
+
 class TelegramCaAlertStore:
     """Persist sender rules, recent identities, and one-shot deliveries."""
 
@@ -2839,6 +2857,7 @@ class TelegramCaAlertService:
             "chatName": self.chat_name,
             "text": text,
             "contractAddresses": addresses,
+            "debotUrls": debot_token_urls(addresses),
             "messageUrl": self._message_url(message_id),
         }
         task = asyncio.create_task(self._deliver(stream_id, payload))
@@ -2973,6 +2992,7 @@ class TelegramSocialCaAlertService(TelegramCaAlertService):
             "chatName": chat_name,
             "text": text,
             "contractAddresses": addresses,
+            "debotUrls": debot_token_urls(addresses),
             "messageUrl": f"https://t.me/{chat_username}/{int(message_id)}" if chat_username else "",
         }
         task = asyncio.create_task(self._deliver(stream_id, payload))

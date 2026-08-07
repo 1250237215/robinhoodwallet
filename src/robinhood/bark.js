@@ -258,6 +258,7 @@ export class RobinhoodBarkNotifier {
     chatName = 'Telegram',
     text = '',
     contractAddresses = [],
+    debotUrls = [],
     messageUrl = '',
     sound = 'alarm',
     volume = 5
@@ -273,10 +274,16 @@ export class RobinhoodBarkNotifier {
     const normalizedChat = cleanLabel(chatName, 'Telegram');
     const normalizedText = String(text || '').replace(/\s+/g, ' ').trim();
     const addressSummary = addresses.join(' · ');
+    const normalizedDebotUrls = [...new Set(
+      (Array.isArray(debotUrls) ? debotUrls : [])
+        .map((url) => String(url || '').trim())
+        .filter((url) => /^https:\/\/debot\.ai\/token\//i.test(url))
+    )].slice(0, 8);
     const textSummary = normalizedText.length > 220
       ? `${normalizedText.slice(0, 219).trimEnd()}...`
       : normalizedText;
-    const body = [normalizedChat, addressSummary, textSummary]
+    const sourceLink = messageUrl ? `来源：${String(messageUrl).trim()}` : '';
+    const body = [normalizedChat, addressSummary, ...normalizedDebotUrls, sourceLink, textSummary]
       .filter(Boolean)
       .join('\n');
     const results = await Promise.allSettled(targets.map((target) => this.#send(target, {
@@ -284,7 +291,7 @@ export class RobinhoodBarkNotifier {
       body: body || '检测到新的合约地址',
       sound,
       volume,
-      url: String(messageUrl || ''),
+      url: normalizedDebotUrls[0] || String(messageUrl || ''),
       group: 'Telegram CA 监控'
     })));
     return {
