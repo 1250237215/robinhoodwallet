@@ -2864,6 +2864,67 @@ class TelegramCaAlertService:
         self.store.close()
 
 
+class TelegramSocialCaAlertService(TelegramCaAlertService):
+    """CA alerts for channels selected in the social-monitor panel.
+
+    This deliberately has no sender rules and never handles the pinned
+    real-time chat.  Channel selection is owned by MultiChatController, so a
+    selection change takes effect without touching the separate group-chat
+    alert database or UI.
+    """
+
+    def __init__(self, *args, controller=None, dialogs=None, selected_ids=None, excluded_chat_id=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.controller = controller
+        self.dialogs_by_id = {int(dialog.id): dialog for dialog in (dialogs or [])}
+        self.selected_ids = selected_ids if selected_ids is not None else set()
+        self.excluded_chat_id = int(excluded_chat_id) if excluded_chat_id is not None else None
+
+    async def handle_new_message(self, message):
+        chat_id = getattr(message, "chat_id", None)
+        message_id = getattr(message, "id", None)
+        selected_ids = self.controller.selected_ids if self.controller is not None else self.selected_ids
+        if chat_id is None or int(chat_id) not in set(selected_ids):
+            return False
+        if self.excluded_chat_id is not None and int(chat_id) == self.excluded_chat_id:
+            return False
+        if message_id is None:
+            return False
+        text = str(getattr(message, "raw_text", None) or "")
+        addresses = extract_contract_addresses(text)
+        if not addresses:
+            return False
+        stream_id = f"social:{message_stream_id(chat_id, message_id)}"
+        if not self.store.claim_delivery(
+            stream_id,
+            int(chat_id),
+            int(message_id),
+            int(getattr(message, "sender_id", 0) or 0),
+            "社媒频道",
+            addresses,
+        ):
+            return False
+        dialog = self.dialogs_by_id.get(int(chat_id), self.dialog)
+        avatar = await self.avatar_resolver.info_for_message(message, dialog.entity)
+        chat_name = str(dialog.name or "Telegram")
+        chat_username = str(getattr(dialog.entity, "username", None) or "").lstrip("@")
+        payload = {
+            "chatId": int(chat_id),
+            "messageId": int(message_id),
+            "senderId": int(getattr(message, "sender_id", 0) or 0),
+            "streamId": stream_id,
+            "senderName": str(avatar.get("name") or "Telegram"),
+            "chatName": chat_name,
+            "text": text,
+            "contractAddresses": addresses,
+            "messageUrl": f"https://t.me/{chat_username}/{int(message_id)}" if chat_username else "",
+        }
+        task = asyncio.create_task(self._deliver(stream_id, payload))
+        self.delivery_tasks.add(task)
+        task.add_done_callback(self._delivery_finished)
+        return True
+
+
 class MultiChatController:
     """Own the selected dialogs and their read-only merged message stream."""
 
@@ -3287,19 +3348,21 @@ async def run_viewer(client, config, dialogs=None):
     else:
         logging.warning("未找到固定 Telegram 群，CA Bark 提醒不可用")
 
+    social_alert_service = TelegramSocialCaAlertService(
+        dialogs[0],
+        controller.avatar_resolver,
+        controller=controller,
+        dialogs=dialogs,
+        excluded_chat_id=alert_service.chat_id if alert_service is not None else None,
+    )
+
     @client.on(events.NewMessage())
     async def handle_new_message(event):
         controller_task = controller.add_message(event.message)
-        if alert_service is None:
-            try:
-                await controller_task
-            except Exception as error:
-                state.error = str(error)
-                logging.exception("处理新消息失败")
-            return
-        controller_result, alert_result = await asyncio.gather(
+        controller_result, alert_result, social_result = await asyncio.gather(
             controller_task,
-            alert_service.handle_new_message(event.message),
+            alert_service.handle_new_message(event.message) if alert_service is not None else asyncio.sleep(0),
+            social_alert_service.handle_new_message(event.message),
             return_exceptions=True,
         )
         if isinstance(controller_result, Exception):
@@ -3320,6 +3383,11 @@ async def run_viewer(client, config, dialogs=None):
                     alert_result,
                     alert_result.__traceback__,
                 ),
+            )
+        if isinstance(social_result, Exception):
+            logging.error(
+                "处理社媒频道 CA 提醒失败",
+                exc_info=(type(social_result), social_result, social_result.__traceback__),
             )
 
     await controller.initialize(available_ids)
@@ -3362,6 +3430,7 @@ async def run_viewer(client, config, dialogs=None):
         controller.close()
         if alert_service is not None:
             await alert_service.close()
+        await social_alert_service.close()
         if translation_cache is not None:
             translation_cache.close()
         http_server.shutdown()
