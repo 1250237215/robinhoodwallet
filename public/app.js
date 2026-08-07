@@ -90,7 +90,8 @@ const MANUAL_WINNER_POLL_INTERVAL_MS = 1_500;
 const MONITOR_POLL_INTERVAL_MS = 2_000;
 const MONITOR_RECENT_REFRESH_MS = 10_000;
 const MONITOR_FEED_CHAINS_STORAGE_KEY = '1874catch-monitor-feed-chains';
-const MONITOR_FEED_EVENT_LIMIT = 200;
+const MONITOR_FEED_EVENT_LIMIT = 100;
+const SOCIAL_FEED_RENDER_LIMIT = 80;
 const SOCIAL_API_ROOT = `${APP_BASE}/api/social`;
 const SOCIAL_DEVICE_TOKEN_STORAGE_KEY = 'robinhood-social-device-token';
 const SOCIAL_WRITE_CONTEXT_ALLOWED = window.location.protocol === 'https:'
@@ -143,6 +144,20 @@ const SOCIAL_EVENT_TYPE_LABELS = Object.freeze({
   profile_avatar: '换头像',
   profile_bio: '改简介'
 });
+const socialMediaObserver = 'IntersectionObserver' in window
+  ? new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const video = entry.target;
+        if (!video.src && video.dataset.src) {
+          video.src = video.dataset.src;
+          video.removeAttribute('data-src');
+          video.load();
+        }
+        socialMediaObserver.unobserve(video);
+      }
+    }, { rootMargin: '320px 0px' })
+  : null;
 let MONITOR_THRESHOLD_STORAGE_KEY = 'robinhood-monitor-threshold';
 const MONITOR_SOUNDS = new Set(['alarm', 'bell', 'electronic', 'glass']);
 const MONITOR_EVENT_TYPES = Object.freeze(['buy', 'sell', 'transfer', 'token_create']);
@@ -2432,7 +2447,7 @@ function socialMediaMarkup(media, {
         : '';
       return `
         <figure class="social-media-item" data-social-media-item data-media-kind="video">
-          <video src="${escapeHtml(mediaUrl)}"${previewUrl ? ` poster="${escapeHtml(previewUrl)}"` : ''} controls preload="metadata" playsinline referrerpolicy="no-referrer" aria-label="推文视频 ${index + 1}"></video>
+          <video data-lazy-social-video data-src="${escapeHtml(mediaUrl)}"${previewUrl ? ` poster="${escapeHtml(previewUrl)}"` : ''} controls preload="none" playsinline referrerpolicy="no-referrer" aria-label="推文视频 ${index + 1}"></video>
           ${posterFallback}
           ${fallback}
         </figure>
@@ -2642,7 +2657,7 @@ function telegramSocialMediaMarkup(media, { context = false } = {}) {
   const isSticker = /贴纸|表情包|sticker/i.test(kind) || media.sticker === true;
   const fallback = `<a class="social-media-error" href="${escapeHtml(mediaUrl)}" target="_blank" rel="noopener noreferrer"><i data-lucide="image-off" aria-hidden="true"></i><span>媒体加载失败，单独打开</span></a>`;
   const element = isVideo
-    ? `<video src="${escapeHtml(mediaUrl)}"${isSticker ? ' autoplay loop muted' : ' controls'} preload="metadata" playsinline aria-label="${escapeHtml(kind)}"></video>${fallback}`
+    ? `<video data-lazy-social-video data-src="${escapeHtml(mediaUrl)}"${isSticker ? ' autoplay loop muted' : ' controls'} preload="none" playsinline aria-label="${escapeHtml(kind)}"></video>${fallback}`
     : `<a class="social-media-preview" href="${escapeHtml(mediaUrl)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(kind)}"><img src="${escapeHtml(mediaUrl)}" alt="${escapeHtml(kind)}" loading="lazy" decoding="async" /></a>`;
   return `<div class="social-post-media${context ? ' is-context' : ''}" data-media-count="1"><figure class="social-media-item${isSticker ? ' is-telegram-sticker' : ''}" data-social-media-item data-media-kind="${isVideo ? 'video' : 'image'}">${element}${isVideo ? '' : fallback}</figure></div>`;
 }
@@ -2744,7 +2759,67 @@ function socialFeedItems() {
   }));
   return [...socialItems, ...telegramItems]
     .sort((left, right) => right.timestamp - left.timestamp)
-    .slice(0, 500);
+    .slice(0, SOCIAL_FEED_RENDER_LIMIT);
+}
+
+function stableFeedFingerprint(markup) {
+  const stableMarkup = String(markup || '').replace(
+    /(<time\b[^>]*data-live-timestamp[^>]*>)[\s\S]*?(<\/time>)/giu,
+    '$1$2'
+  );
+  let hash = 2166136261;
+  for (let index = 0; index < stableMarkup.length; index += 1) {
+    hash ^= stableMarkup.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function keyedFeedMarkup(markup, key) {
+  const fingerprint = stableFeedFingerprint(markup);
+  return String(markup).replace(
+    '<article ',
+    `<article data-feed-key="${escapeHtml(key)}" data-feed-fingerprint="${fingerprint}" `
+  );
+}
+
+function reconcileKeyedFeed(container, markup) {
+  const template = document.createElement('template');
+  template.innerHTML = markup;
+  const incoming = [...template.content.children];
+  const existing = new Map(
+    [...container.children]
+      .filter((node) => node.dataset.feedKey)
+      .map((node) => [node.dataset.feedKey, node])
+  );
+  let cursor = container.firstElementChild;
+  for (const candidate of incoming) {
+    const current = existing.get(candidate.dataset.feedKey);
+    const unchanged = current?.dataset.feedFingerprint === candidate.dataset.feedFingerprint;
+    const node = unchanged ? current : candidate;
+    if (current && !unchanged) {
+      if (current === cursor) cursor = current.nextElementSibling;
+      current.remove();
+    }
+    if (node !== cursor) container.insertBefore(node, cursor);
+    cursor = node.nextElementSibling;
+    existing.delete(candidate.dataset.feedKey);
+  }
+  for (const obsolete of existing.values()) obsolete.remove();
+  for (const unkeyed of [...container.children]) {
+    if (!unkeyed.dataset.feedKey) unkeyed.remove();
+  }
+}
+
+function activateLazySocialMedia(root = elements.socialFeed) {
+  for (const video of root.querySelectorAll('video[data-lazy-social-video][data-src]')) {
+    if (socialMediaObserver) {
+      socialMediaObserver.observe(video);
+    } else {
+      video.src = video.dataset.src;
+      video.removeAttribute('data-src');
+    }
+  }
 }
 
 function renderSocialBridgeStatus() {
@@ -2875,8 +2950,11 @@ function renderSocialFeed() {
     refreshIcons(elements.socialFeed);
     return;
   }
-  elements.socialFeed.innerHTML = items.map((item) => {
-    if (item.type === 'telegram') return telegramSocialPostMarkup(item.message);
+  const markup = items.map((item) => {
+    if (item.type === 'telegram') {
+      const key = `telegram:${telegramSocialMessageKey(item.message)}`;
+      return keyedFeedMarkup(telegramSocialPostMarkup(item.message), key);
+    }
     const post = item.post;
     const author = post.author || {};
     const translatedContent = socialTranslationForDisplay(post.content, post.translatedContent);
@@ -2904,7 +2982,7 @@ function renderSocialFeed() {
       return url ? `<a class="social-contract-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer"><i data-lucide="scan-line" aria-hidden="true"></i>${escapeHtml(label)}</a>` : '';
     }).join('');
     const mediaMarkup = socialMediaMarkup(media, { postUrl, altPrefix: '推文图片' });
-    return `
+    const markup = `
       <article class="social-post${post.deleted ? ' is-deleted' : ''}" data-source="${escapeHtml(post.source || 'debot')}" data-kind="${escapeHtml(kind)}">
         <div class="social-avatar">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" loading="lazy" />` : escapeHtml(socialInitials(post))}</div>
         <div class="social-post-copy">
@@ -2937,8 +3015,11 @@ function renderSocialFeed() {
         </div>
       </article>
     `;
+    return keyedFeedMarkup(markup, `social:${socialPostKey(post)}`);
   }).join('');
+  reconcileKeyedFeed(elements.socialFeed, markup);
   refreshIcons(elements.socialFeed);
+  activateLazySocialMedia(elements.socialFeed);
 }
 
 function renderSocialMonitor() {
@@ -3013,7 +3094,7 @@ function renderMonitorEvents() {
     refreshIcons(elements.monitorEventFeed);
     return;
   }
-  elements.monitorEventFeed.innerHTML = events.map((event) => {
+  const markup = events.map((event) => {
     const eventKey = monitorEventKey(event);
     const isFresh = state.monitorFreshEventKeys.delete(eventKey);
     const eventChain = monitorChain(event.chain);
@@ -3057,7 +3138,7 @@ function renderMonitorEvents() {
       : event.recipient
         ? `<strong class="monitor-event-recipient-target" title="${escapeHtml(event.recipient)}">${escapeHtml(recipientLabel)}</strong>`
         : `<strong class="monitor-event-recipient-target monitor-event-token">${escapeHtml(symbol)}</strong>`;
-    return `
+    const markup = `
       <article class="monitor-event-item${isFresh ? ' is-new' : ''}${isProfitTopTen ? ' is-profit-top-10' : ''}${hasManualAlias ? ' is-manual-alias' : ''}" data-event-id="${escapeHtml(event.id)}" data-event-type="${eventType}" data-chain="${eventChain.id}"${isProfitTopTen ? ` data-profit-rank="${profitRank}"` : ''}${hasManualAlias ? ' data-manual-alias="true"' : ''}>
         <time datetime="${escapeHtml(String(eventTime ?? ''))}" data-live-timestamp="${escapeHtml(String(eventTime ?? ''))}" title="${escapeHtml(formatDateTime(eventTime))}" aria-live="off">${escapeHtml(formatMonitorAge(eventTime))}</time>
         <div class="monitor-event-main">
@@ -3106,7 +3187,9 @@ function renderMonitorEvents() {
         </div>
       </article>
     `;
+    return keyedFeedMarkup(markup, `monitor:${eventKey}`);
   }).join('');
+  reconcileKeyedFeed(elements.monitorEventFeed, markup);
   refreshIcons(elements.monitorEventFeed);
   if (activeEditor && !state.monitorNoteEditor?.saving) {
     requestAnimationFrame(() => {

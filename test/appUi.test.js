@@ -1314,7 +1314,7 @@ test('Telegram is a read-only source merged chronologically with X in the existi
   assert.match(mergedFeedSource, /\.sort\(\(left, right\) => right\.timestamp - left\.timestamp\)/);
 
   const renderFeedSource = appSourceBetween('function renderSocialFeed()', 'function renderSocialMonitor()');
-  assert.match(renderFeedSource, /if \(item\.type === 'telegram'\) return telegramSocialPostMarkup\(item\.message\)/);
+  assert.match(renderFeedSource, /keyedFeedMarkup\(telegramSocialPostMarkup\(item\.message\), key\)/);
   assert.match(appJs, /window\.addEventListener\('telegram-social-update', \(\) => \{[\s\S]*renderSocialFeed\(\)/);
 });
 
@@ -2034,9 +2034,10 @@ test('social media markup gives playable videos a poster and degrades preview-on
 
   assert.equal((markup.match(/<video\b/g) || []).length, 1);
   assert.match(markup, /data-media-count="2"/);
-  assert.match(markup, /<video src="https:\/\/video\.twimg\.com\/[^\"]+video\.mp4\?tag=12&amp;v=1"/);
+  assert.match(markup, /<video data-lazy-social-video data-src="https:\/\/video\.twimg\.com\/[^\"]+video\.mp4\?tag=12&amp;v=1"/);
+  assert.match(markup, /preload="none"/);
   assert.match(markup, /poster="https:\/\/pbs\.twimg\.com\/[^\"]+poster\.jpg\?name=large"/);
-  assert.match(markup, /controls preload="metadata" playsinline referrerpolicy="no-referrer"/);
+  assert.match(markup, /controls preload="none" playsinline referrerpolicy="no-referrer"/);
   assert.match(markup, /class="social-media-video-poster"[\s\S]*alt="推文视频封面 1"/);
   assert.match(markup, /data-media-kind="video-preview"[\s\S]*<img src="https:\/\/pbs\.twimg\.com\/[^\"]+preview\.jpg\?name=large"/);
   assert.doesNotMatch(markup, /<video[^>]+src="https:\/\/pbs\.twimg\.com/);
@@ -2137,6 +2138,25 @@ test('chain and social elapsed times advance every second without rerendering ei
   assert.match(stylesCss, /\.social-post-time \{[\s\S]*font-variant-numeric: tabular-nums/);
   assert.match(stylesCss, /\.social-post-time \{[\s\S]*white-space: normal/);
   assert.match(stylesCss, /\.monitor-event-item time \{[\s\S]*white-space: normal/);
+});
+
+test('realtime feeds cap live DOM and reconcile stable cards instead of replacing whole lists', () => {
+  assert.match(appJs, /const MONITOR_FEED_EVENT_LIMIT = 100;/);
+  assert.match(appJs, /const SOCIAL_FEED_RENDER_LIMIT = 80;/);
+  assert.match(telegramMonitorJs, /const TELEGRAM_MESSAGE_LIMIT = 100;/);
+
+  const helperSource = appSourceBetween('function stableFeedFingerprint(markup)', 'function renderSocialBridgeStatus()');
+  assert.match(helperSource, /function reconcileKeyedFeed\(container, markup\)/);
+  assert.match(helperSource, /current\?\.dataset\.feedFingerprint === candidate\.dataset\.feedFingerprint/);
+  assert.match(helperSource, /for \(const obsolete of existing\.values\(\)\) obsolete\.remove\(\)/);
+
+  const socialRenderSource = appSourceBetween('function renderSocialFeed()', 'function renderSocialMonitor()');
+  assert.match(socialRenderSource, /reconcileKeyedFeed\(elements\.socialFeed, markup\)/);
+  assert.doesNotMatch(socialRenderSource, /elements\.socialFeed\.innerHTML = items\.map/);
+
+  const monitorRenderSource = appSourceBetween('function renderMonitorEvents()', 'function monitorEventByKey(eventKey)');
+  assert.match(monitorRenderSource, /reconcileKeyedFeed\(elements\.monitorEventFeed, markup\)/);
+  assert.doesNotMatch(monitorRenderSource, /elements\.monitorEventFeed\.innerHTML = events\.map/);
 });
 
 test('social snapshot and SSE lifecycle stay pinned to the Robinhood host service', () => {
