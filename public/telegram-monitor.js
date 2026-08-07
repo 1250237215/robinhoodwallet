@@ -15,6 +15,7 @@ const telegramElements = {
   badgeLabel: document.querySelector('#telegram-connection-label'),
   summary: document.querySelector('#telegram-monitor-summary'),
   caWatchButton: document.querySelector('#telegram-ca-watch-button'),
+  latestButton: document.querySelector('#telegram-latest-button'),
   refreshButton: document.querySelector('#telegram-refresh-button'),
   sourceAvatar: document.querySelector('#telegram-source-avatar'),
   sourceName: document.querySelector('#telegram-source-name'),
@@ -488,30 +489,11 @@ function scrollTelegramToLatest({ behavior = 'smooth' } = {}) {
   feed.scrollTo({ top: feed.scrollHeight, behavior });
 }
 
-function placeTelegramLatestButton() {
+function updateTelegramLatestButton() {
   const feed = telegramElements.feed;
-  feed.querySelectorAll('[data-telegram-latest]').forEach((button) => {
-    button.closest('.telegram-message-text')?.classList.remove('has-latest-button');
-    button.remove();
-  });
-  const bubble = feed.querySelector('.telegram-message-row:last-of-type .telegram-message-bubble');
-  if (!bubble) return;
-  const button = document.createElement('button');
-  button.className = 'inline-icon-button telegram-latest-button';
-  button.type = 'button';
-  button.dataset.telegramLatest = '';
-  button.title = '跳到最新消息';
-  button.setAttribute('aria-label', '跳到最新消息');
-  button.setAttribute('aria-controls', 'telegram-message-feed');
-  const icon = document.createElement('i');
-  icon.dataset.lucide = 'arrow-down-to-line';
-  icon.setAttribute('aria-hidden', 'true');
-  button.appendChild(icon);
-  button.addEventListener('click', () => scrollTelegramToLatest());
-  const text = bubble.querySelector('.telegram-message-text');
-  if (text) text.classList.add('has-latest-button');
-  (text || bubble).appendChild(button);
-  window.lucide?.createIcons?.({ root: button });
+  const hasMessages = Boolean(feed.querySelector('.telegram-message-row'));
+  const distanceFromLatest = feed.scrollHeight - feed.scrollTop - feed.clientHeight;
+  telegramElements.latestButton.hidden = !hasMessages || distanceFromLatest <= 24;
 }
 
 function createTelegramReply(message, availableIds) {
@@ -786,8 +768,8 @@ function renderTelegramPayload(payload) {
   telegramState.renderedMessages = messages;
   telegramState.version = nextVersion;
   telegramState.firstRender = false;
-  if (messages.length) placeTelegramLatestButton();
   if (wasFirst && messages.length) telegramElements.feed.scrollTop = telegramElements.feed.scrollHeight;
+  updateTelegramLatestButton();
 }
 
 async function fetchTelegramJson(path, { signal, method = 'GET', body = null } = {}) {
@@ -935,6 +917,9 @@ if (Object.values(telegramElements).every(Boolean)) {
     renderTelegramCaWatch();
   });
   telegramElements.caWatchSave.addEventListener('click', () => void saveTelegramCaWatch());
+  telegramElements.latestButton.addEventListener('click', () => scrollTelegramToLatest());
+  telegramElements.feed.addEventListener('scroll', updateTelegramLatestButton, { passive: true });
+  window.addEventListener('resize', updateTelegramLatestButton);
   telegramElements.refreshButton.addEventListener('click', () => void loadTelegramMessages({ manual: true }));
   new MutationObserver(synchronizeTelegramLifecycle).observe(telegramElements.monitorPage, {
     attributes: true,

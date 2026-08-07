@@ -1232,12 +1232,13 @@ test('the pinned Telegram viewer targets LazyCat FNF by chat id and stays read o
   assert.match(sourceLookup, /body: \{ chat_ids: \[sourceId, \.\.\.selectedIds\] \}/);
   assert.match(telegramMonitorJs, /`\/messages\?limit=\$\{TELEGRAM_MESSAGE_LIMIT\}&chat_id=\$\{encodeURIComponent\(sourceId\)\}`/);
   assert.match(telegramMonitorJs, /feed\.scrollTop[\s\S]*row\.getBoundingClientRect\(\)\.top[\s\S]*feed\.getBoundingClientRect\(\)\.top/);
-  assert.doesNotMatch(indexHtml, /id="telegram-latest-button"/);
+  assert.match(indexHtml, /class="telegram-feed-shell"[\s\S]*id="telegram-message-feed"[\s\S]*id="telegram-latest-button"[^>]*title="跳到最新消息"[^>]*aria-controls="telegram-message-feed"[^>]*hidden/);
   assert.match(telegramMonitorJs, /function scrollTelegramToLatest\(\{ behavior = 'smooth' \} = \{\}\) \{[\s\S]*feed\.scrollTo\(\{ top: feed\.scrollHeight, behavior \}\)/);
-  assert.match(telegramMonitorJs, /function placeTelegramLatestButton\(\) \{[\s\S]*\.telegram-message-row:last-of-type \.telegram-message-bubble[\s\S]*button\.dataset\.telegramLatest = ''[\s\S]*button\.addEventListener\('click', \(\) => scrollTelegramToLatest\(\)\)[\s\S]*text\.classList\.add\('has-latest-button'\)[\s\S]*\(text \|\| bubble\)\.appendChild\(button\)/);
-  assert.match(telegramMonitorJs, /if \(messages\.length\) placeTelegramLatestButton\(\)/);
-  assert.match(stylesCss, /\.telegram-latest-button \{[\s\S]*width: 30px;[\s\S]*height: 30px;[\s\S]*margin: 0 0 0 7px;/);
-  assert.match(stylesCss, /\.telegram-message-text\.has-latest-button \{[\s\S]*padding-right: 0;/);
+  assert.match(telegramMonitorJs, /function updateTelegramLatestButton\(\) \{[\s\S]*distanceFromLatest = feed\.scrollHeight - feed\.scrollTop - feed\.clientHeight[\s\S]*latestButton\.hidden = !hasMessages \|\| distanceFromLatest <= 24/);
+  assert.match(telegramMonitorJs, /latestButton\.addEventListener\('click', \(\) => scrollTelegramToLatest\(\)\)/);
+  assert.match(telegramMonitorJs, /feed\.addEventListener\('scroll', updateTelegramLatestButton, \{ passive: true \}\)/);
+  assert.match(stylesCss, /\.telegram-feed-shell \{[\s\S]*position: relative;/);
+  assert.match(stylesCss, /\.telegram-latest-button \{[\s\S]*position: absolute;[\s\S]*right: 18px;[\s\S]*bottom: 18px;[\s\S]*width: 30px;[\s\S]*height: 30px;/);
   assert.match(telegramMonitorJs, /credentials: 'same-origin'/);
   assert.doesNotMatch(telegramMonitorJs, /send_message|send_file|forward_messages|edit_message|delete_messages/);
   assert.match(stylesCss, /\.telegram-reply \.telegram-media\.is-compact img,[\s\S]*max-width: 46px;[\s\S]*max-height: 34px;/);

@@ -462,13 +462,18 @@
             </footer>
           </section>
 
-          <ol class="telegram-message-feed" id="telegram-message-feed" aria-live="polite">
-            <li class="telegram-empty-state" id="telegram-empty-state">
-              <i data-lucide="send" aria-hidden="true"></i>
-              <strong>等待 Telegram 消息</strong>
-              <span>连接成功后，消息会显示在这里。</span>
-            </li>
-          </ol>
+          <div class="telegram-feed-shell">
+            <ol class="telegram-message-feed" id="telegram-message-feed" aria-live="polite">
+              <li class="telegram-empty-state" id="telegram-empty-state">
+                <i data-lucide="send" aria-hidden="true"></i>
+                <strong>等待 Telegram 消息</strong>
+                <span>连接成功后，消息会显示在这里。</span>
+              </li>
+            </ol>
+            <button class="inline-icon-button telegram-latest-button" id="telegram-latest-button" type="button" title="跳到最新消息" aria-label="跳到最新消息" aria-controls="telegram-message-feed" hidden>
+              <i data-lucide="arrow-down-to-line" aria-hidden="true"></i>
+            </button>
+          </div>
         </section>
 
         <div class="monitor-workspace">

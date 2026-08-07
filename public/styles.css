@@ -3279,6 +3279,11 @@ select:hover {
   border: 1px solid rgba(255, 255, 255, 0.48);
 }
 
+.telegram-feed-shell {
+  position: relative;
+  min-width: 0;
+}
+
 .telegram-message-feed {
   min-width: 0;
   height: min(460px, 46vh);
@@ -3400,27 +3405,23 @@ select:hover {
 }
 
 .telegram-latest-button {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  z-index: 4;
+  display: inline-grid;
   width: 30px;
   height: 30px;
-  margin: 0 0 0 7px;
-  vertical-align: middle;
+  margin: 0;
   border-color: rgba(83, 112, 96, 0.22);
   background: rgba(236, 246, 239, 0.9);
   color: #397153;
-}
-
-.telegram-message-text.has-latest-button {
-  padding-right: 0;
+  box-shadow: 0 2px 8px rgba(35, 63, 46, 0.2);
 }
 
 .telegram-latest-button svg {
   width: 14px;
   height: 14px;
-}
-
-.telegram-message-bubble > .telegram-latest-button {
-  display: inline-grid;
-  margin-top: 4px;
 }
 
 .telegram-message-translation {
@@ -6525,6 +6526,11 @@ button.telegram-reply {
     height: 58svh;
     min-height: 420px;
     padding: 12px 8px 16px;
+  }
+
+  .telegram-latest-button {
+    right: 10px;
+    bottom: 16px;
   }
 
   .telegram-message-row.is-incoming {
