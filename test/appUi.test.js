@@ -1160,7 +1160,6 @@ test('real-time monitoring is the default first-level page and replaces the rese
     'telegram-monitor-panel',
     'telegram-message-feed',
     'telegram-ca-watch-button',
-    'telegram-latest-button',
     'telegram-ca-watch',
     'telegram-ca-watch-enabled',
     'telegram-ca-watch-search',
@@ -1233,9 +1232,11 @@ test('the pinned Telegram viewer targets LazyCat FNF by chat id and stays read o
   assert.match(sourceLookup, /body: \{ chat_ids: \[sourceId, \.\.\.selectedIds\] \}/);
   assert.match(telegramMonitorJs, /`\/messages\?limit=\$\{TELEGRAM_MESSAGE_LIMIT\}&chat_id=\$\{encodeURIComponent\(sourceId\)\}`/);
   assert.match(telegramMonitorJs, /feed\.scrollTop[\s\S]*row\.getBoundingClientRect\(\)\.top[\s\S]*feed\.getBoundingClientRect\(\)\.top/);
-  assert.match(indexHtml, /id="telegram-latest-button"[^>]*title="跳到最新消息"[^>]*aria-controls="telegram-message-feed"[\s\S]*data-lucide="arrow-down-to-line"/);
+  assert.doesNotMatch(indexHtml, /id="telegram-latest-button"/);
   assert.match(telegramMonitorJs, /function scrollTelegramToLatest\(\{ behavior = 'smooth' \} = \{\}\) \{[\s\S]*feed\.scrollTo\(\{ top: feed\.scrollHeight, behavior \}\)/);
-  assert.match(telegramMonitorJs, /latestButton\.addEventListener\('click', \(\) => scrollTelegramToLatest\(\)\)/);
+  assert.match(telegramMonitorJs, /function placeTelegramLatestButton\(\) \{[\s\S]*\.telegram-message-row:last-of-type \.telegram-message-bubble[\s\S]*button\.dataset\.telegramLatest = ''[\s\S]*button\.addEventListener\('click', \(\) => scrollTelegramToLatest\(\)\)[\s\S]*bubble\.querySelector\('\.telegram-message-text'\) \|\| bubble/);
+  assert.match(telegramMonitorJs, /if \(messages\.length\) placeTelegramLatestButton\(\)/);
+  assert.match(stylesCss, /\.telegram-latest-button \{[\s\S]*width: 30px;[\s\S]*height: 30px;[\s\S]*margin: 0 0 0 7px;/);
   assert.match(telegramMonitorJs, /credentials: 'same-origin'/);
   assert.doesNotMatch(telegramMonitorJs, /send_message|send_file|forward_messages|edit_message|delete_messages/);
   assert.match(stylesCss, /\.telegram-reply \.telegram-media\.is-compact img,[\s\S]*max-width: 46px;[\s\S]*max-height: 34px;/);
