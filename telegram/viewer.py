@@ -851,9 +851,9 @@ def debot_token_urls(addresses):
         if not value:
             continue
         if value.lower().startswith("0x"):
-            url = f"https://debot.ai/token/robinhood/308574_{value.lower()}"
+            url = f"https://debot.ai/token/robinhood/289942_{value.lower()}"
         else:
-            url = f"https://debot.ai/token/solana/{value}"
+            url = f"https://debot.ai/token/solana/289942_{value}"
         if url not in seen:
             urls.append(url)
             seen.add(url)

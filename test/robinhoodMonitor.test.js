@@ -268,7 +268,7 @@ test('monitors only confirmed non-excluded wallets, verifies swaps, and persists
   assert.equal(snapshot.events[0].tokenAmount, '0.000000000000000001');
   assert.equal(snapshot.events[0].blockTimestamp, '2033-05-18T03:33:20.000Z');
   assert.equal(snapshot.events[0].debotAddressUrl, `https://debot.ai/address/robinhood/${walletA}`);
-  assert.equal(snapshot.events[0].debotTokenUrl, `https://debot.ai/token/robinhood/308574_${token}`);
+  assert.equal(snapshot.events[0].debotTokenUrl, `https://debot.ai/token/robinhood/289942_${token}`);
   assert.equal(snapshot.events[0].explorerTxUrl, `https://robinhoodchain.blockscout.com/tx/${txHash}`);
   assert.equal(snapshot.clusters[0].distinctWallets, 1);
   assert.equal(snapshot.clusters[0].triggered, false);

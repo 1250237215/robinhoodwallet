@@ -29,7 +29,7 @@ test('Base runtime defaults and tuning are independent from Robinhood environmen
   assert.equal(defaults.port, 18119);
   assert.equal(defaults.noxaLaunchFactory, null);
   assert.deepEqual(defaults.quoteTokenAddresses, [BASE_CHAIN.weth, BASE_CHAIN.usdc]);
-  assert.equal(BASE_MONITOR_PROFILE.debotTokenRoot, 'https://debot.ai/token/base/');
+  assert.equal(BASE_MONITOR_PROFILE.debotTokenRoot, 'https://debot.ai/token/base/289942_');
   assert.equal(BASE_ADDRESS_CODEC.chainId, 'base');
   assert.match(defaults.dataFile, /data\/base\.sqlite$/);
 

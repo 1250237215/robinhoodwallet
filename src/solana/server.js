@@ -59,7 +59,7 @@ export const SOLANA_CHAIN = Object.freeze({
   rpcUrl: SOLANA_PUBLIC_RPC_URL,
   explorerUrl: 'https://solscan.io',
   debotAddressRoot: 'https://debot.ai/address/solana',
-  debotTokenRoot: 'https://debot.ai/token/solana/',
+  debotTokenRoot: 'https://debot.ai/token/solana/289942_',
   holderSource: 'solana_rpc_program_accounts',
   nativeSymbol: 'SOL',
   nativeName: 'Solana',

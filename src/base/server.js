@@ -23,7 +23,7 @@ export const BASE_MONITOR_PROFILE = Object.freeze({
   ...BASE_CHAIN,
   id: 'base',
   debotAddressRoot: 'https://debot.ai/address/base',
-  debotTokenRoot: 'https://debot.ai/token/base/'
+  debotTokenRoot: 'https://debot.ai/token/base/289942_'
 });
 
 export const BASE_ADDRESS_CODEC = Object.freeze({

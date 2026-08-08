@@ -61,7 +61,7 @@ const TOKEN_RISK_PATCH_FIELDS = Object.freeze([
   'tokenRiskFlags',
   'tokenRiskSource'
 ]);
-const DEBOT_TOKEN_ROOT = 'https://debot.ai/token/robinhood/308574_';
+const DEBOT_TOKEN_ROOT = 'https://debot.ai/token/robinhood/289942_';
 const DEFAULT_CHAIN_PROFILE = Object.freeze({
   id: 'robinhood',
   explorerUrl: ROBINHOOD_CHAIN.explorerUrl,

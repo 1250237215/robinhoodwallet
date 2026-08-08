@@ -101,7 +101,7 @@ function telegramBarkPayload(body) {
     cleanInternalText(value, 'DeBot URL', 500)
   )))];
   for (const debotUrl of normalizedDebotUrls) {
-    if (!/^https:\/\/debot\.ai\/token\/(?:robinhood\/308574_|solana\/)/i.test(debotUrl)) {
+    if (!/^https:\/\/debot\.ai\/token\/(?:robinhood|solana)\/289942_/i.test(debotUrl)) {
       throw new HttpError(400, 'debotUrls must be DeBot token URLs', 'INVALID_TELEGRAM_BARK_PAYLOAD');
     }
   }

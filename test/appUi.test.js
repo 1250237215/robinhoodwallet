@@ -1072,10 +1072,10 @@ test('all API reads and writes use an immutable abortable chain context', () => 
 
 test('DeBot and explorer links use the active chain for research and each event chain for the mixed monitor feed', () => {
   for (const [chain, debotAddress, debotToken, manager, explorer] of [
-    ['robinhood', 'https://debot.ai/address/robinhood', 'https://debot.ai/token/robinhood/308574_', 'https://debot.ai/track?chain=robinhood&tab=manager', 'https://robinhoodchain.blockscout.com'],
-    ['base', 'https://debot.ai/address/base', 'https://debot.ai/token/base/', 'https://debot.ai/track?chain=base&tab=manager', 'https://base.blockscout.com'],
+    ['robinhood', 'https://debot.ai/address/robinhood', 'https://debot.ai/token/robinhood/289942_', 'https://debot.ai/track?chain=robinhood&tab=manager', 'https://robinhoodchain.blockscout.com'],
+    ['base', 'https://debot.ai/address/base', 'https://debot.ai/token/base/289942_', 'https://debot.ai/track?chain=base&tab=manager', 'https://base.blockscout.com'],
     ['bsc', 'https://debot.ai/address/bsc', 'https://debot.ai/token/bsc/289942_', 'https://debot.ai/track?chain=bsc&tab=manager', 'https://bscscan.com'],
-    ['solana', 'https://debot.ai/address/solana', 'https://debot.ai/token/solana/', 'https://debot.ai/track?chain=solana&tab=manager', 'https://solscan.io']
+    ['solana', 'https://debot.ai/address/solana', 'https://debot.ai/token/solana/289942_', 'https://debot.ai/track?chain=solana&tab=manager', 'https://solscan.io']
   ]) {
     const configStart = appJs.indexOf(`${chain}: Object.freeze({`);
     const configEnd = appJs.indexOf('\n  })', configStart);

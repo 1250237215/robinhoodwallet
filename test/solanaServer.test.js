@@ -122,7 +122,7 @@ test('Solana runtime defaults are independent and preserve Base58 addresses', ()
   assert.equal(config.addressNormalizer(wallet), wallet);
   assert.equal(config.addressValidator(wallet), true);
   assert.equal(config.addressValidator(wallet.toLowerCase()), false);
-  assert.equal(SOLANA_CHAIN.debotTokenRoot, 'https://debot.ai/token/solana/');
+  assert.equal(SOLANA_CHAIN.debotTokenRoot, 'https://debot.ai/token/solana/289942_');
   assert.equal(SOLANA_CHAIN.holderSource, 'solana_rpc_program_accounts');
 });
 
@@ -278,7 +278,7 @@ test('Solana API stays isolated and ingests authenticated Helius events idempote
   assert.equal(events.events[0].walletNote, 'Current Solana note');
   assert.equal(events.events[0].tokenAddress, mint);
   assert.equal(events.events[0].debotAddressUrl, `https://debot.ai/address/solana/${wallet}`);
-  assert.equal(events.events[0].debotTokenUrl, `https://debot.ai/token/solana/${mint}`);
+  assert.equal(events.events[0].debotTokenUrl, `https://debot.ai/token/solana/289942_${mint}`);
   assert.equal(events.events[0].explorerTxUrl, `https://solscan.io/tx/${signature}`);
 
   const oversized = await fetch(`${root}/api/solana/monitor/webhook`, {

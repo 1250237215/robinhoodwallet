@@ -706,7 +706,7 @@ class ViewerUtilityTests(unittest.TestCase):
         self.assertEqual(
             sent[0]["debotUrls"],
             [
-                "https://debot.ai/token/solana/"
+                "https://debot.ai/token/solana/289942_"
                 "63zfjPfH4uaX3TQZoD35WqUrqiuCQQWndMTxQHsJpump"
             ],
         )
