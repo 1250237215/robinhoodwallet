@@ -11,6 +11,7 @@ from viewer import (
     MessageStore,
     TelegramCaAlertService,
     TelegramCaAlertStore,
+    TelegramSocialCaAlertService,
     TRANSLATION_MAX_ATTEMPTS,
     TRANSLATION_RETRY_DELAYS_SECONDS,
     TranslationCacheStore,
@@ -637,6 +638,78 @@ class ViewerUtilityTests(unittest.TestCase):
         self.assertFalse(duplicate)
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0]["senderId"], 42)
+        self.assertEqual(snapshot["latest_delivery"]["status"], "sent")
+
+    def test_social_channel_alert_uses_channel_selection_without_sender_rules(self):
+        class FakeAvatarResolver:
+            async def info_for_message(self, message, fallback_entity):
+                return {
+                    "name": "Chair | OKX",
+                    "initials": "CO",
+                    "color": "#123456",
+                    "url": None,
+                }
+
+        async def exercise(database):
+            chat_id = -1002199691447
+            dialog = FakeDialog(chat_id, "ChairMiyan Capital", username="ChairmanDN1")
+            store = TelegramCaAlertStore(database)
+            controller = SimpleNamespace(
+                selected_ids={chat_id},
+                store=SimpleNamespace(social_ca_bark_chat_ids=[chat_id]),
+            )
+            service = TelegramSocialCaAlertService(
+                dialog,
+                FakeAvatarResolver(),
+                store=store,
+                controller=controller,
+                dialogs=[dialog],
+                selected_ids={chat_id},
+                internal_url="http://127.0.0.1/internal/telegram-bark",
+                internal_token="x" * 32,
+            )
+            sent = []
+
+            def fake_post(payload):
+                sent.append(payload)
+                return {"attempted": 1, "sent": 1, "failed": 0}
+
+            service._post_payload = fake_post
+            message = SimpleNamespace(
+                chat_id=chat_id,
+                sender_id=777,
+                id=12317,
+                raw_text=(
+                    "Gambled here\n\n"
+                    "63zfjPfH4uaX3TQZoD35WqUrqiuCQQWndMTxQHsJpump"
+                ),
+            )
+            first = await service.handle_new_message(message)
+            duplicate = await service.handle_new_message(message)
+            if service.delivery_tasks:
+                await asyncio.gather(*tuple(service.delivery_tasks))
+            snapshot = store.snapshot(chat_id)
+            await service.close()
+            return first, duplicate, sent, snapshot
+
+        with tempfile.TemporaryDirectory() as directory:
+            first, duplicate, sent, snapshot = asyncio.run(
+                exercise(Path(directory) / "alerts.sqlite")
+            )
+        self.assertTrue(first)
+        self.assertFalse(duplicate)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(
+            sent[0]["contractAddresses"],
+            ["63zfjPfH4uaX3TQZoD35WqUrqiuCQQWndMTxQHsJpump"],
+        )
+        self.assertEqual(
+            sent[0]["debotUrls"],
+            [
+                "https://debot.ai/token/solana/"
+                "63zfjPfH4uaX3TQZoD35WqUrqiuCQQWndMTxQHsJpump"
+            ],
+        )
         self.assertEqual(snapshot["latest_delivery"]["status"], "sent")
 
 

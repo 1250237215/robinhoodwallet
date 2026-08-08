@@ -1100,24 +1100,57 @@ class TelegramCaAlertStore:
             ).fetchone()
             if selected is None:
                 return False
-            cursor = self._db.execute(
-                """
-                INSERT OR IGNORE INTO telegram_ca_deliveries (
-                    stream_id, chat_id, message_id, sender_id, sender_name,
-                    contract_addresses_json, status, attempted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
-                """,
-                (
-                    str(stream_id),
-                    int(chat_id),
-                    int(message_id),
-                    int(sender_id),
-                    str(sender_name or f"用户 {sender_id}")[:120],
-                    json.dumps(list(addresses), ensure_ascii=False),
-                    timestamp,
-                ),
+            cursor = self._insert_delivery(
+                stream_id, chat_id, message_id, sender_id, sender_name,
+                addresses, timestamp,
             )
             return cursor.rowcount == 1
+
+    def claim_social_delivery(
+        self,
+        stream_id,
+        chat_id,
+        message_id,
+        sender_id,
+        sender_name,
+        addresses,
+    ):
+        """Claim a selected social-channel alert without group sender rules."""
+        timestamp = int(self.now())
+        with self._lock, self._db:
+            cursor = self._insert_delivery(
+                stream_id, chat_id, message_id, sender_id, sender_name,
+                addresses, timestamp,
+            )
+            return cursor.rowcount == 1
+
+    def _insert_delivery(
+        self,
+        stream_id,
+        chat_id,
+        message_id,
+        sender_id,
+        sender_name,
+        addresses,
+        timestamp,
+    ):
+        return self._db.execute(
+            """
+            INSERT OR IGNORE INTO telegram_ca_deliveries (
+                stream_id, chat_id, message_id, sender_id, sender_name,
+                contract_addresses_json, status, attempted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+            """,
+            (
+                str(stream_id),
+                int(chat_id),
+                int(message_id),
+                int(sender_id),
+                str(sender_name or f"用户 {sender_id}")[:120],
+                json.dumps(list(addresses), ensure_ascii=False),
+                int(timestamp),
+            ),
+        )
 
     def finish_delivery(self, stream_id, status, delivery=None, error=""):
         timestamp = int(self.now())
@@ -2970,7 +3003,7 @@ class TelegramSocialCaAlertService(TelegramCaAlertService):
         if not addresses:
             return False
         stream_id = f"social:{message_stream_id(chat_id, message_id)}"
-        if not self.store.claim_delivery(
+        if not self.store.claim_social_delivery(
             stream_id,
             int(chat_id),
             int(message_id),
