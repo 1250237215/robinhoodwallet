@@ -184,6 +184,11 @@ function includeTelegramReleaseEntry(archivePath) {
     || archivePath.startsWith('web/');
 }
 
+function includeFeishuReleaseEntry(archivePath) {
+  return ['README.md', 'package.json', 'src'].includes(archivePath)
+    || archivePath.startsWith('src/');
+}
+
 function copyFile(source, destination, mode = 0o644) {
   if (!fs.existsSync(source) || !fs.statSync(source).isFile()) {
     throw new Error(`required release source is missing: ${path.relative(repoRoot, source)}`);
@@ -258,7 +263,7 @@ try {
     );
   }
 
-  for (const name of ['robinhood', 'base', 'bsc', 'solana', 'social', 'translation']) {
+  for (const name of ['robinhood', 'base', 'bsc', 'solana', 'social', 'feishu', 'translation']) {
     copyFile(
       path.join(repoRoot, 'deploy', `${name}.env.example`),
       path.join(temporaryDirectory, `${name}.env.example`)
@@ -286,6 +291,10 @@ try {
     path.join(repoRoot, 'deploy', 'telegram.env.example'),
     path.join(temporaryDirectory, 'telegram.env.example')
   );
+  copyFile(
+    path.join(repoRoot, 'deploy', 'feishu-monitor.service'),
+    path.join(temporaryDirectory, 'feishu-monitor.service')
+  );
   if (options.caddy) {
     copyFile(options.caddy, path.join(temporaryDirectory, 'Caddyfile'));
   }
@@ -300,6 +309,12 @@ try {
     path.join(temporaryDirectory, 'telegram.tar.gz'),
     sourceDateEpoch,
     { include: includeTelegramReleaseEntry }
+  );
+  createPublicArchive(
+    path.join(repoRoot, 'feishu-bridge'),
+    path.join(temporaryDirectory, 'feishu.tar.gz'),
+    sourceDateEpoch,
+    { include: includeFeishuReleaseEntry }
   );
   fs.writeFileSync(
     path.join(temporaryDirectory, 'REVISION'),

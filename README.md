@@ -28,6 +28,8 @@ chain-specific. Base and Solana keep independent address libraries.
 - X 主帖、回复、引用和 Telegram 消息由 VPS 异步使用 DeepSeek Flash 翻译，原文立即显示
 - Telegram 只读消息流：保留原文并异步显示中文翻译；可访问的频道目录会自动
   排除明显成人/受限聊天，勾选状态在保存前不会被轮询覆盖
+- 飞书人物实时群聊由 VPS 上已授权的 `lark-cli` 每 2 秒读取，本地电脑关机也不影响；
+  支持人物筛选、跳到最新消息及按人物选择 CA Bark
 
 本地体验 Robinhood 功能需要 Node.js 22.13.0 或更高版本：
 
@@ -111,6 +113,12 @@ translation lane keeps new messages from waiting behind historical backfill,
 and successful translations are cached persistently to avoid repeat API cost. Chat filtering uses
 adult/restriction metadata, conservative title/username rules, and the optional
 `TG_VIEWER_BLOCKED_CHAT_IDS` setting in `telegram.env`.
+
+The optional Feishu monitor is another loopback-only service on
+`127.0.0.1:18124`, routed under `/robinhood-radar/feishu/`. Its `lark-cli`
+binary and authorization both live on the VPS. The release contains only the
+monitor source; CLI credentials remain under
+`/var/lib/robinhood-radar/feishu/.lark-cli/` and are never committed.
 
 ## Main configuration
 

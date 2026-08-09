@@ -6,7 +6,7 @@
 }
 
 {$RADAR_SITE_ADDRESS:http://localhost} {
-	@compressible not path /robinhood-radar/api/social/stream /robinhood-radar/api/robinhood/monitor/stream /robinhood-radar/api/base/monitor/stream /robinhood-radar/api/bsc/monitor/stream /robinhood-radar/api/solana/monitor/stream
+	@compressible not path /robinhood-radar/api/social/stream /robinhood-radar/api/robinhood/monitor/stream /robinhood-radar/api/base/monitor/stream /robinhood-radar/api/bsc/monitor/stream /robinhood-radar/api/solana/monitor/stream /robinhood-radar/feishu/api/stream
 	encode @compressible zstd gzip
 	header Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
 	header {
@@ -107,6 +107,14 @@
 		reverse_proxy 127.0.0.1:18123 {
 			header_up X-Forwarded-Proto {scheme}
 			header_up Host {host}
+		}
+	}
+
+	handle_path /robinhood-radar/feishu/* {
+		reverse_proxy 127.0.0.1:18124 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up Host {host}
+			flush_interval -1
 		}
 	}
 

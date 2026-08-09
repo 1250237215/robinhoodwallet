@@ -317,6 +317,70 @@ export class RobinhoodBarkNotifier {
     };
   }
 
+  async notifyFeishuMessage({
+    personName = '飞书',
+    sourceName = '飞书实时群聊',
+    text = '',
+    contractAddresses = [],
+    contractChains = [],
+    debotUrls = [],
+    messageUrl = '',
+    sound = 'alarm',
+    volume = 5
+  } = {}) {
+    const targets = this.store.listMonitorBarkTargets().filter((target) => target.enabled);
+    if (!targets.length) return { attempted: 0, sent: 0, failed: 0 };
+    const addresses = [...new Set(
+      (Array.isArray(contractAddresses) ? contractAddresses : [])
+        .map((address) => String(address || '').trim())
+        .filter(Boolean)
+    )].slice(0, 8);
+    if (!addresses.length) return { attempted: 0, sent: 0, failed: 0 };
+    const chainLabels = {
+      robinhood: 'Robinhood',
+      bsc: 'BSC',
+      base: 'Base',
+      solana: 'Solana',
+      multiple: '多链待确认',
+      unknown: '链待确认'
+    };
+    const normalizedChains = addresses.map((_, index) => {
+      const chain = String(Array.isArray(contractChains) ? contractChains[index] : '').toLowerCase();
+      return chainLabels[chain] ? chain : 'unknown';
+    });
+    const addressSummary = addresses.map((address, index) => (
+      `${chainLabels[normalizedChains[index]]}：${address}`
+    )).join('\n');
+    const normalizedDebotUrls = [...new Set(
+      (Array.isArray(debotUrls) ? debotUrls : [])
+        .map((url) => String(url || '').trim())
+        .filter((url) => /^https:\/\/debot\.ai\/token\//i.test(url))
+    )].slice(0, 8);
+    const normalizedText = String(text || '').replace(/\s+/g, ' ').trim();
+    const textSummary = normalizedText.length > 220
+      ? `${normalizedText.slice(0, 219).trimEnd()}...`
+      : normalizedText;
+    const source = cleanLabel(sourceName, '飞书实时群聊');
+    const person = cleanLabel(personName, '飞书');
+    const sourceLink = messageUrl ? `来源：${String(messageUrl).trim()}` : '';
+    const body = [source, addressSummary, ...normalizedDebotUrls, sourceLink, textSummary]
+      .filter(Boolean)
+      .join('\n');
+    const results = await Promise.allSettled(targets.map((target) => this.#send(target, {
+      title: `飞书 CA：${person}`,
+      body,
+      sound,
+      volume,
+      url: normalizedDebotUrls[0] || String(messageUrl || ''),
+      group: '飞书 CA 监控'
+    })));
+    return {
+      attempted: targets.length,
+      sent: results.filter((result) => result.status === 'fulfilled').length,
+      failed: results.filter((result) => result.status === 'rejected').length
+    };
+  }
+
   // Social sources (Twitter/X and Telegram) share the same Bark target
   // library, but use a distinct notification group so they can be filtered
   // independently in Bark clients.

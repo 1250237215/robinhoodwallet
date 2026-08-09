@@ -14,11 +14,13 @@ readonly health_connect_timeout_seconds="${DEPLOY_HEALTH_CONNECT_TIMEOUT_SECONDS
 readonly health_request_timeout_seconds="${DEPLOY_HEALTH_REQUEST_TIMEOUT_SECONDS:-5}"
 readonly monitor_ready_timeout_seconds="${DEPLOY_MONITOR_READY_TIMEOUT_SECONDS:-30}"
 readonly solana_monitor_ready_timeout_seconds="${SOLANA_MONITOR_READY_TIMEOUT_SECONDS:-120}"
-readonly services=("robinhood-radar" "base-radar" "bsc-radar" "solana-radar")
+readonly services=("robinhood-radar" "base-radar" "bsc-radar" "solana-radar" "feishu-monitor")
 readonly chains=("robinhood" "base" "bsc" "solana")
 readonly telegram_service="telegram-viewer"
 readonly telegram_dir="$app_dir/telegram"
 readonly telegram_runtime_dir="$data_dir/telegram"
+readonly feishu_service="feishu-monitor"
+readonly feishu_dir="$app_dir/feishu"
 
 rollback_needed=0
 caddy_changed=0
@@ -269,8 +271,11 @@ verify_release_manifest() {
     solana-radar.service \
     public.tar.gz \
     telegram-viewer.service \
+    feishu-monitor.service \
+    feishu.env.example \
     translation.env.example \
-    telegram.tar.gz; do
+    telegram.tar.gz \
+    feishu.tar.gz; do
     manifest_contains_file "$manifest" "$required" || {
       echo "Checksum manifest does not cover required file: $required" >&2
       return 1
@@ -336,6 +341,13 @@ rollback() {
       fi
       restore_telegram_source "$release_backup/telegram"
       restore_optional_file "$release_backup/telegram-viewer.service" "$(unit_path "$telegram_service")"
+      if [[ -d "$release_backup/feishu" ]]; then
+        rm -rf "$feishu_dir"
+        cp -a "$release_backup/feishu" "$feishu_dir"
+      else
+        rm -rf "$feishu_dir"
+      fi
+      restore_optional_file "$release_backup/feishu-monitor.service" "$(unit_path "$feishu_service")"
       restore_optional_file "$release_backup/REVISION" "$app_dir/REVISION"
 
       if [[ $caddy_changed -eq 1 ]]; then
@@ -391,8 +403,11 @@ for file in \
   "$staging_dir/bsc-radar.service" \
   "$staging_dir/solana-radar.service" \
   "$staging_dir/telegram-viewer.service" \
+  "$staging_dir/feishu-monitor.service" \
+  "$staging_dir/feishu.env.example" \
   "$staging_dir/translation.env.example" \
   "$staging_dir/telegram.tar.gz" \
+  "$staging_dir/feishu.tar.gz" \
   "$staging_dir/public.tar.gz" \
   "$staging_dir/REVISION" \
   "$staging_dir/SHA256SUMS"; do
@@ -464,6 +479,10 @@ backup_database_file "$bark_database" "$bark_database_backup"
 cp -a "$app_dir/public" "$release_backup/public"
 backup_telegram_source "$release_backup/telegram"
 backup_optional_file "$(unit_path "$telegram_service")" "$release_backup/telegram-viewer.service"
+if [[ -d "$feishu_dir" ]]; then
+  cp -a "$feishu_dir" "$release_backup/feishu"
+fi
+backup_optional_file "$(unit_path "$feishu_service")" "$release_backup/feishu-monitor.service"
 rollback_needed=1
 
 install -m 0644 "$staging_dir/REVISION" "$app_dir/REVISION"
@@ -497,6 +516,14 @@ if [[ "$telegram_was_active" == "1" && ! -x "$telegram_dir/.venv/bin/python" ]];
   echo "Telegram viewer was active but its Python virtual environment is missing." >&2
   exit 1
 fi
+
+install -m 0644 "$staging_dir/feishu-monitor.service" "$(unit_path "$feishu_service")"
+rm -rf "$feishu_dir"
+install -d -m 0755 "$feishu_dir"
+tar -xzf "$staging_dir/feishu.tar.gz" -C "$feishu_dir"
+chown -R root:root "$feishu_dir"
+find "$feishu_dir" -type d -exec chmod 0755 {} +
+find "$feishu_dir" -type f -exec chmod 0644 {} +
 
 rm -rf "$app_dir/public.new"
 install -d -m 0755 "$app_dir/public.new"
@@ -722,6 +749,31 @@ if [[ "$telegram_should_run" == "1" ]]; then
   rm -f "$telegram_chats_file" "$telegram_messages_file"
   systemctl is-active --quiet "$telegram_service.service"
 fi
+
+feishu_health_file="$(mktemp)"
+for attempt in $(seq 1 30); do
+  if curl --fail --silent --show-error \
+    --connect-timeout "$health_connect_timeout_seconds" \
+    --max-time "$health_request_timeout_seconds" \
+    "http://127.0.0.1:18124/api/snapshot" > "$feishu_health_file"; then
+    break
+  fi
+  if [[ $attempt -eq 30 ]]; then
+    echo "Feishu monitor health check did not become ready." >&2
+    rm -f "$feishu_health_file"
+    exit 1
+  fi
+  sleep 1
+done
+node --input-type=module -e '
+  import fs from "node:fs";
+  const payload = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (!Array.isArray(payload.people) || payload.people.length !== 6) {
+    throw new Error("Feishu people catalog is unavailable");
+  }
+' "$feishu_health_file"
+rm -f "$feishu_health_file"
+systemctl is-active --quiet "$feishu_service.service"
 quick_check_database "$(social_database_path)"
 quick_check_database "$(evm_wallet_database_path)"
 quick_check_database "$(bark_database_path)"

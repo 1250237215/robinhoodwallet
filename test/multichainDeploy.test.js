@@ -17,11 +17,13 @@ const baseUnit = fs.readFileSync(new URL('../deploy/base-radar.service', import.
 const bscUnit = fs.readFileSync(new URL('../deploy/bsc-radar.service', import.meta.url), 'utf8');
 const solanaUnit = fs.readFileSync(new URL('../deploy/solana-radar.service', import.meta.url), 'utf8');
 const telegramUnit = fs.readFileSync(new URL('../deploy/telegram-viewer.service', import.meta.url), 'utf8');
+const feishuUnit = fs.readFileSync(new URL('../deploy/feishu-monitor.service', import.meta.url), 'utf8');
 const robinhoodEnv = fs.readFileSync(new URL('../deploy/robinhood.env.example', import.meta.url), 'utf8');
 const baseEnv = fs.readFileSync(new URL('../deploy/base.env.example', import.meta.url), 'utf8');
 const bscEnv = fs.readFileSync(new URL('../deploy/bsc.env.example', import.meta.url), 'utf8');
 const solanaEnv = fs.readFileSync(new URL('../deploy/solana.env.example', import.meta.url), 'utf8');
 const socialEnv = fs.readFileSync(new URL('../deploy/social.env.example', import.meta.url), 'utf8');
+const feishuEnv = fs.readFileSync(new URL('../deploy/feishu.env.example', import.meta.url), 'utf8');
 const translationEnv = fs.readFileSync(new URL('../deploy/translation.env.example', import.meta.url), 'utf8');
 const bootstrap = fs.readFileSync(new URL('../deploy/bootstrap-host.sh', import.meta.url), 'utf8');
 const releasePreparer = fs.readFileSync(new URL('../scripts/prepare-release.mjs', import.meta.url), 'utf8');
@@ -100,6 +102,7 @@ test('reverse proxy routes each chain API to its own process', () => {
   assert.match(caddy, /\/api\/solana\/\*[\s\S]*127\.0\.0\.1:18120/);
   assert.match(caddy, /\/api\/social\/stream[\s\S]*127\.0\.0\.1:18118[\s\S]*flush_interval -1/);
   assert.match(caddy, /\/api\/bsc\/monitor\/stream[\s\S]*127\.0\.0\.1:18122[\s\S]*flush_interval -1/);
+  assert.match(caddy, /\/robinhood-radar\/feishu\/\*[\s\S]*127\.0\.0\.1:18124[\s\S]*flush_interval -1/);
   assert.match(caddy, /handle \/robinhood-radar\/internal\/\*[\s\S]*respond "Not found" 404/);
   assert.match(caddy, /@solanaWebhook[\s\S]*monitor\/webhook[\s\S]*127\.0\.0\.1:18120/);
   assert.doesNotMatch(caddy, /basic_?auth|basicauth|RADAR_BASIC_AUTH_HASH/);
@@ -142,6 +145,12 @@ test('Robinhood owns the independent social store and loads its private bridge t
   assert.match(robinhoodUnit, /EnvironmentFile=-\/etc\/robinhood-radar\/social\.env/);
   assert.match(robinhoodUnit, /EnvironmentFile=-\/etc\/robinhood-radar\/translation\.env/);
   assert.match(telegramUnit, /EnvironmentFile=-\/etc\/robinhood-radar\/translation\.env/);
+  assert.match(feishuUnit, /Environment=HOME=\/var\/lib\/robinhood-radar\/feishu/);
+  assert.match(feishuUnit, /Environment=PORT=18124/);
+  assert.match(feishuUnit, /Environment=LARK_CLI=\/usr\/local\/bin\/lark-cli/);
+  assert.match(feishuUnit, /EnvironmentFile=-\/etc\/robinhood-radar\/feishu\.env/);
+  assert.match(feishuUnit, /ReadWritePaths=\/var\/lib\/robinhood-radar\/feishu/);
+  assert.doesNotMatch(feishuUnit, /(?:KEY|TOKEN|SECRET|PASSWORD)=.+/);
   assert.doesNotMatch(robinhoodUnit, /SOCIAL_BRIDGE_TOKEN=/);
   assert.doesNotMatch(robinhoodUnit, /SOCIAL_X_FAST_HANDLES=/);
 });
@@ -166,10 +175,12 @@ test('environment templates expose production overrides without embedding creden
   assert.match(solanaEnv, /^SOLANA_HELIUS_AUTH_HEADER=$/m);
   assert.match(socialEnv, /^SOCIAL_BRIDGE_TOKEN=$/m);
   assert.match(socialEnv, /^SOCIAL_X_FAST_HANDLES=$/m);
+  assert.match(feishuEnv, /^FEISHU_BARK_INTERNAL_TOKEN=$/m);
+  assert.match(feishuEnv, /^FEISHU_CA_ROBINHOOD_RPC_URL=https:\/\//m);
   for (const example of [robinhoodEnv, baseEnv, bscEnv, solanaEnv]) {
     assert.match(example, /^BARK_DATA_FILE=\/var\/lib\/robinhood-radar\/bark\.sqlite$/m);
   }
-  for (const example of [robinhoodEnv, baseEnv, bscEnv, solanaEnv, socialEnv]) {
+  for (const example of [robinhoodEnv, baseEnv, bscEnv, solanaEnv, socialEnv, feishuEnv]) {
     assert.doesNotMatch(example, /217\.116\.171\.250|sslip\.io|api\.day\.app/);
     assert.doesNotMatch(example, /^\s*[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)=.+$/m);
   }
@@ -180,7 +191,7 @@ test('fresh-host bootstrap is idempotent and never overwrites operator environme
   assert.match(bootstrap, /if id "\$service_user"/);
   assert.match(bootstrap, /if \[\[ ! -e "\$destination" \]\]/);
   assert.match(bootstrap, /install -o root -g root -m 0600 "\$example" "\$destination"/);
-  assert.match(bootstrap, /for name in robinhood base bsc solana social telegram translation/);
+  assert.match(bootstrap, /for name in robinhood base bsc solana social telegram feishu translation/);
   assert.match(bootstrap, /Node\.js 22\.13\.0 or newer is required/);
   assert.doesNotMatch(bootstrap, /apt(?:-get)? install|dnf install|yum install|curl[^\n]*\|[^\n]*(?:sh|bash)/);
 });
@@ -188,7 +199,7 @@ test('fresh-host bootstrap is idempotent and never overwrites operator environme
 test('release preparer builds a complete checksummed installer staging directory', () => {
   assert.match(releasePreparer, /npm[\s\S]*run[\s\S]*build:all/);
   assert.match(releasePreparer, /\['robinhood', 'base', 'bsc', 'solana'\]/);
-  assert.match(releasePreparer, /\['robinhood', 'base', 'bsc', 'solana', 'social', 'translation'\]/);
+  assert.match(releasePreparer, /\['robinhood', 'base', 'bsc', 'solana', 'social', 'feishu', 'translation'\]/);
   assert.match(releasePreparer, /public\.tar\.gz/);
   assert.match(releasePreparer, /REVISION/);
   assert.match(releasePreparer, /SHA256SUMS/);
@@ -196,11 +207,13 @@ test('release preparer builds a complete checksummed installer staging directory
   assert.match(releasePreparer, /install-remote\.sh/);
   assert.match(releasePreparer, /telegram-viewer\.service/);
   assert.match(releasePreparer, /telegram\.tar\.gz/);
+  assert.match(releasePreparer, /feishu-monitor\.service/);
+  assert.match(releasePreparer, /feishu\.tar\.gz/);
   assert.match(releasePreparer, /the Git worktree is dirty/);
 });
 
 test('remote installer backs up, checks, deploys, and validates all seven databases', () => {
-  assert.match(installer, /readonly services=\("robinhood-radar" "base-radar" "bsc-radar" "solana-radar"\)/);
+  assert.match(installer, /readonly services=\("robinhood-radar" "base-radar" "bsc-radar" "solana-radar" "feishu-monitor"\)/);
   assert.match(installer, /readonly chains=\("robinhood" "base" "bsc" "solana"\)/);
   assert.match(installer, /declare -A ports=\(\[robinhood\]=18118 \[base\]=18119 \[bsc\]=18122 \[solana\]=18120\)/);
   assert.match(installer, /PRAGMA quick_check/);
@@ -228,6 +241,10 @@ test('remote installer backs up, checks, deploys, and validates all seven databa
   assert.match(installer, /restore_optional_file/);
   assert.match(installer, /telegram-viewer/);
   assert.match(installer, /telegram\.tar\.gz/);
+  assert.match(installer, /feishu-monitor/);
+  assert.match(installer, /feishu\.tar\.gz/);
+  assert.match(installer, /127\.0\.0\.1:18124\/api\/snapshot/);
+  assert.match(installer, /rm -rf "\$feishu_dir"/);
   assert.match(installer, /translation\.env\.example/);
   assert.match(installer, /api\/messages\?limit=1/);
   assert.match(installer, /verify_release_manifest "\$staging_dir"/);
@@ -322,8 +339,11 @@ test('remote installer accepts a complete manifest and rejects a changed release
     'solana-radar.service',
     'public.tar.gz',
     'telegram-viewer.service',
+    'feishu-monitor.service',
+    'feishu.env.example',
     'translation.env.example',
-    'telegram.tar.gz'
+    'telegram.tar.gz',
+    'feishu.tar.gz'
   ];
   const checksums = [];
   for (const name of required) {

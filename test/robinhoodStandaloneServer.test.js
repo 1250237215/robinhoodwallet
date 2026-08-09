@@ -110,6 +110,52 @@ test('internal Telegram Bark endpoint requires its bearer token and validates pa
   }
 });
 
+test('internal Feishu Bark endpoint requires its bearer token and accepts Feishu links', async () => {
+  const received = [];
+  const tokenValue = 'f'.repeat(48);
+  const monitor = {
+    async notifyFeishuMessage(payload) {
+      received.push(payload);
+      return { attempted: 1, sent: 1, failed: 0 };
+    }
+  };
+  const server = createRobinhoodStandaloneServer({
+    service: {},
+    monitor,
+    feishuBarkToken: tokenValue,
+    servePublic: false
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    const payload = {
+      personName: 'Sen',
+      sourceName: 'crazySen个人发言',
+      text: 'new CA',
+      contractAddresses: ['0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+      contractChains: ['bsc'],
+      debotUrls: ['https://debot.ai/token/bsc/289942_0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+      messageUrl: 'https://applink.feishu.cn/client/chat/open?openChatId=oc_test'
+    };
+    const unauthorized = await fetch(`${baseUrl}/internal/feishu-bark`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    assert.equal(unauthorized.status, 401);
+    const response = await fetch(`${baseUrl}/internal/feishu-bark`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${tokenValue}`, 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    assert.equal(response.status, 200);
+    assert.equal(received.length, 1);
+    assert.equal(received[0].personName, 'Sen');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('standalone deployment server validates filters without legacy Base dependencies', () => {
   const filters = parseDashboardFilters(new URLSearchParams('multiple=50&minEntryUsd=325&minLiquidityUsd=75000&minWallets=200&tab=unrealized'));
   assert.deepEqual(filters, { multiple: 50, minLiquidityUsd: 75_000, minWallets: 200, tab: 'unrealized', minEntryUsd: 325 });

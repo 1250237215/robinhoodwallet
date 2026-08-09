@@ -50,6 +50,8 @@ Robinhood 与 BSC 通过同一个 `evm-wallets.sqlite`共用已确认地址库�
 - 要启用手机推送时，需要 Bark 应用提供的设备 Key
 - 要启用 Telegram 只读监控时，需要 Telegram API ID/Hash 和一次性登录会话；凭据、
   session、频道选择和媒体只保存在 VPS 的 Telegram 数据目录
+- 要启用飞书人物监控时，需要在 VPS 安装官方 `lark-cli`，并用运行服务的
+  `robinhood-radar`用户完成一次应用配置和账号授权；本地电脑无需常驻
 
 Robinhood、Base 和 BSC 默认使用公开 RPC，可以启动和体验。大量钱包的长期生产
 监控建议配置自己的稳定 RPC。Solana 公共 RPC 只用于人工 Holder 查询，不能
@@ -149,6 +151,9 @@ solana-radar.service
 telegram-viewer.service
 telegram.env.example
 telegram.tar.gz
+feishu-monitor.service
+feishu.env.example
+feishu.tar.gz
 robinhood.env.example
 base.env.example
 bsc.env.example
@@ -198,6 +203,29 @@ cd /root/robinhood-radar-deploy
 这个脚本是幂等的：重复执行不会覆盖已有的 `/etc/robinhood-radar/*.env`。
 它不安装 Node.js 或 Caddy，只会验证依赖、创建无登录权限的
 `robinhood-radar`用户、生产目录和第一次使用的环境变量模板。
+
+### 飞书 CLI 只在 VPS 运行
+
+使用飞书官方安装方式把 `lark-cli`安装为 `/usr/local/bin/lark-cli`，然后以服务
+用户完成一次配置和登录。不要用 `root`授权，否则 systemd 服务无法读取对应配置：
+
+```bash
+sudo -u robinhood-radar \
+  env HOME=/var/lib/robinhood-radar/feishu \
+  /usr/local/bin/lark-cli config init --new --lang zh
+
+sudo -u robinhood-radar \
+  env HOME=/var/lib/robinhood-radar/feishu \
+  /usr/local/bin/lark-cli auth login --recommend
+
+sudo -u robinhood-radar \
+  env HOME=/var/lib/robinhood-radar/feishu \
+  /usr/local/bin/lark-cli auth status --verify
+```
+
+浏览器只用于完成飞书官方授权。授权配置保存在
+`/var/lib/robinhood-radar/feishu/.lark-cli/`，不上传到 Git，也不依赖部署者的
+本地电脑持续在线。
 
 ## 6. 配置环境变量
 
@@ -493,14 +521,15 @@ staging 目录会被删除，避免旧发布包被误用。
 在 VPS 上检查：
 
 ```bash
-systemctl --no-pager --full status robinhood-radar base-radar bsc-radar solana-radar caddy
-journalctl -u robinhood-radar -u base-radar -u bsc-radar -u solana-radar --since '10 minutes ago' --no-pager
+systemctl --no-pager --full status robinhood-radar base-radar bsc-radar solana-radar feishu-monitor caddy
+journalctl -u robinhood-radar -u base-radar -u bsc-radar -u solana-radar -u feishu-monitor --since '10 minutes ago' --no-pager
 
 curl --fail http://127.0.0.1:18118/api/robinhood/dashboard?tab=all >/dev/null
 curl --fail http://127.0.0.1:18119/api/base/dashboard?tab=all >/dev/null
 curl --fail http://127.0.0.1:18122/api/bsc/dashboard?tab=all >/dev/null
 curl --fail http://127.0.0.1:18120/api/solana/dashboard?tab=all >/dev/null
 curl --fail http://127.0.0.1:18118/api/social?postLimit=1 >/dev/null
+curl --fail http://127.0.0.1:18124/api/snapshot >/dev/null
 ```
 
 在其他电脑检查公网：
@@ -510,6 +539,7 @@ curl --fail --location https://radar.example.com/robinhood-radar/ >/dev/null
 curl --fail --location 'https://radar.example.com/robinhood-radar/api/robinhood/monitor' >/dev/null
 curl --fail --location 'https://radar.example.com/robinhood-radar/api/bsc/monitor' >/dev/null
 curl --fail --location 'https://radar.example.com/robinhood-radar/api/social?postLimit=1' >/dev/null
+curl --fail --location 'https://radar.example.com/robinhood-radar/feishu/api/snapshot' >/dev/null
 ```
 
 浏览器打开 `https://radar.example.com/robinhood-radar/`，确认四链切换后链上数据

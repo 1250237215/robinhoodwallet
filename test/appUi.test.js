@@ -6,6 +6,7 @@ const indexHtml = fs.readFileSync(new URL('../public/index.html', import.meta.ur
 const appJs = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 const telegramMonitorJs = fs.readFileSync(new URL('../public/telegram-monitor.js', import.meta.url), 'utf8');
 const telegramSocialJs = fs.readFileSync(new URL('../public/telegram-social.js', import.meta.url), 'utf8');
+const feishuMonitorJs = fs.readFileSync(new URL('../public/feishu-monitor.js', import.meta.url), 'utf8');
 const telegramViewerJs = fs.readFileSync(new URL('../telegram/web/app.js', import.meta.url), 'utf8');
 const stylesCss = fs.readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
 
@@ -1208,6 +1209,7 @@ test('real-time monitoring is the default first-level page and replaces the rese
 
 test('the pinned LazyCat Telegram panel precedes the shared monitoring workspace', () => {
   const telegramPanelIndex = indexHtml.indexOf('<section class="telegram-monitor-panel"');
+  const feishuPanelIndex = indexHtml.indexOf('<section class="telegram-monitor-panel feishu-monitor-panel"');
   const workspaceIndex = indexHtml.indexOf('<div class="monitor-workspace">');
   const socialPanelIndex = indexHtml.indexOf('<section class="social-monitor-panel"');
   const managerIndex = indexHtml.indexOf('<section class="social-watchlist-manager"');
@@ -1216,7 +1218,7 @@ test('the pinned LazyCat Telegram panel precedes the shared monitoring workspace
 
   assert.ok(telegramPanelIndex > 0);
   assert.ok(telegramPanelIndex < workspaceIndex);
-  assert.match(indexHtml.slice(telegramPanelIndex, workspaceIndex), /id="telegram-monitor-panel"[\s\S]*id="telegram-message-feed"[\s\S]*<\/section>\s*$/);
+  assert.match(indexHtml.slice(telegramPanelIndex, feishuPanelIndex), /id="telegram-monitor-panel"[\s\S]*id="telegram-message-feed"[\s\S]*<\/section>\s*$/);
   assert.ok(workspaceIndex < socialPanelIndex);
   assert.ok(socialPanelIndex > 0);
   assert.ok(socialPanelIndex < managerIndex);
@@ -1238,6 +1240,35 @@ test('the pinned LazyCat Telegram panel precedes the shared monitoring workspace
   assert.doesNotMatch(indexHtml, /social-telegram-section|social-telegram-feed/);
   assert.match(indexHtml, /<script src="telegram-monitor\.js" type="module"><\/script>/);
   assert.match(indexHtml, /<script src="telegram-social\.js" type="module"><\/script>/);
+});
+
+test('Telegram and Feishu real-time chats share a responsive two-column workspace', () => {
+  const chatGridIndex = indexHtml.indexOf('<div class="chat-monitor-grid">');
+  const telegramIndex = indexHtml.indexOf('id="telegram-monitor-panel"');
+  const feishuIndex = indexHtml.indexOf('id="feishu-monitor-panel"');
+  const monitorWorkspaceIndex = indexHtml.indexOf('<div class="monitor-workspace">');
+  assert.ok(chatGridIndex > 0 && chatGridIndex < telegramIndex);
+  assert.ok(telegramIndex < feishuIndex && feishuIndex < monitorWorkspaceIndex);
+  for (const id of [
+    'feishu-message-feed',
+    'feishu-latest-button',
+    'feishu-person-filter',
+    'feishu-ca-watch-button',
+    'feishu-ca-watch-enabled',
+    'feishu-ca-watch-list',
+    'feishu-ca-watch-save'
+  ]) assert.match(indexHtml, new RegExp(`id="${id}"`));
+  assert.match(indexHtml, /<script src="feishu-monitor\.js" type="module"><\/script>/);
+  assert.match(stylesCss, /\.chat-monitor-grid \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(stylesCss, /@media[\s\S]*\.chat-monitor-grid \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(feishuMonitorJs, /new EventSource\(`\$\{FEISHU_API_ROOT\}\/stream`\)/);
+  assert.match(feishuMonitorJs, /fetchJson\('\/ca-watch', \{[\s\S]*method: 'PUT'/);
+  assert.match(feishuMonitorJs, /function scrollToLatest\([\s\S]*elements\.feed\.scrollTo/);
+  assert.match(feishuMonitorJs, /state\.selectedPersonId = elements\.filter\.value/);
+});
+
+test('Feishu monitor browser script is syntactically valid', () => {
+  assert.doesNotThrow(() => new Function(feishuMonitorJs));
 });
 
 test('the pinned Telegram viewer targets LazyCat FNF by chat id and stays read only', () => {

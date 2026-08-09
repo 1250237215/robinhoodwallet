@@ -397,6 +397,7 @@
           </div>
         </section>
 
+        <div class="chat-monitor-grid">
         <section class="telegram-monitor-panel" id="telegram-monitor-panel" aria-labelledby="telegram-monitor-title">
           <header class="monitor-panel-head telegram-monitor-head">
             <div>
@@ -476,6 +477,93 @@
             </button>
           </div>
         </section>
+
+        <section class="telegram-monitor-panel feishu-monitor-panel" id="feishu-monitor-panel" aria-labelledby="feishu-monitor-title">
+          <header class="monitor-panel-head telegram-monitor-head">
+            <div>
+              <div class="telegram-monitor-title-line">
+                <h3 id="feishu-monitor-title">飞书实时群聊</h3>
+                <span class="telegram-connection-badge" id="feishu-connection-badge" data-state="loading">
+                  <span aria-hidden="true"></span>
+                  <strong id="feishu-connection-label">正在连接</strong>
+                </span>
+              </div>
+              <p id="feishu-monitor-summary">正在读取飞书人物消息</p>
+            </div>
+            <div class="telegram-head-actions">
+              <button class="inline-icon-button" id="feishu-ca-watch-button" type="button" title="设置飞书 CA Bark 推送" aria-label="设置飞书 CA Bark 推送" aria-expanded="false">
+                <i data-lucide="bell-ring" aria-hidden="true"></i>
+              </button>
+              <button class="inline-icon-button" id="feishu-refresh-button" type="button" title="刷新飞书消息" aria-label="刷新飞书消息">
+                <i data-lucide="refresh-cw" aria-hidden="true"></i>
+              </button>
+            </div>
+          </header>
+
+          <div class="telegram-chat-bar feishu-chat-bar">
+            <div class="telegram-avatar telegram-source-avatar feishu-source-avatar" aria-hidden="true">飞</div>
+            <div class="telegram-source-copy">
+              <strong>飞书人物雷达</strong>
+              <span><span id="feishu-source-kind">6 位监控对象</span> · <span id="feishu-message-count">0 条消息</span></span>
+            </div>
+            <label class="feishu-person-filter-label">
+              <span class="sr-only">筛选飞书人物</span>
+              <select id="feishu-person-filter" aria-label="筛选飞书人物">
+                <option value="all">全部动态</option>
+              </select>
+            </label>
+            <time id="feishu-last-updated">等待同步</time>
+          </div>
+
+          <section class="telegram-ca-watch" id="feishu-ca-watch" aria-labelledby="feishu-ca-watch-title" hidden>
+            <header>
+              <div>
+                <div class="telegram-ca-watch-title-line">
+                  <h4 id="feishu-ca-watch-title">CA Bark 推送</h4>
+                  <span class="telegram-ca-watch-status" id="feishu-ca-watch-status" data-state="disabled">已关闭</span>
+                </div>
+                <p id="feishu-ca-watch-summary">正在读取飞书监控对象</p>
+              </div>
+              <label class="telegram-ca-watch-enabled">
+                <input id="feishu-ca-watch-enabled" type="checkbox" />
+                <span>启用</span>
+              </label>
+            </header>
+            <div class="telegram-ca-watch-toolbar">
+              <label class="telegram-ca-watch-search">
+                <i data-lucide="search" aria-hidden="true"></i>
+                <span class="sr-only">搜索飞书人物</span>
+                <input id="feishu-ca-watch-search" type="search" autocomplete="off" placeholder="搜索人物" />
+              </label>
+              <label class="telegram-ca-watch-select-all">
+                <input id="feishu-ca-watch-select-all" type="checkbox" />
+                <span>全选</span>
+              </label>
+            </div>
+            <div class="telegram-ca-watch-list" id="feishu-ca-watch-list" aria-live="polite"></div>
+            <footer>
+              <span id="feishu-ca-watch-count">已选 0 人</span>
+              <button class="social-primary-button" id="feishu-ca-watch-save" type="button" disabled>
+                <i data-lucide="check" aria-hidden="true"></i>
+                保存规则
+              </button>
+            </footer>
+          </section>
+
+          <div class="telegram-feed-shell">
+            <ol class="telegram-message-feed feishu-message-feed" id="feishu-message-feed" aria-live="polite">
+              <li class="telegram-empty-state">
+                <i data-lucide="messages-square" aria-hidden="true"></i>
+                <strong>等待飞书消息</strong>
+                <span>VPS 飞书服务连接成功后，消息会显示在这里。</span>
+              </li>
+            </ol>
+            <button class="inline-icon-button telegram-latest-button" id="feishu-latest-button" type="button" title="跳到最新消息" aria-label="跳到最新消息" aria-controls="feishu-message-feed" hidden>
+              <i data-lucide="arrow-down-to-line" aria-hidden="true"></i>
+            </button>
+          </div>
+        </section>
+        </div>
 
         <div class="monitor-workspace">
           <section class="social-monitor-panel" id="social-monitor-panel" aria-labelledby="social-monitor-title">
@@ -859,5 +947,6 @@
     <script src="app.js" type="module"></script>
     <script src="telegram-monitor.js" type="module"></script>
     <script src="telegram-social.js" type="module"></script>
+    <script src="feishu-monitor.js" type="module"></script>
   </body>
 </html>

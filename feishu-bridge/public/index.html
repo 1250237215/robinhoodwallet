@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>飞书人物雷达</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <div>
+        <h1>飞书人物雷达</h1>
+        <p>6 人实时消息流</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <div class="connection" id="connection" data-state="loading">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="connectionText">正在连接</span>
+      </div>
+      <label class="switch">
+        <input id="autoRefresh" type="checkbox" checked>
+        <span aria-hidden="true"></span>
+        自动刷新
+      </label>
+      <button class="icon-button" id="refreshButton" type="button" title="立即刷新" aria-label="立即刷新">↻</button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <aside class="sidebar" aria-label="监控对象">
+      <div class="sidebar-heading">
+        <span>监控对象</span>
+        <strong id="peopleCount">6</strong>
+      </div>
+      <nav class="people-nav" id="peopleNav"></nav>
+      <div class="sync-meta">
+        <span>上次同步</span>
+        <time id="lastSync">--:--:--</time>
+        <small>轮询间隔 <b id="pollInterval">15s</b></small>
+      </div>
+    </aside>
+
+    <section class="feed-panel">
+      <div class="feed-header">
+        <div>
+          <p class="eyebrow" id="feedSource">全部来源</p>
+          <h2 id="feedTitle">全部动态</h2>
+        </div>
+        <div class="feed-total"><strong id="messageCount">0</strong><span>条消息</span></div>
+      </div>
+      <div class="error-banner" id="errorBanner" hidden></div>
+      <div class="feed" id="feed" aria-live="polite">
+        <div class="loading-state">
+          <span class="loader" aria-hidden="true"></span>
+          <p>正在读取飞书消息</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

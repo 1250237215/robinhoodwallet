@@ -168,6 +168,52 @@ async function handleInternalTelegramBark(req, res, url, monitor, token) {
   return true;
 }
 
+function feishuBarkPayload(body) {
+  if (!Array.isArray(body.contractAddresses) || !body.contractAddresses.length || body.contractAddresses.length > 8) {
+    throw new HttpError(400, 'contractAddresses must contain 1 to 8 entries', 'INVALID_FEISHU_BARK_PAYLOAD');
+  }
+  const contractAddresses = [...new Set(body.contractAddresses.map((value) => (
+    cleanInternalText(value, 'contract address', 100)
+  )))];
+  const contractChains = Array.isArray(body.contractChains) ? body.contractChains : [];
+  if (contractChains.length !== contractAddresses.length) {
+    throw new HttpError(400, 'contractChains must match contractAddresses', 'INVALID_FEISHU_BARK_PAYLOAD');
+  }
+  const normalizedChains = contractChains.map((value) => cleanInternalText(value, 'contract chain', 20).toLowerCase());
+  if (normalizedChains.some((value) => !['robinhood', 'bsc', 'base', 'solana', 'unknown', 'multiple'].includes(value))) {
+    throw new HttpError(400, 'contractChains contains an unsupported chain', 'INVALID_FEISHU_BARK_PAYLOAD');
+  }
+  const debotUrls = [...new Set((Array.isArray(body.debotUrls) ? body.debotUrls : []).map((value) => (
+    cleanInternalText(value, 'DeBot URL', 500)
+  )))];
+  if (debotUrls.length > 8 || debotUrls.some((value) => !/^https:\/\/debot\.ai\/token\/(robinhood|bsc|base|solana)\/289942_/i.test(value))) {
+    throw new HttpError(400, 'debotUrls contains an unsupported URL', 'INVALID_FEISHU_BARK_PAYLOAD');
+  }
+  const messageUrl = body.messageUrl ? cleanInternalText(body.messageUrl, 'messageUrl', 1_000) : '';
+  if (messageUrl && !/^https:\/\/applink\.feishu\.cn\//i.test(messageUrl)) {
+    throw new HttpError(400, 'messageUrl must be a Feishu URL', 'INVALID_FEISHU_BARK_PAYLOAD');
+  }
+  return {
+    personName: cleanInternalText(body.personName, 'personName', 120),
+    sourceName: cleanInternalText(body.sourceName, 'sourceName', 160),
+    text: typeof body.text === 'string' ? body.text.slice(0, 2_000) : '',
+    contractAddresses,
+    contractChains: normalizedChains,
+    debotUrls,
+    messageUrl
+  };
+}
+
+async function handleInternalFeishuBark(req, res, url, monitor, token) {
+  if (url.pathname !== '/internal/feishu-bark') return false;
+  if (req.method !== 'POST') methodNotAllowed(['POST']);
+  if (!internalTokenMatches(req, token)) throw new HttpError(401, 'Unauthorized', 'UNAUTHORIZED');
+  if (!monitor?.notifyFeishuMessage) throw new HttpError(503, 'Bark notifications are unavailable', 'BARK_UNAVAILABLE');
+  const delivery = await monitor.notifyFeishuMessage(feishuBarkPayload(await readJson(req, 16 * 1024)));
+  sendJson(res, 200, { ok: true, delivery });
+  return true;
+}
+
 function summaryView(params) {
   return params.get('view') === 'summary';
 }
@@ -790,6 +836,7 @@ export function createRobinhoodStandaloneServer({
   addressCodec = DEFAULT_ADDRESS_CODEC,
   extraApiHandler = null,
   telegramBarkToken = '',
+  feishuBarkToken = '',
   servePublic = true
 }) {
   const normalizedApiPrefix = `/${String(apiPrefix || '/api/robinhood').replace(/^\/+|\/+$/g, '')}`;
@@ -800,6 +847,7 @@ export function createRobinhoodStandaloneServer({
     try {
       const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
       if (await handleInternalTelegramBark(req, res, url, monitor, telegramBarkToken)) return;
+      if (await handleInternalFeishuBark(req, res, url, monitor, feishuBarkToken)) return;
       if (typeof extraApiHandler === 'function' && await extraApiHandler(req, res, url)) return;
       if (socialApiHandler && await socialApiHandler(req, res, url)) return;
       if (url.pathname === normalizedApiPrefix || url.pathname.startsWith(`${normalizedApiPrefix}/`)) {
@@ -985,6 +1033,7 @@ export async function startRobinhoodStandaloneServer(
     socialService,
     socialBridgeToken: socialConfig.bridgeToken,
     telegramBarkToken: env.TELEGRAM_BARK_INTERNAL_TOKEN || '',
+    feishuBarkToken: env.FEISHU_BARK_INTERNAL_TOKEN || '',
     publicDir: env.ROBINHOOD_PUBLIC_DIR || path.resolve('public')
   });
   const host = env.HOST || '127.0.0.1';

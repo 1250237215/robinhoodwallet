@@ -71,6 +71,9 @@ test('release staging is complete, checksummed, and reproducible', (t) => {
     'bsc.env.example',
     'bootstrap-host.sh',
     'Caddyfile.example',
+    'feishu-monitor.service',
+    'feishu.env.example',
+    'feishu.tar.gz',
     'install-remote.sh',
     'public.tar.gz',
     'robinhood-radar.service',
@@ -118,5 +121,18 @@ test('release staging is complete, checksummed, and reproducible', (t) => {
   assert.equal(telegramEntries.every((name) => (
     ['README.md', 'forwarder.py', 'requirements.txt', 'viewer.py', 'web/'].includes(name)
       || name.startsWith('web/')
+  )), true);
+
+  const feishuArchive = spawnSync('tar', ['-tzf', path.join(first, 'feishu.tar.gz')], {
+    encoding: 'utf8'
+  });
+  assert.equal(feishuArchive.status, 0, feishuArchive.stderr);
+  const feishuEntries = feishuArchive.stdout.trim().split('\n');
+  assert.ok(feishuEntries.includes('package.json'));
+  assert.ok(feishuEntries.includes('src/server.js'));
+  assert.ok(feishuEntries.includes('src/ca-watch.js'));
+  assert.equal(feishuEntries.some((name) => /(?:test\/|public\/|node_modules|\.lark-cli|config\.json|\.sqlite|ca-watch\.json)/.test(name)), false);
+  assert.equal(feishuEntries.every((name) => (
+    ['README.md', 'package.json', 'src/'].includes(name) || name.startsWith('src/')
   )), true);
 });

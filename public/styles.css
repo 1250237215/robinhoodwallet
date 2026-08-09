@@ -2887,15 +2887,96 @@ select:hover {
   margin-top: 10px;
 }
 
+.chat-monitor-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  align-items: start;
+  margin-top: 10px;
+}
+
 .telegram-monitor-panel {
   min-width: 0;
-  margin-top: 10px;
+  margin-top: 0;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: var(--shadow);
 }
+
+.feishu-person-filter-label {
+  min-width: 0;
+  margin-left: auto;
+}
+
+.feishu-person-filter-label select {
+  width: min(116px, 18vw);
+  min-width: 76px;
+  height: 28px;
+  padding: 0 22px 0 7px;
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  border-radius: 4px;
+  outline: 0;
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+  font-size: 9px;
+}
+
+.feishu-person-filter-label select option {
+  color: #17212b;
+}
+
+.feishu-chat-bar time {
+  margin-left: 0;
+}
+
+.feishu-source-avatar {
+  background: #3370ff;
+}
+
+.feishu-message-feed {
+  background-color: #c7ddf7;
+}
+
+.feishu-message-footer {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 3px;
+  padding-right: 20px;
+  color: #78909d;
+  font-size: 8px;
+}
+
+.feishu-message-footer .telegram-message-time {
+  margin-top: 0;
+}
+
+.feishu-message-link {
+  position: absolute;
+  right: 7px;
+  bottom: 5px;
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: #4f7fa2;
+}
+
+.feishu-message-link svg {
+  width: 11px;
+  height: 11px;
+}
+
+.feishu-monitor-panel .telegram-avatar[data-accent="coral"] { background: #dc665c; }
+.feishu-monitor-panel .telegram-avatar[data-accent="cyan"] { background: #278ea5; }
+.feishu-monitor-panel .telegram-avatar[data-accent="gold"] { background: #a97918; }
+.feishu-monitor-panel .telegram-avatar[data-accent="green"] { background: #37805a; }
+.feishu-monitor-panel .telegram-avatar[data-accent="violet"] { background: #765ab4; }
+.feishu-monitor-panel .telegram-avatar[data-accent="blue"] { background: #3370ff; }
 
 .telegram-monitor-head {
   min-height: 58px;
@@ -6483,6 +6564,10 @@ button.telegram-reply {
 
   .monitor-workspace {
     gap: 10px;
+  }
+
+  .chat-monitor-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .telegram-monitor-title-line {

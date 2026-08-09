@@ -50,10 +50,11 @@ fi
 
 install -d -o root -g root -m 0755 "$app_dir" "$app_dir/public"
 install -d -o "$service_user" -g "$service_group" -m 0750 "$data_dir"
+install -d -o "$service_user" -g "$service_group" -m 0750 "$data_dir/feishu"
 install -d -o root -g root -m 0700 "$backup_dir"
 install -d -o root -g "$service_group" -m 0750 "$config_dir"
 
-for name in robinhood base bsc solana social telegram translation; do
+for name in robinhood base bsc solana social telegram feishu translation; do
   example="$script_dir/$name.env.example"
   destination="$config_dir/$name.env"
   [[ -f "$example" ]] || fail "missing environment template: $example"

@@ -1,0 +1,32 @@
+[Unit]
+Description=1874catch Feishu Real-Time Monitor
+After=network-online.target robinhood-radar.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=robinhood-radar
+Group=robinhood-radar
+WorkingDirectory=/opt/robinhood-radar/feishu
+Environment=NODE_ENV=production
+Environment=HOME=/var/lib/robinhood-radar/feishu
+Environment=HOST=127.0.0.1
+Environment=PORT=18124
+Environment=POLL_MS=2000
+Environment=LARK_CLI=/usr/local/bin/lark-cli
+Environment=FEISHU_RUNTIME_DIR=/var/lib/robinhood-radar/feishu
+Environment=FEISHU_BARK_INTERNAL_URL=http://127.0.0.1:18118/internal/feishu-bark
+EnvironmentFile=-/etc/robinhood-radar/feishu.env
+ExecStart=/usr/bin/env node /opt/robinhood-radar/feishu/src/server.js
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/robinhood-radar/feishu
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
