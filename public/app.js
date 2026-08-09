@@ -477,6 +477,8 @@ const state = {
   monitorTransport: 'idle',
   monitorConnected: false,
   monitorSettingsLoaded: false,
+  monitorSettingsDirty: false,
+  monitorSettingsSaving: false,
   monitorEnabled: true,
   monitorThreshold: 3,
   monitorWindowSeconds: 60,
@@ -3339,9 +3341,11 @@ async function saveMonitorNote(event) {
 }
 
 function renderMonitorPage() {
-  elements.monitorThreshold.value = String(state.monitorThreshold);
-  elements.monitorWindowSeconds.value = String(state.monitorWindowSeconds);
-  elements.monitorEnabled.checked = state.monitorEnabled;
+  if (!state.monitorSettingsDirty && !state.monitorSettingsSaving) {
+    elements.monitorThreshold.value = String(state.monitorThreshold);
+    elements.monitorWindowSeconds.value = String(state.monitorWindowSeconds);
+    elements.monitorEnabled.checked = state.monitorEnabled;
+  }
   elements.monitorSoundSelect.value = state.monitorSound;
   elements.monitorVolume.value = String(state.monitorVolume);
   elements.monitorVolumeOutput.textContent = `${state.monitorVolume}%`;
@@ -4527,6 +4531,8 @@ async function saveMonitorSettings(event) {
   state.monitorThreshold = threshold;
   state.monitorWindowSeconds = windowSeconds;
   state.monitorEnabled = enabled;
+  state.monitorSettingsDirty = false;
+  state.monitorSettingsSaving = true;
   elements.monitorThreshold.value = String(threshold);
   elements.monitorWindowSeconds.value = String(windowSeconds);
   storeMonitorThreshold(threshold);
@@ -4540,12 +4546,23 @@ async function saveMonitorSettings(event) {
     });
     if (!chainRequestIsCurrent(context)) return;
     applyMonitorPayload(payload, { initial: true });
+    state.monitorSettingsSaving = false;
+    renderMonitorPage();
     showToast(`提醒设置已保存：${formatMonitorWindowDuration(windowSeconds)}内 ${threshold} 个地址`);
   } catch (error) {
     if (!chainRequestIsCurrent(context)) return;
+    state.monitorThreshold = threshold;
+    state.monitorWindowSeconds = windowSeconds;
+    state.monitorEnabled = enabled;
+    state.monitorSettingsSaving = false;
+    state.monitorSettingsDirty = true;
+    renderMonitorPage();
     showToast(`服务端保存失败，已保存在本机：${error.message}`, 'error');
   } finally {
-    if (chainRequestIsCurrent(context)) elements.monitorSaveButton.disabled = false;
+    if (chainRequestIsCurrent(context)) {
+      state.monitorSettingsSaving = false;
+      elements.monitorSaveButton.disabled = false;
+    }
   }
 }
 
@@ -7345,6 +7362,8 @@ function resetChainState({ preserveMonitorFeed = false } = {}) {
   state.monitorThreshold = readStoredMonitorThreshold();
   state.monitorWindowSeconds = 60;
   state.monitorSettingsLoaded = false;
+  state.monitorSettingsDirty = false;
+  state.monitorSettingsSaving = false;
   state.monitorEnabled = true;
   state.monitorSound = 'alarm';
   state.monitorVolume = 70;
@@ -7543,6 +7562,11 @@ elements.walletMonitorRules.addEventListener('change', enforceWalletMonitorRuleD
 elements.walletEditorClose.addEventListener('click', () => elements.walletEditor.close());
 elements.walletEditorExclude.addEventListener('click', () => void excludeEditedWallet());
 elements.monitorSettingsForm.addEventListener('submit', saveMonitorSettings);
+elements.monitorSettingsForm.addEventListener('input', (event) => {
+  if (event.target.matches('#monitor-threshold, #monitor-window-seconds, #monitor-enabled')) {
+    state.monitorSettingsDirty = true;
+  }
+});
 elements.monitorSoundSettingsForm.addEventListener('submit', saveMonitorSoundSettings);
 elements.monitorBarkSettingsForm.addEventListener('submit', saveBarkSoundSettings);
 elements.monitorSoundSelect.addEventListener('change', () => {

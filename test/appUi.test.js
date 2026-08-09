@@ -1071,6 +1071,24 @@ test('all API reads and writes use an immutable abortable chain context', () => 
   }
 });
 
+test('live monitor refreshes preserve an unsaved settings draft', () => {
+  const renderSource = appSourceBetween('function renderMonitorPage()', 'function setMonitorMutationControlsDisabled');
+  assert.match(renderSource, /if \(!state\.monitorSettingsDirty && !state\.monitorSettingsSaving\)/);
+  assert.match(renderSource, /elements\.monitorThreshold\.value = String\(state\.monitorThreshold\)/);
+  assert.match(renderSource, /elements\.monitorWindowSeconds\.value = String\(state\.monitorWindowSeconds\)/);
+  assert.match(renderSource, /elements\.monitorEnabled\.checked = state\.monitorEnabled/);
+
+  const saveSource = appSourceBetween('async function saveMonitorSettings', 'function currentMinimumEntryUsd');
+  assert.match(saveSource, /state\.monitorSettingsSaving = true/);
+  assert.match(saveSource, /state\.monitorSettingsSaving = false;\s+renderMonitorPage\(\)/);
+  assert.match(saveSource, /state\.monitorSettingsDirty = true;\s+renderMonitorPage\(\)/);
+
+  assert.match(appJs, /elements\.monitorSettingsForm\.addEventListener\('input',[\s\S]*state\.monitorSettingsDirty = true/);
+  const resetSource = appSourceBetween('function resetChainState', 'function switchChain');
+  assert.match(resetSource, /state\.monitorSettingsDirty = false/);
+  assert.match(resetSource, /state\.monitorSettingsSaving = false/);
+});
+
 test('DeBot and explorer links use the active chain for research and each event chain for the mixed monitor feed', () => {
   for (const [chain, debotAddress, debotToken, manager, explorer] of [
     ['robinhood', 'https://debot.ai/address/robinhood', 'https://debot.ai/token/robinhood/289942_', 'https://debot.ai/track?chain=robinhood&tab=manager', 'https://robinhoodchain.blockscout.com'],
