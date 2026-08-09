@@ -93,6 +93,20 @@ function telegramBarkPayload(body) {
   const contractAddresses = [...new Set(body.contractAddresses.map((value) => (
     cleanInternalText(value, 'contract address', 100)
   )))];
+  const contractChains = body.contractChains === undefined
+    ? contractAddresses.map(() => 'unknown')
+    : body.contractChains;
+  if (!Array.isArray(contractChains) || contractChains.length !== contractAddresses.length) {
+    throw new HttpError(400, 'contractChains must match contractAddresses', 'INVALID_TELEGRAM_BARK_PAYLOAD');
+  }
+  const normalizedContractChains = contractChains.map((value) => (
+    cleanInternalText(value, 'contract chain', 20).toLowerCase()
+  ));
+  if (normalizedContractChains.some((value) => (
+    !['robinhood', 'bsc', 'base', 'solana', 'unknown', 'multiple'].includes(value)
+  ))) {
+    throw new HttpError(400, 'contractChains contains an unsupported chain', 'INVALID_TELEGRAM_BARK_PAYLOAD');
+  }
   const debotUrls = body.debotUrls === undefined ? [] : body.debotUrls;
   if (!Array.isArray(debotUrls) || debotUrls.length > 8) {
     throw new HttpError(400, 'debotUrls must contain 0 to 8 entries', 'INVALID_TELEGRAM_BARK_PAYLOAD');
@@ -101,8 +115,21 @@ function telegramBarkPayload(body) {
     cleanInternalText(value, 'DeBot URL', 500)
   )))];
   for (const debotUrl of normalizedDebotUrls) {
-    if (!/^https:\/\/debot\.ai\/token\/(?:robinhood|solana)\/289942_/i.test(debotUrl)) {
+    const match = debotUrl.match(
+      /^https:\/\/debot\.ai\/token\/(robinhood|bsc|base|solana)\/289942_(.+)$/i
+    );
+    if (!match) {
       throw new HttpError(400, 'debotUrls must be DeBot token URLs', 'INVALID_TELEGRAM_BARK_PAYLOAD');
+    }
+    const urlChain = match[1].toLowerCase();
+    const urlAddress = match[2];
+    const addressIndex = contractAddresses.findIndex((address) => (
+      urlChain === 'solana'
+        ? address === urlAddress
+        : address.toLowerCase() === urlAddress.toLowerCase()
+    ));
+    if (addressIndex < 0 || normalizedContractChains[addressIndex] !== urlChain) {
+      throw new HttpError(400, 'DeBot URL does not match its contract chain', 'INVALID_TELEGRAM_BARK_PAYLOAD');
     }
   }
   const messageUrl = body.messageUrl === undefined || body.messageUrl === ''
@@ -120,6 +147,7 @@ function telegramBarkPayload(body) {
     chatName: cleanInternalText(body.chatName, 'chatName', 120),
     text: typeof body.text === 'string' ? body.text.slice(0, 2_000) : '',
     contractAddresses,
+    contractChains: normalizedContractChains,
     debotUrls: normalizedDebotUrls,
     messageUrl
   };

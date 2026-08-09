@@ -24,6 +24,7 @@ from viewer import (
     filter_allowed_dialogs,
     initialize_translation_resolver,
     parse_blocked_chat_ids,
+    resolve_debot_token_urls,
     translate_text_to_chinese,
 )
 
@@ -44,6 +45,45 @@ class FakeDialog:
 
 
 class ViewerUtilityTests(unittest.TestCase):
+    def test_evm_contract_chain_resolution_builds_only_the_confirmed_bsc_link(self):
+        address = "0xe9d476ce8ba9431a6c1ae39c00e84dab5c717777"
+        chains = {
+            "robinhood": {"rpc_url": "rpc://robinhood", "debot_root": "https://debot.ai/token/robinhood/289942_"},
+            "bsc": {"rpc_url": "rpc://bsc", "debot_root": "https://debot.ai/token/bsc/289942_"},
+            "base": {"rpc_url": "rpc://base", "debot_root": "https://debot.ai/token/base/289942_"},
+        }
+
+        def probe(_address, rpc_url, _timeout):
+            return rpc_url == "rpc://bsc"
+
+        urls, resolved = asyncio.run(resolve_debot_token_urls(
+            [address],
+            chains=chains,
+            timeout=0.25,
+            probe=probe,
+        ))
+        self.assertEqual(resolved, ["bsc"])
+        self.assertEqual(
+            urls,
+            [f"https://debot.ai/token/bsc/289942_{address}"],
+        )
+
+    def test_unresolved_or_multi_chain_evm_contract_never_defaults_to_robinhood(self):
+        address = "0x" + ("a" * 40)
+        chains = {
+            "robinhood": {"rpc_url": "rpc://robinhood", "debot_root": "https://debot.ai/token/robinhood/289942_"},
+            "bsc": {"rpc_url": "rpc://bsc", "debot_root": "https://debot.ai/token/bsc/289942_"},
+        }
+
+        unknown_urls, unknown_chains = asyncio.run(resolve_debot_token_urls(
+            [address], chains=chains, probe=lambda *_args: None,
+        ))
+        multi_urls, multi_chains = asyncio.run(resolve_debot_token_urls(
+            [address], chains=chains, probe=lambda *_args: True,
+        ))
+        self.assertEqual((unknown_urls, unknown_chains), ([], ["unknown"]))
+        self.assertEqual((multi_urls, multi_chains), ([], ["multiple"]))
+
     def test_default_translation_retry_policy_matches_shared_environment(self):
         self.assertEqual(TRANSLATION_MAX_ATTEMPTS, 2)
         self.assertEqual(TRANSLATION_RETRY_DELAYS_SECONDS, (0.0, 0.2))
@@ -608,6 +648,13 @@ class ViewerUtilityTests(unittest.TestCase):
                 store=store,
                 internal_url="http://127.0.0.1/internal/telegram-bark",
                 internal_token="x" * 32,
+                debot_resolver=lambda addresses: asyncio.sleep(
+                    0,
+                    result=(
+                        ["https://debot.ai/token/bsc/289942_" + addresses[0]],
+                        ["bsc"],
+                    ),
+                ),
             )
             sent = []
 
@@ -638,6 +685,11 @@ class ViewerUtilityTests(unittest.TestCase):
         self.assertFalse(duplicate)
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0]["senderId"], 42)
+        self.assertEqual(sent[0]["contractChains"], ["bsc"])
+        self.assertEqual(
+            sent[0]["debotUrls"],
+            ["https://debot.ai/token/bsc/289942_0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+        )
         self.assertEqual(snapshot["latest_delivery"]["status"], "sent")
 
     def test_social_channel_alert_uses_channel_selection_without_sender_rules(self):
@@ -710,6 +762,7 @@ class ViewerUtilityTests(unittest.TestCase):
                 "63zfjPfH4uaX3TQZoD35WqUrqiuCQQWndMTxQHsJpump"
             ],
         )
+        self.assertEqual(sent[0]["contractChains"], ["solana"])
         self.assertEqual(snapshot["latest_delivery"]["status"], "sent")
 
 

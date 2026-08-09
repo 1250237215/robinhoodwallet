@@ -133,6 +133,35 @@ CA_ALERT_PINNED_CHAT_NAME = os.environ.get(
     "TG_PINNED_CHAT_NAME",
     "LazyCat FNF",
 ).strip()
+CA_ALERT_CHAIN_DETECTION_TIMEOUT_SECONDS = bounded_environment_number(
+    "TG_CA_CHAIN_DETECTION_TIMEOUT_MS",
+    1200,
+    250,
+    5000,
+) / 1000
+CA_ALERT_EVM_CHAINS = OrderedDict((
+    ("robinhood", {
+        "rpc_url": os.environ.get(
+            "TG_CA_ROBINHOOD_RPC_URL",
+            "https://rpc.mainnet.chain.robinhood.com",
+        ).strip(),
+        "debot_root": "https://debot.ai/token/robinhood/289942_",
+    }),
+    ("bsc", {
+        "rpc_url": os.environ.get(
+            "TG_CA_BSC_RPC_URL",
+            "https://bsc-mainnet.public.blastapi.io",
+        ).strip(),
+        "debot_root": "https://debot.ai/token/bsc/289942_",
+    }),
+    ("base", {
+        "rpc_url": os.environ.get(
+            "TG_CA_BASE_RPC_URL",
+            "https://mainnet.base.org",
+        ).strip(),
+        "debot_root": "https://debot.ai/token/base/289942_",
+    }),
+))
 EVM_CA_PATTERN = re.compile(
     r"(?<![0-9A-Fa-f])0x[0-9A-Fa-f]{40}(?![0-9A-Fa-f])"
 )
@@ -842,22 +871,81 @@ def extract_contract_addresses(text, limit=CA_ALERT_ADDRESS_LIMIT):
     return [value for _, value in matches[: max(1, int(limit))]]
 
 
-def debot_token_urls(addresses):
-    """Build DeBot token pages for CA values detected in Telegram text."""
+def _evm_contract_exists(address, rpc_url, timeout, opener=urlopen):
+    """Return True/False for a valid RPC result and None when RPC is unavailable."""
+    body = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_getCode",
+        "params": [address, "latest"],
+    }, separators=(",", ":")).encode("utf-8")
+    request = Request(
+        rpc_url,
+        data=body,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "1874catch-telegram-ca/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=timeout) as response:
+            raw = response.read(256 * 1024)
+        payload = json.loads(raw.decode("utf-8"))
+        code = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(code, str) or not re.fullmatch(r"0x[0-9a-fA-F]*", code):
+            return None
+        return code.lower() not in {"0x", "0x0", "0x00"}
+    except (HTTPError, URLError, TimeoutError, socket.timeout, ValueError):
+        return None
+
+
+async def resolve_debot_token_urls(
+    addresses,
+    chains=None,
+    timeout=CA_ALERT_CHAIN_DETECTION_TIMEOUT_SECONDS,
+    probe=_evm_contract_exists,
+):
+    """Resolve each Telegram CA to a chain before building a DeBot token URL."""
+    chain_profiles = chains or CA_ALERT_EVM_CHAINS
     urls = []
     seen = set()
+    resolved_chains = []
     for address in addresses or []:
         value = str(address or "").strip()
         if not value:
             continue
         if value.lower().startswith("0x"):
-            url = f"https://debot.ai/token/robinhood/289942_{value.lower()}"
+            normalized = value.lower()
+            results = await asyncio.gather(*(
+                asyncio.to_thread(
+                    probe,
+                    normalized,
+                    profile["rpc_url"],
+                    timeout,
+                )
+                for profile in chain_profiles.values()
+            ))
+            matches = [
+                chain
+                for chain, exists in zip(chain_profiles.keys(), results)
+                if exists is True
+            ]
+            if len(matches) == 1:
+                chain = matches[0]
+                url = f"{chain_profiles[chain]['debot_root']}{normalized}"
+            else:
+                chain = "multiple" if len(matches) > 1 else "unknown"
+                url = ""
         else:
+            chain = "solana"
             url = f"https://debot.ai/token/solana/289942_{value}"
-        if url not in seen:
+        resolved_chains.append(chain)
+        if url and url not in seen:
             urls.append(url)
             seen.add(url)
-    return urls[: max(1, int(CA_ALERT_ADDRESS_LIMIT))]
+    return urls[: max(1, int(CA_ALERT_ADDRESS_LIMIT))], resolved_chains
 
 
 class TelegramCaAlertStore:
@@ -2772,6 +2860,7 @@ class TelegramCaAlertService:
         store=None,
         internal_url=CA_ALERT_INTERNAL_URL,
         internal_token=CA_ALERT_INTERNAL_TOKEN,
+        debot_resolver=None,
     ):
         self.dialog = dialog
         self.chat_id = int(dialog.id)
@@ -2783,6 +2872,7 @@ class TelegramCaAlertService:
         self.store = store or TelegramCaAlertStore()
         self.internal_url = str(internal_url or "").strip()
         self.internal_token = str(internal_token or "").strip()
+        self.debot_resolver = debot_resolver or resolve_debot_token_urls
         self.delivery_tasks = set()
 
     @property
@@ -2849,6 +2939,13 @@ class TelegramCaAlertService:
             return ""
         return f"https://t.me/{self.chat_username}/{int(message_id)}"
 
+    async def _resolve_contracts(self, addresses):
+        try:
+            return await self.debot_resolver(addresses)
+        except Exception:
+            logging.warning("Telegram CA 链识别失败，已按链待确认继续推送")
+            return [], ["unknown"] * len(addresses)
+
     async def handle_new_message(self, message):
         chat_id = getattr(message, "chat_id", None)
         sender_id = getattr(message, "sender_id", None)
@@ -2881,6 +2978,7 @@ class TelegramCaAlertService:
         ):
             return False
 
+        debot_urls, contract_chains = await self._resolve_contracts(addresses)
         payload = {
             "chatId": self.chat_id,
             "messageId": int(message_id),
@@ -2890,7 +2988,8 @@ class TelegramCaAlertService:
             "chatName": self.chat_name,
             "text": text,
             "contractAddresses": addresses,
-            "debotUrls": debot_token_urls(addresses),
+            "debotUrls": debot_urls,
+            "contractChains": contract_chains,
             "messageUrl": self._message_url(message_id),
         }
         task = asyncio.create_task(self._deliver(stream_id, payload))
@@ -3016,6 +3115,7 @@ class TelegramSocialCaAlertService(TelegramCaAlertService):
         avatar = await self.avatar_resolver.info_for_message(message, dialog.entity)
         chat_name = str(dialog.name or "Telegram")
         chat_username = str(getattr(dialog.entity, "username", None) or "").lstrip("@")
+        debot_urls, contract_chains = await self._resolve_contracts(addresses)
         payload = {
             "chatId": int(chat_id),
             "messageId": int(message_id),
@@ -3025,7 +3125,8 @@ class TelegramSocialCaAlertService(TelegramCaAlertService):
             "chatName": chat_name,
             "text": text,
             "contractAddresses": addresses,
-            "debotUrls": debot_token_urls(addresses),
+            "debotUrls": debot_urls,
+            "contractChains": contract_chains,
             "messageUrl": f"https://t.me/{chat_username}/{int(message_id)}" if chat_username else "",
         }
         task = asyncio.create_task(self._deliver(stream_id, payload))

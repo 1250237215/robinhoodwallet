@@ -258,6 +258,7 @@ export class RobinhoodBarkNotifier {
     chatName = 'Telegram',
     text = '',
     contractAddresses = [],
+    contractChains = [],
     debotUrls = [],
     messageUrl = '',
     sound = 'alarm',
@@ -273,7 +274,22 @@ export class RobinhoodBarkNotifier {
     const normalizedSender = cleanLabel(senderName, 'Telegram');
     const normalizedChat = cleanLabel(chatName, 'Telegram');
     const normalizedText = String(text || '').replace(/\s+/g, ' ').trim();
-    const addressSummary = addresses.join(' · ');
+    const chainLabels = {
+      robinhood: 'Robinhood',
+      bsc: 'BSC',
+      base: 'Base',
+      solana: 'Solana',
+      multiple: '多链待确认',
+      unknown: '链待确认'
+    };
+    const normalizedChains = addresses.map((_, index) => {
+      const value = Array.isArray(contractChains) ? contractChains[index] : '';
+      const chain = String(value || '').toLowerCase();
+      return chainLabels[chain] ? chain : 'unknown';
+    });
+    const addressSummary = addresses.map((address, index) => (
+      `${chainLabels[normalizedChains[index]]}：${address}`
+    )).join('\n');
     const normalizedDebotUrls = [...new Set(
       (Array.isArray(debotUrls) ? debotUrls : [])
         .map((url) => String(url || '').trim())

@@ -152,7 +152,8 @@ test('sends Telegram CA alerts to enabled targets in a separate Bark group', asy
     chatName: 'LazyCat FNF',
     text: 'new launch 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     contractAddresses: ['0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
-    debotUrls: ['https://debot.ai/token/robinhood/289942_0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+    contractChains: ['bsc'],
+    debotUrls: ['https://debot.ai/token/bsc/289942_0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
     messageUrl: 'https://t.me/lazycat/7',
     sound: 'chime',
     volume: 7
@@ -165,8 +166,9 @@ test('sends Telegram CA alerts to enabled targets in a separate Bark group', asy
   assert.equal(requests[0].searchParams.get('group'), 'Telegram CA 监控');
   assert.equal(requests[0].searchParams.get('sound'), 'chime');
   assert.equal(requests[0].searchParams.get('volume'), '7');
-  assert.equal(requests[0].searchParams.get('url'), 'https://debot.ai/token/robinhood/289942_0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
-  assert.match(decodeURIComponent(requests[0].pathname), /debot\.ai\/token\/robinhood\/289942_/);
+  assert.equal(requests[0].searchParams.get('url'), 'https://debot.ai/token/bsc/289942_0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+  assert.match(decodeURIComponent(requests[0].pathname), /BSC：0xaaaaaaaa/);
+  assert.match(decodeURIComponent(requests[0].pathname), /debot\.ai\/token\/bsc\/289942_/);
   store.close();
 });
 

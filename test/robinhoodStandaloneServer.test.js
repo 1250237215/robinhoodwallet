@@ -57,6 +57,8 @@ test('internal Telegram Bark endpoint requires its bearer token and validates pa
       chatName: 'LazyCat FNF',
       text: 'new CA',
       contractAddresses: ['0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+      contractChains: ['bsc'],
+      debotUrls: ['https://debot.ai/token/bsc/289942_0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
       messageUrl: 'https://t.me/lazycat/7'
     };
     const unauthorized = await fetch(`${baseUrl}/internal/telegram-bark`, {
@@ -77,6 +79,16 @@ test('internal Telegram Bark endpoint requires its bearer token and validates pa
     });
     assert.equal(invalid.status, 400);
 
+    const mismatchedChain = await fetch(`${baseUrl}/internal/telegram-bark`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${tokenValue}`,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({ ...payload, contractChains: ['robinhood'] })
+    });
+    assert.equal(mismatchedChain.status, 400);
+
     const response = await fetch(`${baseUrl}/internal/telegram-bark`, {
       method: 'POST',
       headers: {
@@ -92,6 +104,7 @@ test('internal Telegram Bark endpoint requires its bearer token and validates pa
     });
     assert.equal(received.length, 1);
     assert.equal(received[0].streamId, '-1001:7');
+    assert.deepEqual(received[0].contractChains, ['bsc']);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
