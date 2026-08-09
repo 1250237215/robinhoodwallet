@@ -1,0 +1,9 @@
+[Unit]
+Description=Prune 1874catch backups older than 48 hours
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/robinhood-backup-retention
+Nice=10
+IOSchedulingClass=idle

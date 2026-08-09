@@ -11,11 +11,11 @@ const script = fs.readFileSync(scriptUrl, 'utf8');
 const service = fs.readFileSync(serviceUrl, 'utf8');
 const timer = fs.readFileSync(timerUrl, 'utf8');
 
-test('prediction backup retention is syntax-valid and restricted to 48-hour JSON snapshots', () => {
+test('prediction backup cleanup is syntax-valid and restricted to short-lived JSON snapshots', () => {
   const syntax = spawnSync('bash', ['-n', fileURLToPath(scriptUrl)], { encoding: 'utf8' });
   assert.equal(syntax.status, 0, `${syntax.stdout}${syntax.stderr}`);
 
-  assert.match(script, /readonly retention_minutes=2880/);
+  assert.match(script, /DQDAI_PREDICTION_BACKUP_RETENTION_MINUTES:-15/);
   assert.match(script, /\/opt\/dqdai-1\/site\/assets\/prediction_backups/);
   assert.match(script, /\/opt\/dqdai-2\/site\/assets\/prediction_backups/);
   assert.match(script, /\/opt\/dqdai-3\/site\/assets\/prediction_backups/);
@@ -26,12 +26,12 @@ test('prediction backup retention is syntax-valid and restricted to 48-hour JSON
   assert.doesNotMatch(script, /-name 'all_predictions\.json'/);
 });
 
-test('prediction backup retention runs hourly as a low-priority persistent timer', () => {
+test('prediction backup cleanup runs every ten minutes as a low-priority persistent timer', () => {
   assert.match(service, /Type=oneshot/);
   assert.match(service, /ExecStart=\/usr\/local\/sbin\/dqdai-prediction-backup-retention/);
   assert.match(service, /Nice=10/);
   assert.match(service, /IOSchedulingClass=idle/);
-  assert.match(timer, /OnUnitActiveSec=1h/);
+  assert.match(timer, /OnCalendar=\*-\*-\* \*:0\/10:00/);
   assert.match(timer, /Persistent=true/);
   assert.match(timer, /Unit=dqdai-prediction-backup-retention\.service/);
   assert.match(timer, /WantedBy=timers\.target/);

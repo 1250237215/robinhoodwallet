@@ -1,9 +1,8 @@
 [Unit]
-Description=Run DQD AI prediction snapshot retention hourly
+Description=Run DQD AI prediction snapshot cleanup every 10 minutes
 
 [Timer]
-OnBootSec=10min
-OnUnitActiveSec=1h
+OnCalendar=*-*-* *:0/10:00
 AccuracySec=1min
 RandomizedDelaySec=5min
 Persistent=true

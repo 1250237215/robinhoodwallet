@@ -1,5 +1,5 @@
 [Unit]
-Description=Prune DQD AI prediction snapshots older than 48 hours
+Description=Prune short-lived DQD AI prediction write snapshots
 After=local-fs.target
 
 [Service]

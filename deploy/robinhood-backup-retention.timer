@@ -1,0 +1,12 @@
+[Unit]
+Description=Run 1874catch backup retention hourly
+
+[Timer]
+OnCalendar=hourly
+AccuracySec=1min
+RandomizedDelaySec=5min
+Persistent=true
+Unit=robinhood-backup-retention.service
+
+[Install]
+WantedBy=timers.target

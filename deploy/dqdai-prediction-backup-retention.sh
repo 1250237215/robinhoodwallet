@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-readonly retention_minutes=2880
+readonly retention_minutes="${DQDAI_PREDICTION_BACKUP_RETENTION_MINUTES:-15}"
 readonly lock_file="${DQDAI_RETENTION_LOCK_FILE:-/run/dqdai-prediction-backup-retention.lock}"
 readonly default_backup_dirs=(
   "/opt/dqdai-1/site/assets/prediction_backups"
@@ -14,6 +14,11 @@ backup_dirs=("${default_backup_dirs[@]}")
 if [[ -n "${DQDAI_PREDICTION_BACKUP_DIRS:-}" ]]; then
   IFS=: read -r -a backup_dirs <<< "$DQDAI_PREDICTION_BACKUP_DIRS"
 fi
+
+[[ "$retention_minutes" =~ ^[1-9][0-9]*$ ]] || {
+  echo "DQDAI_PREDICTION_BACKUP_RETENTION_MINUTES must be a positive integer." >&2
+  exit 1
+}
 
 install -d -m 0755 "$(dirname "$lock_file")"
 exec 9>"$lock_file"

@@ -330,10 +330,13 @@ marked partial.
   database, the shared Robinhood/BSC address database, the shared Bark database,
   and all service units. It verifies the complete checksum manifest before
   stopping a service.
+- `deploy/robinhood-backup-retention.sh` keeps ordinary VPS database and release
+  backups for 48 hours while permanently excluding explicitly named `stable-*`
+  snapshots. Its service and persistent hourly timer are installed separately.
 - `deploy/dqdai-prediction-backup-retention.sh` is installed separately with its
-  service and hourly timer. It deletes only `all_predictions-*.json` snapshots in
-  the three DQD AI backup directories after 48 hours; current prediction data and
-  website files are outside its match scope.
+  service and ten-minute timer. It deletes only `all_predictions-*.json` write
+  snapshots after 15 minutes; current prediction data and website files are
+  outside its match scope.
 - `deploy/Caddyfile.example` contains the prefix-based reverse proxy used by the
   radar URL. Set `RADAR_SITE_ADDRESS` and `RADAR_CANONICAL_ORIGIN` in the Caddy
   service environment. An optional legacy site can redirect to the canonical
