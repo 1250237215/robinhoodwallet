@@ -45,14 +45,20 @@ test('extracts each monitored speaker with the correct source rule', () => {
   assert.equal(laserMessages.get('mrdq')[0].content, '有孩哥真好');
 
   const jinwaMessages = extractMessages(
-    [byId.get('chenpepe')],
+    [byId.get('chenpepe'), byId.get('0xace')],
     [
       raw({ message_id: 'chenpepe', content: '0x1cd9dc24e2d2becfe09aa326fea14319f6a47777' }),
+      raw({ message_id: '0xace', content: '【0xace（尊师陈皮皮）】：\n这个好歹是个专有词' }),
+      raw({ message_id: '0xace-quoted', content: '这是应用啊\n\n引用 0xace（尊师陈皮皮）：xstocks' }),
       raw({ message_id: 'jinwa-other', content: '【其他人】：\n不应出现' })
     ]
   );
   assert.deepEqual(jinwaMessages.get('chenpepe').map((message) => message.content), [
-    '0x1cd9dc24e2d2becfe09aa326fea14319f6a47777'
+    '0x1cd9dc24e2d2becfe09aa326fea14319f6a47777',
+    '这是应用啊\n\n引用 0xace（尊师陈皮皮）：xstocks'
+  ]);
+  assert.deepEqual(jinwaMessages.get('0xace').map((message) => message.content), [
+    '这个好歹是个专有词'
   ]);
 
   const ownerMessages = extractMessages(

@@ -38,6 +38,7 @@ const mrdq = prefixMatcher('【#144 MrDQ 🐒🦄🔥');
 const cryptoD = quotedSpeakerMatcher('CryptoD');
 const wangXiaoer = quotedSpeakerMatcher('王小二');
 const zeroXSun = quotedSpeakerMatcher('孙嘉良0xSun');
+const zeroXAce = prefixMatcher('【0xace（尊师陈皮皮）');
 const chenpepe = {
   matches(message) {
     const content = String(message.content || '').trim();
@@ -148,6 +149,16 @@ export const PEOPLE = Object.freeze([
     accent: 'green',
     matches: zeroXSun.matches,
     clean: zeroXSun.clean
+  },
+  {
+    id: '0xace',
+    name: '0xAce',
+    shortName: '0A',
+    source: '金蛙聊天群',
+    chatId: JINWA_GROUP_ID,
+    accent: 'blue',
+    matches: zeroXAce.matches,
+    clean: zeroXAce.clean
   }
 ]);
 
