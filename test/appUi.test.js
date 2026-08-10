@@ -1793,6 +1793,19 @@ test('FOMO buy and sell cards show complete trade and market details with valid 
   assert.match(stylesCss, /\.fomo-trade-grid \{[\s\S]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
 });
 
+test('FOMO trade prices preserve meaningful decimals instead of rounding to zero', () => {
+  const source = appSourceBetween('function formatUsdUnitPrice(value)', 'function formatSignedMoney(value)');
+  const formatUsdUnitPrice = Function(
+    'finiteNumber',
+    `${source}\nreturn formatUsdUnitPrice;`
+  )((value) => Number.isFinite(Number(value)) ? Number(value) : null);
+
+  assert.equal(formatUsdUnitPrice(0.00021443122168293441), '$0.00021443122');
+  assert.equal(formatUsdUnitPrice(0.5), '$0.5');
+  assert.equal(formatUsdUnitPrice(0), '$0');
+  assert.match(appJs, /\['成交价', tradePrice === null \? '暂无' : formatUsdUnitPrice\(tradePrice\)\]/);
+});
+
 test('social feed validates and accurately renders relationship and profile activity from snapshots and SSE', () => {
   const eventValidationSource = appJs.slice(
     appJs.indexOf('function socialActivityIdentity'),

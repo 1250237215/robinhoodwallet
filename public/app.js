@@ -839,6 +839,22 @@ function formatMoney(value, currency = 'USD') {
   return `${formatted} ${String(currency || '').toUpperCase()}`.trim();
 }
 
+function formatUsdUnitPrice(value) {
+  const number = finiteNumber(value);
+  if (number === null) return '--';
+  const absolute = Math.abs(number);
+  if (absolute === 0) return '$0';
+  const sign = number < 0 ? '-' : '';
+  const formatted = absolute < 0.00000001
+    ? absolute.toExponential(4)
+    : absolute.toLocaleString('en-US', {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: absolute < 0.01 ? 12 : absolute < 1 ? 8 : 6,
+        maximumSignificantDigits: 8
+      });
+  return `${sign}$${formatted}`;
+}
+
 function formatSignedMoney(value) {
   const number = finiteNumber(value);
   if (number === null) return '--';
@@ -3060,7 +3076,7 @@ function fomoPostMarkup(posts) {
   const tradeMetrics = [
     ['成交金额', tradeUsd === null ? '暂无' : formatMoney(tradeUsd)],
     ['成交数量', tradeAmount === null ? '暂无' : `${formatCompact(tradeAmount)} ${symbol}`],
-    ['成交价', tradePrice === null ? '暂无' : formatMoney(tradePrice)],
+    ['成交价', tradePrice === null ? '暂无' : formatUsdUnitPrice(tradePrice)],
     ['当时市值', marketCap === null ? '暂无' : formatMoney(marketCap)],
     ['24h 成交量', volume24h === null ? '暂无' : formatMoney(volume24h)]
   ].map(([label, value]) => `<div><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`).join('');
