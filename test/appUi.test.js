@@ -785,8 +785,8 @@ test('Lucide powers icon controls and scan controls are accessible', () => {
 });
 
 test('relative static assets and a scoped API root support VPS prefix deployment', () => {
-  assert.match(indexHtml, /href="styles\.css"/);
-  assert.match(indexHtml, /src="app\.js"/);
+  assert.match(indexHtml, /href="styles\.css(?:\?[^\"]+)?"/);
+  assert.match(indexHtml, /src="app\.js(?:\?[^\"]+)?"/);
   assert.equal(appJs.includes("const APP_BASE = /^\\/robinhood-radar(?:\\/|$)/.test(window.location.pathname)"), true);
   assert.match(appJs, /API_ROOT = `\$\{APP_BASE\}\/api\/\$\{chain\.apiPath\}`/);
 });
