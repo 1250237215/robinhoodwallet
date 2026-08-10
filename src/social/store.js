@@ -313,6 +313,7 @@ function postFromRow(row, { hideUnneededTranslations = true } = {}) {
     sourceUpdatedAt: Number(row.source_updated_at),
     deleted: row.deleted_at !== null,
     deletedAt: row.deleted_at === null ? null : Number(row.deleted_at),
+    raw: row.source === 'fomo' ? parseJson(row.raw_json, {}) : undefined,
     storedAt: Number(row.stored_at),
     updatedAt: Number(row.updated_at)
   };
@@ -1440,6 +1441,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
     preserveLocalPreferences = false
   } = {}) {
     const account = normalizeWatchAccount(input);
+    if (account.platform === 'fomo') synced = true;
     const suppliedNote = !preserveLocalPreferences && account._noteProvided
       ? normalizeWatchNote(account.note)
       : '';
@@ -1806,14 +1808,15 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         if (existing.desired_state === 'removed' && existing.sync_status === 'synced') {
           return { entry: watchlistFromRow(existing), command: null, change: null, changed: false };
         }
+        const localOnly = existing.platform === 'fomo';
         db.prepare(`
           UPDATE social_watchlist
-          SET desired_state = 'removed', sync_status = 'pending', last_error = '', updated_at = ?
+          SET desired_state = 'removed', sync_status = ?, last_synced_at = ?, last_error = '', updated_at = ?
           WHERE id = ?
-        `).run(timestamp, numericId);
+        `).run(localOnly ? 'synced' : 'pending', localOnly ? timestamp : existing.last_synced_at, timestamp, numericId);
         const row = db.prepare('SELECT * FROM social_watchlist WHERE id = ?').get(numericId);
         const entry = watchlistFromRow(row);
-        const command = queueWatchlistCommand(row, 'watchlist.delete', timestamp);
+        const command = localOnly ? null : queueWatchlistCommand(row, 'watchlist.delete', timestamp);
         const change = recordChange('watchlist.updated', 'watchlist', numericId, entry, timestamp);
         return { entry, command, change, changed: true };
       });

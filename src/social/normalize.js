@@ -8,7 +8,8 @@ const SOURCE_ALIASES = new Map([
   ['binance-square', 'binance'],
   ['binance_square', 'binance'],
   ['binance square', 'binance'],
-  ['debot', 'debot']
+  ['debot', 'debot'],
+  ['fomo', 'fomo']
 ]);
 
 export const SOCIAL_WATCH_EVENT_TYPES = Object.freeze([
@@ -23,9 +24,19 @@ export const SOCIAL_WATCH_EVENT_TYPES = Object.freeze([
   'profile_avatar',
   'profile_bio'
 ]);
+export const FOMO_WATCH_EVENT_TYPES = Object.freeze([
+  'fomo_buy',
+  'fomo_sell',
+  'fomo_swap',
+  'fomo_thesis',
+  'fomo_consensus',
+  'fomo_cash',
+  'fomo_verified'
+]);
 export const SOCIAL_PROFILE_CHANGES = Object.freeze(['name', 'avatar', 'bio']);
 
-const WATCH_EVENT_TYPE_SET = new Set(SOCIAL_WATCH_EVENT_TYPES);
+const ALL_WATCH_EVENT_TYPES = Object.freeze([...SOCIAL_WATCH_EVENT_TYPES, ...FOMO_WATCH_EVENT_TYPES]);
+const WATCH_EVENT_TYPE_SET = new Set(ALL_WATCH_EVENT_TYPES);
 const PROFILE_CHANGE_SET = new Set(SOCIAL_PROFILE_CHANGES);
 const POST_KIND_ALIASES = new Map([
   ['post', 'post'],
@@ -42,7 +53,14 @@ const POST_KIND_ALIASES = new Map([
   ['follow', 'follow'],
   ['tweetuserfollow', 'follow'],
   ['unfollow', 'unfollow'],
-  ['tweetuserunfollow', 'unfollow']
+  ['tweetuserunfollow', 'unfollow'],
+  ['fomobuy', 'fomo_buy'],
+  ['fomosell', 'fomo_sell'],
+  ['fomoswap', 'fomo_swap'],
+  ['fomothesis', 'fomo_thesis'],
+  ['fomoconsensus', 'fomo_consensus'],
+  ['fomocash', 'fomo_cash'],
+  ['fomoverified', 'fomo_verified']
 ]);
 const SOCIAL_ACTIVITY_KINDS = new Set(['follow', 'unfollow']);
 const PROFILE_KIND_ALIASES = new Map([
@@ -157,7 +175,7 @@ export function normalizeWatchEventTypes(value, { defaultAll = false } = {}) {
     }
     requested.add(eventType);
   }
-  return SOCIAL_WATCH_EVENT_TYPES.filter((eventType) => requested.has(eventType));
+  return ALL_WATCH_EVENT_TYPES.filter((eventType) => requested.has(eventType));
 }
 
 export function normalizeProfileChanges(value) {
@@ -724,7 +742,9 @@ export function normalizeWatchAccount(input, { defaultPlatform = 'twitter' } = {
     url: suppliedUrl,
     remoteId: text(firstValue(value, ['remoteId', 'authorId']), 240),
     metadata: value.metadata && typeof value.metadata === 'object' ? value.metadata : {},
-    eventTypes: normalizeWatchEventTypes(eventTypesProvided ? value.eventTypes : undefined, { defaultAll: true }),
+    eventTypes: eventTypesProvided
+      ? normalizeWatchEventTypes(value.eventTypes)
+      : platform === 'fomo' ? [...FOMO_WATCH_EVENT_TYPES] : [...SOCIAL_WATCH_EVENT_TYPES],
     note: noteProvided ? value.note : '',
     caBark: caBarkProvided ? value.caBark : false,
     _eventTypesProvided: eventTypesProvided,

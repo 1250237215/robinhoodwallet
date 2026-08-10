@@ -128,6 +128,7 @@ const SOCIAL_EVENT_TYPES = Object.freeze([
   'profile_name',
   'profile_avatar',
   'profile_bio'
+  ,'fomo_buy', 'fomo_sell', 'fomo_swap', 'fomo_thesis', 'fomo_consensus', 'fomo_cash', 'fomo_verified'
 ]);
 const SOCIAL_EVENT_TYPE_SET = new Set(SOCIAL_EVENT_TYPES);
 const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'quote', 'repost', 'delete', 'follow', 'unfollow', 'profile']);
@@ -143,6 +144,8 @@ const SOCIAL_EVENT_TYPE_LABELS = Object.freeze({
   profile_name: '改名',
   profile_avatar: '换头像',
   profile_bio: '改简介'
+  ,fomo_buy: '买入', fomo_sell: '卖出', fomo_swap: '换仓', fomo_thesis: '观点',
+  fomo_consensus: '共识', fomo_cash: '资金调动', fomo_verified: '官方验证'
 });
 const socialMediaObserver = 'IntersectionObserver' in window
   ? new IntersectionObserver((entries) => {
@@ -404,6 +407,9 @@ const elements = {
   socialWatchlistSummary: document.querySelector('#social-watchlist-summary'),
   socialWatchlistForm: document.querySelector('#social-watchlist-form'),
   socialWatchlistInput: document.querySelector('#social-watchlist-input'),
+  socialWatchlistPlatform: document.querySelector('#social-watchlist-platform'),
+  socialFomoCatalog: document.querySelector('#social-fomo-catalog'),
+  socialFomoResults: document.querySelector('#social-fomo-results'),
   socialWatchlistAdd: document.querySelector('#social-watchlist-add'),
   socialPairingRow: document.querySelector('#social-pairing-row'),
   socialPairingToken: document.querySelector('#social-pairing-token'),
@@ -535,6 +541,7 @@ const state = {
   socialEventEditorMode: 'edit',
   socialEditingWatchlistId: null,
   socialPendingWatchAccounts: [],
+  socialPendingWatchPlatform: 'twitter',
   socialExtensionReady: false,
   socialExtensionWritable: false,
   socialExtensionRequestSequence: 0,
@@ -2749,7 +2756,17 @@ function telegramSocialPostMarkup(message) {
 }
 
 function socialFeedItems() {
-  const socialItems = visibleSocialPosts().map((post) => ({
+  const visiblePosts = visibleSocialPosts();
+  const fomoPosts = visiblePosts.filter((post) => post.source === 'fomo').sort((a, b) => Number(b.publishedAt) - Number(a.publishedAt));
+  const groupedFomo = [];
+  for (const post of fomoPosts) {
+    const handle = String(post.author?.handle || '').toLowerCase();
+    const group = groupedFomo.find((candidate) => candidate.handle === handle
+      && Math.abs(Number(candidate.timestamp) - Number(post.publishedAt)) <= 20_000);
+    if (group) group.posts.push(post);
+    else groupedFomo.push({ type: 'fomo', handle, timestamp: Number(post.publishedAt) || 0, posts: [post] });
+  }
+  const socialItems = visiblePosts.filter((post) => post.source !== 'fomo').map((post) => ({
     type: 'social',
     timestamp: monitorTimestampMs(post.publishedAt) ?? 0,
     post
@@ -2759,7 +2776,7 @@ function socialFeedItems() {
     timestamp: monitorTimestampMs(message.date) ?? 0,
     message
   }));
-  return [...socialItems, ...telegramItems]
+  return [...socialItems, ...groupedFomo, ...telegramItems]
     .sort((left, right) => right.timestamp - left.timestamp)
     .slice(0, SOCIAL_FEED_RENDER_LIMIT);
 }
@@ -2945,6 +2962,41 @@ function renderSocialWatchlist() {
   refreshIcons(elements.socialWatchlist);
 }
 
+function fomoPostMarkup(posts) {
+  const ordered = [...posts].sort((a, b) => Number(a.publishedAt) - Number(b.publishedAt));
+  const primary = [...ordered].reverse().find((post) => post.kind === 'fomo_buy' || post.kind === 'fomo_thesis') || ordered.at(-1);
+  const author = primary.author || {};
+  const avatarUrl = safeHttpUrl(author.avatarUrl);
+  const watchEntry = socialWatchEntryForPost(primary);
+  const watchId = Number(watchEntry?.id);
+  const f = primary.raw?.fomo || {};
+  const kindLabels = { fomo_buy: '买入', fomo_sell: '卖出', fomo_swap: '换仓', fomo_thesis: '观点', fomo_consensus: '共识', fomo_cash: '资金调动', fomo_verified: '官方验证' };
+  const seqLabel = f.pos?.seq === 'first' ? ' · 首次' : f.pos?.seq === 'add' ? ' · 加仓' : f.closed ? ' · 清仓' : '';
+  const nativeAsset = /^(BNB|WBNB|SOL|WSOL|USDC|USDT)$/i.test(String(f.symbol || ''));
+  const translated = socialTranslationForDisplay(primary.content, primary.translatedContent);
+  const legs = ordered.filter((post) => post !== primary).map((post) => {
+    const detail = post.raw?.fomo || {};
+    const label = kindLabels[post.kind] || '动态';
+    const route = detail.route ? ` · ${detail.route}` : '';
+    return `<li><time>${escapeHtml(new Date(Number(post.publishedAt)).toLocaleTimeString('zh-CN', { hour12: false }))}</time><strong>${escapeHtml(label)} ${escapeHtml(detail.symbol || '')}</strong><span>${escapeHtml(formatMoney(detail.usd))}${escapeHtml(route)}</span></li>`;
+  }).join('');
+  const ca = nativeAsset ? '' : String(f.ca || primary.contractAddresses?.[0]?.address || '');
+  const tokenUrl = ca ? `https://fomo.family/tokens/${encodeURIComponent(String(f.chain || '').toLowerCase())}/${encodeURIComponent(ca)}?r=Jokki` : '';
+  return `
+    <article class="social-post fomo-post" data-source="fomo" data-kind="${escapeHtml(primary.kind)}">
+      <div class="social-avatar">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" loading="lazy" />` : escapeHtml(socialInitials(primary))}</div>
+      <div class="social-post-copy">
+        <header class="social-post-head"><div class="social-post-author"><div class="social-post-author-line"><strong>${escapeHtml(author.name || author.handle)}</strong><a href="https://fomo.family/profile/${encodeURIComponent(author.handle || '')}?r=Jokki" target="_blank" rel="noopener noreferrer">@${escapeHtml(author.handle || '')}</a></div><div class="social-post-meta"><span class="social-post-kind">FOMO</span>${author.followers ? `<span>${escapeHtml(compactNumberFormatter.format(author.followers))} 关注者</span>` : ''}</div></div><div class="social-post-head-tools">${Number.isSafeInteger(watchId) ? `<button class="inline-icon-button social-post-watch-remove" type="button" data-social-feed-watch-remove="${watchId}" title="停止监控 @${escapeHtml(author.handle || '')}"><i data-lucide="user-round-x"></i></button>` : ''}<time class="social-post-time" data-live-timestamp="${escapeHtml(String(primary.publishedAt))}">${escapeHtml(formatMonitorAge(primary.publishedAt))}</time></div></header>
+        <div class="fomo-action-line"><strong>${escapeHtml(kindLabels[primary.kind] || '动态')} ${escapeHtml(f.symbol || '')}${escapeHtml(seqLabel)}</strong>${f.usd ? `<b>${escapeHtml(formatMoney(f.usd))}</b>` : ''}<span>${escapeHtml(f.chain || '')}</span></div>
+        ${primary.kind === 'fomo_thesis' && primary.content ? `<p class="social-post-content">${escapeHtml(primary.content)}</p>${translated ? `<p class="social-post-translation">${escapeHtml(translated)}</p>` : ''}` : ''}
+        ${!nativeAsset && f.mcap ? `<div class="fomo-market"><span>成交市值 ${escapeHtml(formatMoney(f.mcap))}</span>${f.price ? `<span>成交价 ${escapeHtml(formatMoney(f.price, f.symbol || 'TOKEN'))}</span>` : ''}</div>` : ''}
+        ${ca ? `<div class="social-post-contracts"><a class="social-contract-link" href="${escapeHtml(tokenUrl)}" target="_blank" rel="noopener noreferrer"><i data-lucide="scan-line"></i>${escapeHtml(ca.slice(0, 8))}...${escapeHtml(ca.slice(-6))}</a></div>` : ''}
+        ${legs ? `<details class="fomo-flow"><summary>资金轮动 · ${ordered.length} 个连续动作</summary><ol>${legs}</ol></details>` : ''}
+        ${primary.url ? `<footer class="social-post-footer"><a href="${escapeHtml(primary.url)}" target="_blank" rel="noopener noreferrer">查看交易<i data-lucide="square-arrow-out-up-right"></i></a></footer>` : ''}
+      </div>
+    </article>`;
+}
+
 function renderSocialFeed() {
   const items = socialFeedItems();
   if (!items.length) {
@@ -2953,6 +3005,9 @@ function renderSocialFeed() {
     return;
   }
   const markup = items.map((item) => {
+    if (item.type === 'fomo') {
+      return keyedFeedMarkup(fomoPostMarkup(item.posts), `fomo:${item.handle}:${item.timestamp}`);
+    }
     if (item.type === 'telegram') {
       const key = `telegram:${telegramSocialMessageKey(item.message)}`;
       return keyedFeedMarkup(telegramSocialPostMarkup(item.message), key);
@@ -4051,8 +4106,31 @@ function socialWatchInputKey(value) {
   return normalizeSocialHandle(candidate).toLowerCase();
 }
 
+let socialFomoSearchTimer = null;
+async function refreshFomoCatalog() {
+  const fomo = elements.socialWatchlistPlatform?.value === 'fomo';
+  elements.socialFomoResults.hidden = !fomo;
+  elements.socialWatchlistInput.placeholder = fomo ? '搜索或输入 FOMO 账号' : '@username\nhttps://x.com/username';
+  if (!fomo) return;
+  const query = elements.socialWatchlistInput.value.split(/\r?\n/).at(-1)?.trim() || '';
+  try {
+    const payload = await fetchJson(`${SOCIAL_API_ROOT}/fomo/catalog?q=${encodeURIComponent(query)}&limit=30`);
+    const accounts = Array.isArray(payload.accounts) ? payload.accounts : [];
+    elements.socialFomoResults.innerHTML = accounts.map((account) => `
+      <button type="button" data-fomo-account="${escapeHtml(account.handle)}">
+        ${account.avatarUrl ? `<img src="${escapeHtml(account.avatarUrl)}" alt="" loading="lazy" />` : ''}
+        <span><strong>${escapeHtml(account.name || account.handle)}</strong><small>@${escapeHtml(account.handle)}${account.followers !== null ? ` · ${escapeHtml(compactNumberFormatter.format(account.followers))} 关注者` : ''}</small></span>
+        <i data-lucide="plus" aria-hidden="true"></i>
+      </button>`).join('') || '<span class="social-fomo-empty">没有匹配账号</span>';
+    refreshIcons(elements.socialFomoResults);
+  } catch {
+    elements.socialFomoResults.innerHTML = '<span class="social-fomo-empty">FOMO 目录暂时不可用</span>';
+  }
+}
+
 function addSocialWatchAccounts(event) {
   event.preventDefault();
+  const platform = elements.socialWatchlistPlatform?.value === 'fomo' ? 'fomo' : 'twitter';
   const existing = new Set(state.socialWatchlist.map((entry) => socialWatchlistKey(
     entry.platform,
     entry.accountKey || entry.handle
@@ -4070,7 +4148,7 @@ function addSocialWatchAccounts(event) {
         return false;
       }
       seen.add(key);
-      if (existing.has(`twitter:${key}`)) {
+      if (existing.has(`${platform}:${key}`)) {
         skipped += 1;
         return false;
       }
@@ -4082,6 +4160,7 @@ function addSocialWatchAccounts(event) {
   }
   state.socialEventEditorMode = 'create';
   state.socialPendingWatchAccounts = lines;
+  state.socialPendingWatchPlatform = platform;
   state.socialEditingWatchlistId = null;
   elements.socialEventEditorId.value = '';
   elements.socialEventEditorEyebrow.textContent = '新增社媒监控';
@@ -4171,7 +4250,7 @@ async function saveSocialEventPreferences(event) {
       const payload = await runSocialWrite('POST', '/watchlist/batch', {
         accounts: pendingAccounts.map((handle) => ({
           handle,
-          platform: 'twitter',
+          platform: state.socialPendingWatchPlatform || 'twitter',
           eventTypes,
           note,
           caBark: elements.socialEventCaBark.checked
@@ -7661,6 +7740,20 @@ elements.socialSearch.addEventListener('input', () => {
   }, SOCIAL_SEARCH_DEBOUNCE_MS);
 });
 elements.socialWatchlistForm.addEventListener('submit', addSocialWatchAccounts);
+elements.socialWatchlistPlatform?.addEventListener('change', () => void refreshFomoCatalog());
+elements.socialWatchlistInput.addEventListener('input', () => {
+  if (elements.socialWatchlistPlatform?.value !== 'fomo') return;
+  clearTimeout(socialFomoSearchTimer);
+  socialFomoSearchTimer = setTimeout(() => void refreshFomoCatalog(), 250);
+});
+elements.socialFomoResults?.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-fomo-account]');
+  if (!button) return;
+  const values = elements.socialWatchlistInput.value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  const handle = button.dataset.fomoAccount;
+  if (!values.includes(handle)) values.push(handle);
+  elements.socialWatchlistInput.value = values.join('\n');
+});
 elements.socialPairingSave.addEventListener('click', () => {
   try {
     const token = storeSocialDeviceToken(elements.socialPairingToken.value);

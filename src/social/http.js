@@ -524,6 +524,16 @@ export function createSocialApiHandler({
         return true;
       }
 
+      if (url.pathname === '/api/social/fomo/catalog') {
+        method(req, ['GET']);
+        const accounts = await service.listFomoCatalog(
+          String(url.searchParams.get('q') || '').slice(0, 80),
+          integerParam(url.searchParams, 'limit', 100, 1, 200)
+        );
+        sendJson(res, 200, { ok: true, accounts });
+        return true;
+      }
+
       if (url.pathname === '/api/social/watchlist/batch') {
         method(req, ['POST']);
         requireDevice(req, token);

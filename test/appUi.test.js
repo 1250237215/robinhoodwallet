@@ -1007,7 +1007,7 @@ test('all API reads and writes use an immutable abortable chain context', () => 
   assert.match(requestHelpers, /fetchJson\(`\$\{context\.apiRoot\}\$\{path\}`/);
   assert.match(requestHelpers, /signal: context\.signal/);
 
-  assert.equal((appJs.match(/\bfetchJson\(/g) || []).length, 6, 'direct API calls must be limited to shared helpers, monitor sessions, and social root');
+  assert.equal((appJs.match(/\bfetchJson\(/g) || []).length, 7, 'direct API calls must be limited to shared helpers, monitor sessions, and social root');
   assert.match(appJs, /function fetchMonitorSessionJson\(context, path, options = \{\}\)[\s\S]*fetchJson\(`\$\{context\.apiRoot\}\$\{path\}`/);
   assert.match(appJs, /fetchJson\(`\$\{SOCIAL_API_ROOT\}\?postLimit=100`/);
   assert.match(appJs, /fetchJson\(`\$\{SOCIAL_API_ROOT\}\/status`/);
@@ -1356,11 +1356,11 @@ test('Telegram is a read-only source merged chronologically with X in the existi
   assert.match(telegramMarkupSource, /data-source="telegram"/);
 
   const mergedFeedSource = appSourceBetween('function socialFeedItems()', 'function renderSocialBridgeStatus()');
-  assert.match(mergedFeedSource, /visibleSocialPosts\(\)\.map/);
+  assert.match(mergedFeedSource, /const visiblePosts = visibleSocialPosts\(\)/);
   assert.match(mergedFeedSource, /visibleTelegramSocialMessages\(\)\.map/);
   assert.match(mergedFeedSource, /type: 'social',[\s\S]*post/);
   assert.match(mergedFeedSource, /type: 'telegram',[\s\S]*message/);
-  assert.match(mergedFeedSource, /return \[\.\.\.socialItems, \.\.\.telegramItems\]/);
+  assert.match(mergedFeedSource, /return \[\.\.\.socialItems, \.\.\.groupedFomo, \.\.\.telegramItems\]/);
   assert.match(mergedFeedSource, /\.sort\(\(left, right\) => right\.timestamp - left\.timestamp\)/);
 
   const renderFeedSource = appSourceBetween('function renderSocialFeed()', 'function renderSocialMonitor()');
@@ -1658,9 +1658,10 @@ test('social monitoring is a personal-watchlist feed without global feed, source
     assert.match(indexHtml, new RegExp(`id="${id}"`));
   }
   assert.match(socialPanelHtml, /id="social-search"[^>]*placeholder="搜索账号、备注或内容"[^>]*aria-label="搜索个人社媒监控"/);
-  assert.doesNotMatch(socialPanelHtml, /id="social-watchlist-platform"|<span>平台<\/span>|value="binance"/);
+  assert.match(socialPanelHtml, /id="social-watchlist-platform"[\s\S]*value="twitter"[\s\S]*value="fomo"/);
+  assert.doesNotMatch(socialPanelHtml, /value="binance"/);
   assert.match(indexHtml, /id="social-watchlist-add"[^>]*>[\s\S]*设置并加入/);
-  assert.match(appJs, /accounts: pendingAccounts\.map\(\(handle\) => \(\{[\s\S]*handle,[\s\S]*platform: 'twitter',[\s\S]*eventTypes,[\s\S]*note/);
+  assert.match(appJs, /accounts: pendingAccounts\.map\(\(handle\) => \(\{[\s\S]*handle,[\s\S]*platform: state\.socialPendingWatchPlatform \|\| 'twitter',[\s\S]*eventTypes,[\s\S]*note/);
   assert.doesNotMatch(socialPanelHtml, /value="(?:robinhood|base|bsc|solana)"/);
   assert.doesNotMatch(indexHtml, /id="monitor-cluster-(?:title|summary|list)"|(?:2 分钟|60 秒)同币聚合/);
   assert.match(appJs, /socialMonitorPanel: document\.querySelector\('#social-monitor-panel'\)/);

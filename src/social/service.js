@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 
 import { createDeepSeekSocialTranslator, shouldTranslateSocialText } from './deepseekTranslator.js';
+import { createFomoClient } from './fomo.js';
 import { createSocialStore } from './store.js';
 import { createXProfileMonitor } from './xProfileMonitor.js';
 import { createXReplyEnricher, referenceContextNeedsEnrichment } from './xReplyEnricher.js';
@@ -233,6 +234,10 @@ export function createSocialService({
   const debotWaiters = new Map();
   let cleanupTimer = null;
   let xFastTimer = null;
+  let fomoTimer = null;
+  let fomoInFlight = false;
+  let fomoBefore = 0;
+  let fomoBootstrapped = false;
   let xReferenceBackfillTimer = null;
   let xReferenceBackfillQueue = [];
   let translationBackfillTimer = null;
@@ -402,6 +407,31 @@ export function createSocialService({
       })
     : null);
   const allowedXFastHandles = new Set(xFastHandles.map((handle) => String(handle).toLowerCase()));
+  const fomoClient = config.fomoEnabled
+    ? createFomoClient({ fetchImpl, baseUrl: config.fomoBaseUrl })
+    : null;
+
+  async function pollFomo() {
+    if (closed || !fomoClient || fomoInFlight) return;
+    const handles = activeStore.listWatchlist({ platform: 'fomo' })
+      .map((entry) => String(entry.handle || entry.accountKey || '').replace(/^@/, '').toLowerCase())
+      .filter(Boolean);
+    if (!handles.length) return;
+    fomoInFlight = true;
+    try {
+      const posts = (await fomoClient.feed([...new Set(handles)], 100))
+        .filter((post) => Number(post.publishedAt || 0) > fomoBefore);
+      if (posts.length) {
+        fomoBefore = Math.max(fomoBefore, ...posts.map((post) => Number(post.publishedAt || 0)));
+        service.ingestPosts(posts, { skipContractNotifications: !fomoBootstrapped });
+      }
+      fomoBootstrapped = true;
+    } catch {
+      // A later poll retries transient upstream failures without affecting other feeds.
+    } finally {
+      fomoInFlight = false;
+    }
+  }
 
   function postIsWatched(post) {
     const source = String(post?.source || '').toLowerCase();
@@ -679,6 +709,9 @@ export function createSocialService({
     listWatchlist(filters) {
       return activeStore.listWatchlist(filters);
     },
+    async listFomoCatalog(query = '', limit = 100) {
+      return fomoClient ? fomoClient.catalog(query, Math.min(200, Math.max(1, Number(limit) || 100))) : [];
+    },
     getFastXStatus() {
       return {
         enabled: Boolean(activeXProfileMonitor && xFastHandles.length),
@@ -723,7 +756,8 @@ export function createSocialService({
     ingestPosts(posts, {
       skipReplyEnrichment = false,
       skipTranslation = false,
-      trustedTranslations = false
+      trustedTranslations = false,
+      skipContractNotifications = false
     } = {}) {
       const latestBefore = activeStore.getLatestChangeId();
       const incoming = !trustedTranslations
@@ -731,10 +765,12 @@ export function createSocialService({
         : posts;
       const results = activeStore.upsertPosts(incoming);
       const changes = publishAfter(latestBefore);
-      notifyNewSocialContracts(results
-        .filter((result) => result.action === 'created')
-        .map((result) => result.post)
-        .filter(Boolean));
+      if (!skipContractNotifications) {
+        notifyNewSocialContracts(results
+          .filter((result) => result.action === 'created')
+          .map((result) => result.post)
+          .filter(Boolean));
+      }
       if (!skipReplyEnrichment) {
         activeXReplyEnricher?.enqueue(
           results.map((result) => result.post).filter(referenceContextNeedsEnrichment)
@@ -970,6 +1006,11 @@ export function createSocialService({
         );
         xFastTimer.unref?.();
       }
+      if (fomoClient) {
+        void pollFomo();
+        fomoTimer = setInterval(() => void pollFomo(), config.fomoPollIntervalMs);
+        fomoTimer.unref?.();
+      }
     },
     close() {
       if (closed) return;
@@ -978,6 +1019,8 @@ export function createSocialService({
       cleanupTimer = null;
       if (xFastTimer) clearInterval(xFastTimer);
       xFastTimer = null;
+      if (fomoTimer) clearInterval(fomoTimer);
+      fomoTimer = null;
       if (xReferenceBackfillTimer) clearTimeout(xReferenceBackfillTimer);
       xReferenceBackfillTimer = null;
       xReferenceBackfillQueue = [];

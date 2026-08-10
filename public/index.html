@@ -607,8 +607,17 @@
               </header>
               <form class="social-watchlist-form" id="social-watchlist-form">
                 <label>
+                  <span>来源</span>
+                  <select id="social-watchlist-platform" aria-label="监控来源">
+                    <option value="twitter">X</option>
+                    <option value="fomo">FOMO</option>
+                  </select>
+                </label>
+                <label>
                   <span>账号，一行一个</span>
-                  <textarea id="social-watchlist-input" rows="3" placeholder="@username&#10;https://x.com/username" required></textarea>
+                  <textarea id="social-watchlist-input" rows="3" placeholder="@username&#10;https://x.com/username" list="social-fomo-catalog" required></textarea>
+                  <datalist id="social-fomo-catalog"></datalist>
+                  <div class="social-fomo-results" id="social-fomo-results" hidden></div>
                 </label>
                 <button class="social-primary-button" id="social-watchlist-add" type="submit">
                   <i data-lucide="user-plus" aria-hidden="true"></i>
