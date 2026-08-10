@@ -2340,6 +2340,14 @@ test('real-time token events upsert asynchronous market cap and token-age enrich
   assert.match(appJs, /tokenAge !== '待获取'/);
 });
 
+test('real-time buys show the first two monitored buyers and hide suppressed stock buys', () => {
+  assert.match(appJs, /earliestBuyers:[\s\S]*slice\(0, 2\)/);
+  assert.match(appJs, /<dt>最早买入<\/dt>/);
+  assert.match(appJs, /monitor-earliest-buyers/);
+  assert.match(appJs, /filter\(\(event\) => event\.suppressed !== true\)/);
+  assert.match(stylesCss, /\.monitor-event-metrics \{[\s\S]*grid-template-columns: repeat\(3,/);
+});
+
 test('Robinhood token risk enrichment is progressive, nullable and isolated from other chains', () => {
   const normalizeSource = appSourceBetween('function normalizeMonitorEvent(raw, current = null, fallbackChainId = activeChainId)', 'function generatedWalletProfitPosition(');
   assert.match(normalizeSource, /const pickBoolean = \(keys\) => nullableBoolean\(pickPresent\(keys, null\)\)/);

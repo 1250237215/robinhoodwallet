@@ -5946,11 +5946,11 @@ button.telegram-reply {
 
 .monitor-event-metrics {
   min-width: 0;
-  max-width: 440px;
+  max-width: 680px;
   grid-column: 2;
   grid-row: 2;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   justify-content: start;
   gap: 4px 10px;
   margin: 0;
@@ -5994,6 +5994,16 @@ button.telegram-reply {
 .monitor-event-metrics > div[data-state="pending"] dd {
   color: var(--faint);
   font-weight: 650;
+}
+
+.monitor-earliest-buyers a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.monitor-earliest-buyers a:hover {
+  color: var(--event-accent);
+  text-decoration: underline;
 }
 
 .monitor-token-risk,

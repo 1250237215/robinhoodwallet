@@ -1555,6 +1555,49 @@ export function createRobinhoodStore(filename, {
         : db.prepare('SELECT * FROM monitor_events ORDER BY id DESC LIMIT ?').all(normalizedLimit);
       return rows.map(monitorEventFromRow);
     },
+    listMonitorTokenEarliestBuyers(tokenAddresses, { limit = 2 } = {}) {
+      const addresses = [...new Set((Array.isArray(tokenAddresses) ? tokenAddresses : [])
+        .map(normalizeAddress)
+        .filter(isValidAddress))];
+      const normalizedLimit = Math.max(1, Math.min(10, Math.floor(Number(limit) || 2)));
+      if (!addresses.length) return [];
+      const placeholders = addresses.map(() => '?').join(', ');
+      return db.prepare(`
+        WITH first_buys AS (
+          SELECT
+            event.token_address,
+            event.wallet_address,
+            MIN(event.block_timestamp) AS first_buy_at,
+            annotation.alias,
+            annotation.alias_source
+          FROM monitor_events AS event
+          JOIN ${walletAnnotationTable} AS annotation
+            ON annotation.address = event.wallet_address
+           AND annotation.status != 'excluded'
+          WHERE event.event_type = 'buy'
+            AND event.token_address IN (${placeholders})
+          GROUP BY event.token_address, event.wallet_address, annotation.alias, annotation.alias_source
+        ), ranked AS (
+          SELECT
+            *,
+            ROW_NUMBER() OVER (
+              PARTITION BY token_address
+              ORDER BY first_buy_at ASC, wallet_address ASC
+            ) AS buyer_rank
+          FROM first_buys
+        )
+        SELECT token_address, wallet_address, first_buy_at, alias, alias_source
+        FROM ranked
+        WHERE buyer_rank <= ?
+        ORDER BY token_address, buyer_rank
+      `).all(...addresses, normalizedLimit).map((row) => ({
+        tokenAddress: row.token_address,
+        address: row.wallet_address,
+        alias: String(row.alias || ''),
+        aliasSource: String(row.alias_source || 'unknown'),
+        firstBuyAt: Number(row.first_buy_at)
+      }));
+    },
     listMonitorEventsNeedingTokenRisk({ limit = 500 } = {}) {
       if (normalizedChainId !== 'robinhood') return [];
       const normalizedLimit = Math.max(1, Math.min(500, Math.floor(Number(limit) || 500)));

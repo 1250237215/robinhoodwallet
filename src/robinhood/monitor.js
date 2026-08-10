@@ -296,6 +296,19 @@ function publicEvent(event, chainProfile = DEFAULT_CHAIN_PROFILE, annotation = n
   }, chainProfile);
 }
 
+const LARGE_CAP_STOCK_MIN_MARKET_CAP_USD = 10_000_000;
+const STRONG_STOCK_SYMBOL_PATTERN = /^(?:SPCX|TSLA|NVDA|AAPL|MSFT|AMZN|META|GOOGL?|COIN|HOOD|PLTR|NFLX|MSTR)[BX]$/i;
+const STOCK_REFERENCE_PATTERN = /(?:space\s*x|tesla|nvidia|apple|microsoft|amazon|meta platforms|alphabet|google|coinbase|robinhood|palantir|netflix|microstrategy)/i;
+
+export function isSuppressedLargeCapStockBuy(event) {
+  if (String(event?.eventType || '').toLowerCase() !== 'buy') return false;
+  const symbol = String(event?.tokenSymbol || '').replace(/[^a-z0-9]/gi, '');
+  if (STRONG_STOCK_SYMBOL_PATTERN.test(symbol)) return true;
+  const marketCapUsd = Number(event?.marketCapUsd);
+  if (!Number.isFinite(marketCapUsd) || marketCapUsd < LARGE_CAP_STOCK_MIN_MARKET_CAP_USD) return false;
+  return STOCK_REFERENCE_PATTERN.test(`${event?.tokenName || ''} ${event?.tokenSymbol || ''}`);
+}
+
 function eventKey(log) {
   return `${String(log?.transactionHash || '').toLowerCase()}:${rpcInteger(log?.logIndex, -1)}`;
 }
@@ -799,15 +812,36 @@ export class RobinhoodWalletMonitor {
 
   getEvents({ after = 0, limit = 100 } = {}) {
     const annotations = new Map();
-    return this.store.listMonitorEvents({ after, limit }).map((event) => {
+    const events = this.store.listMonitorEvents({ after, limit });
+    const earliestBuyersByToken = this.#earliestBuyersByToken(
+      events.filter((event) => !isSuppressedLargeCapStockBuy(event))
+    );
+    return events.map((event) => {
       if (!annotations.has(event.walletAddress)) {
         annotations.set(
           event.walletAddress,
           this.store.getWalletAnnotation?.(event.walletAddress) || null
         );
       }
-      return publicEvent(event, this.chainProfile, annotations.get(event.walletAddress));
+      return publicEvent({
+        ...event,
+        suppressed: isSuppressedLargeCapStockBuy(event),
+        earliestBuyers: earliestBuyersByToken.get(event.tokenAddress) || []
+      }, this.chainProfile, annotations.get(event.walletAddress));
     });
+  }
+
+  #earliestBuyersByToken(events) {
+    if (!this.store.listMonitorTokenEarliestBuyers) return new Map();
+    const tokenAddresses = [...new Set(events
+      .filter((event) => event.eventType === 'buy' && event.tokenAddress)
+      .map((event) => event.tokenAddress))];
+    const grouped = new Map(tokenAddresses.map((address) => [address, []]));
+    for (const buyer of this.store.listMonitorTokenEarliestBuyers(tokenAddresses, { limit: 2 })) {
+      if (!grouped.has(buyer.tokenAddress)) grouped.set(buyer.tokenAddress, []);
+      grouped.get(buyer.tokenAddress).push(buyer);
+    }
+    return grouped;
   }
 
   listBarkTargets() {
@@ -1711,7 +1745,7 @@ export class RobinhoodWalletMonitor {
       const riskData = candidate.assetType === 'erc20'
         ? this.#cachedTokenRisk(candidate.tokenAddress, { pendingWhenStale: true })
         : {};
-      const result = this.store.insertMonitorEvent({
+      const persistedEvent = {
         ...candidate,
         walletAlias: annotation?.alias || '',
         tokenSymbol: metadata.symbol,
@@ -1724,9 +1758,12 @@ export class RobinhoodWalletMonitor {
         barkAlert: rule.bark,
         ...marketData,
         ...riskData
-      });
+      };
+      if (isSuppressedLargeCapStockBuy(persistedEvent)) continue;
+      const result = this.store.insertMonitorEvent(persistedEvent);
       if (!result.inserted) continue;
-      const event = publicEvent(result.event, this.chainProfile, annotation);
+      const earliestBuyers = this.#earliestBuyersByToken([result.event]).get(result.event.tokenAddress) || [];
+      const event = publicEvent({ ...result.event, earliestBuyers }, this.chainProfile, annotation);
       detected.push(event);
       this.health.eventsDetected += 1;
       if (lane === 'deep') this.health.deepEventsDetected += 1;

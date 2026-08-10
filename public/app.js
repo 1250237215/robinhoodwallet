@@ -665,6 +665,7 @@ function fetchMonitorSessionJson(context, path, options = {}) {
 function selectedMonitorEvents() {
   return [...state.monitorFeedChainIds]
     .flatMap((chainId) => monitorSession(chainId, { create: false })?.events || [])
+    .filter((event) => event.suppressed !== true)
     .sort((left, right) => monitorEventTimestamp(right) - monitorEventTimestamp(left)
       || String(right.id || '').localeCompare(String(left.id || ''), undefined, { numeric: true }))
     .slice(0, MONITOR_FEED_EVENT_LIMIT);
@@ -1171,6 +1172,7 @@ function normalizeMonitorEvent(raw, current = null, fallbackChainId = activeChai
     ])),
     platform: String(pick(['platform', 'protocol', 'dex', 'source'], '') || ''),
     soundAlert,
+    suppressed: pickBoolean(['suppressed', 'hidden']) === true,
     amount: pick(['amount', 'tokenAmount', 'token_amount', 'amountIn', 'amount_in', 'spendAmount', 'value'], null),
     amountUsd: pickNumber(['amountUsd', 'amount_usd', 'spendUsd', 'valueUsd']),
     amountSymbol: String(pick(['amountSymbol', 'amount_symbol', 'spendSymbol', 'currency'], source.tokenAmount ? pick(['tokenSymbol', 'token_symbol'], '') : '') || ''),
@@ -1190,6 +1192,13 @@ function normalizeMonitorEvent(raw, current = null, fallbackChainId = activeChai
     tokenRiskDataAt: pick(['tokenRiskDataAt', 'token_risk_data_at'], null),
     tokenRiskError: String(pickPresent(['tokenRiskError', 'token_risk_error'], '') || ''),
     tokenRiskFlags,
+    earliestBuyers: (Array.isArray(pickPresent(['earliestBuyers', 'earliest_buyers'], []))
+      ? pickPresent(['earliestBuyers', 'earliest_buyers'], [])
+      : []).slice(0, 2).map((buyer) => ({
+        address: normalizeAddressForChain(firstValue(buyer, ['address', 'walletAddress', 'wallet_address']), chainId),
+        alias: String(firstValue(buyer, ['alias', 'walletAlias', 'wallet_alias'], '') || ''),
+        firstBuyAt: firstValue(buyer, ['firstBuyAt', 'first_buy_at'], null)
+      })).filter((buyer) => buyer.address),
     txHash: normalizeTransactionHash(pick(['txHash', 'tx_hash', 'transactionHash', 'hash'])),
     blockNumber: pickNumber(['blockNumber', 'block_number', 'block']),
     blockTimestamp: pick(['blockTimestamp', 'block_timestamp', 'timestamp'], null),
@@ -3240,6 +3249,14 @@ function renderMonitorEvents() {
     const hasTokenAge = tokenAge !== '待获取';
     const marketDataTitle = event.marketDataAt ? `市值数据更新于 ${formatDateTime(event.marketDataAt)}` : '';
     const ageLabel = event.eventType === 'buy' ? '买入时币龄' : '事件时币龄';
+    const earliestBuyers = event.eventType === 'buy' && Array.isArray(event.earliestBuyers)
+      ? event.earliestBuyers.slice(0, 2)
+      : [];
+    const earliestBuyerMarkup = earliestBuyers.map((buyer) => {
+      const label = String(buyer.alias || '').trim() || shortAddress(buyer.address);
+      const url = `${eventChain.debotAddressRoot}/${buyer.address}`;
+      return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(formatDateTime(buyer.firstBuyAt))}">${escapeHtml(label)}</a>`;
+    }).join('<span aria-hidden="true"> · </span>');
     const profitTokenSymbol = String(profitPosition?.tokenSymbol || '金狗').trim().slice(0, 32) || '金狗';
     const profitRankTitle = isProfitTopTen
       ? `${profitTokenSymbol} 盈利榜第 ${profitRank} 名`
@@ -3287,6 +3304,10 @@ function renderMonitorEvents() {
               <dt>${ageLabel}</dt>
               <dd>${escapeHtml(tokenAge)}</dd>
             </div>
+            ${event.eventType === 'buy' ? `<div data-state="${earliestBuyers.length ? 'ready' : 'pending'}">
+              <dt>最早买入</dt>
+              <dd class="monitor-earliest-buyers">${earliestBuyerMarkup || '暂无记录'}</dd>
+            </div>` : ''}
           </dl>
         ` : ''}
         ${renderMonitorTokenRisk(event)}
@@ -3571,6 +3592,7 @@ function synchronizeMonitorAlerts({ playNew = false, sessions = null } = {}) {
 
 function playMonitorEventSounds(events) {
   if (!state.monitorSoundEnabled) return;
+  events = events.filter((event) => event.suppressed !== true);
   if (!events.some((event) => event.soundAlert === true)) return;
   const requestContext = captureChainRequestContext();
   void playMonitorAlertSound(requestContext).catch((error) => {

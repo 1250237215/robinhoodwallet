@@ -5,7 +5,8 @@ import {
   ERC20_TRANSFER_TOPIC,
   RobinhoodWalletMonitor,
   V2_SWAP_TOPIC,
-  formatTokenAmount
+  formatTokenAmount,
+  isSuppressedLargeCapStockBuy
 } from '../src/robinhood/monitor.js';
 import { createRobinhoodStore } from '../src/robinhood/store.js';
 
@@ -59,6 +60,17 @@ test('formats even the smallest token amount without a minimum-value filter', ()
   assert.equal(formatTokenAmount(1n, 18), '0.000000000000000001');
   assert.equal(formatTokenAmount(1_234_500n, 6), '1.2345');
   assert.equal(formatTokenAmount(42n, 0), '42');
+});
+
+test('suppresses stock-reference buys without hiding ordinary large-cap meme buys', () => {
+  assert.equal(isSuppressedLargeCapStockBuy({ eventType: 'buy', tokenSymbol: 'SPCXB', tokenName: 'SpaceX' }), true);
+  assert.equal(isSuppressedLargeCapStockBuy({
+    eventType: 'buy', tokenSymbol: 'TSLA', tokenName: 'Tesla', marketCapUsd: 20_000_000
+  }), true);
+  assert.equal(isSuppressedLargeCapStockBuy({
+    eventType: 'buy', tokenSymbol: 'Monkey', tokenName: 'Monkey', marketCapUsd: 50_000_000
+  }), false);
+  assert.equal(isSuppressedLargeCapStockBuy({ eventType: 'sell', tokenSymbol: 'SPCXB', tokenName: 'SpaceX' }), false);
 });
 
 test('forwards Feishu CA notifications through the shared Bark notifier', async () => {

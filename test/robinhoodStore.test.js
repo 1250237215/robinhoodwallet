@@ -95,6 +95,49 @@ test('persists wallet curation independently and deletes annotations idempotentl
   store.close();
 });
 
+test('returns the first two distinct address-library buyers for each monitored token', () => {
+  const store = createRobinhoodStore(':memory:');
+  const token = '0x0000000000000000000000000000000000000010';
+  const wallets = [
+    '0x0000000000000000000000000000000000000001',
+    '0x0000000000000000000000000000000000000002',
+    '0x0000000000000000000000000000000000000003'
+  ];
+  wallets.forEach((address, index) => store.upsertWalletAnnotation({
+    address,
+    alias: `Wallet ${index + 1}`,
+    status: index === 2 ? 'excluded' : 'active',
+    createdAt: 1,
+    updatedAt: 1
+  }));
+  const insertBuy = (walletAddress, blockTimestamp, logIndex) => store.insertMonitorEvent({
+    eventType: 'buy',
+    assetType: 'erc20',
+    walletAddress,
+    tokenAddress: token,
+    tokenSymbol: 'EARLY',
+    tokenName: 'Early',
+    tokenAmount: '1',
+    rawTokenAmount: '1',
+    tokenDecimals: 18,
+    txHash: `0x${String(logIndex).padStart(64, '0')}`,
+    logIndex,
+    blockNumber: logIndex,
+    blockTimestamp,
+    detectedAt: blockTimestamp + 1
+  });
+  insertBuy(wallets[1], 200, 1);
+  insertBuy(wallets[0], 100, 2);
+  insertBuy(wallets[0], 300, 3);
+  insertBuy(wallets[2], 50, 4);
+
+  assert.deepEqual(store.listMonitorTokenEarliestBuyers([token]), [
+    { tokenAddress: token, address: wallets[0], alias: 'Wallet 1', aliasSource: 'manual', firstBuyAt: 100 },
+    { tokenAddress: token, address: wallets[1], alias: 'Wallet 2', aliasSource: 'manual', firstBuyAt: 200 }
+  ]);
+  store.close();
+});
+
 test('compacts legacy generated profit-rank aliases across stored wallet data', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-wallet-alias-migration-'));
   const filename = path.join(directory, 'radar.sqlite');
