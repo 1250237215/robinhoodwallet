@@ -3,6 +3,12 @@ import test from 'node:test';
 
 import { dedupeFomoEvents, normalizeFomoCatalog, normalizeFomoEvent } from '../src/social/fomo.js';
 import { createSocialStore } from '../src/social/store.js';
+import { createSocialConfig } from '../src/social/config.js';
+
+test('FOMO polling defaults to one second and remains bounded', () => {
+  assert.equal(createSocialConfig({}).fomoPollIntervalMs, 1_000);
+  assert.equal(createSocialConfig({ SOCIAL_FOMO_POLL_INTERVAL_MS: '100' }).fomoPollIntervalMs, 500);
+});
 
 test('FOMO catalog preserves source identity and resolves avatars', () => {
   const [account] = normalizeFomoCatalog({ accounts: [{

@@ -52,7 +52,7 @@ export function createSocialConfig(env = process.env, { fallbackDirectory = null
     ),
     fomoEnabled: !['0', 'false', 'off', 'no'].includes(String(env.SOCIAL_FOMO_ENABLED || 'true').trim().toLowerCase()),
     fomoBaseUrl: String(env.SOCIAL_FOMO_BASE_URL || 'https://wind.jokkimon.club').trim().replace(/\/+$/, ''),
-    fomoPollIntervalMs: boundedInteger(env.SOCIAL_FOMO_POLL_INTERVAL_MS, 5_000, 2_000, 60_000),
+    fomoPollIntervalMs: boundedInteger(env.SOCIAL_FOMO_POLL_INTERVAL_MS, 1_000, 500, 60_000),
     translationApiKey: String(env.DEEPSEEK_TRANSLATION_API_KEY || '').trim(),
     translationBaseUrl: String(env.DEEPSEEK_TRANSLATION_BASE_URL || 'https://api.deepseek.com')
       .trim()

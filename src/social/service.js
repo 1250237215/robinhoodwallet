@@ -1008,7 +1008,7 @@ export function createSocialService({
       }
       if (fomoClient) {
         void pollFomo();
-        fomoTimer = setInterval(() => void pollFomo(), config.fomoPollIntervalMs);
+        fomoTimer = setInterval(() => void pollFomo(), Math.max(500, Number(config.fomoPollIntervalMs) || 1_000));
         fomoTimer.unref?.();
       }
     },
