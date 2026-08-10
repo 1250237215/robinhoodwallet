@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { PEOPLE } from '../src/config.js';
-import { extractMessages, mergeMessages, PeopleMonitor } from '../src/monitor.js';
+import { extractImageResources, extractMessages, mergeMessages, PeopleMonitor } from '../src/monitor.js';
 
 function raw(overrides = {}) {
   return {
@@ -54,6 +54,21 @@ test('mergeMessages deduplicates, sorts newest first, and applies the limit', ()
   assert.equal(merged.length, 10);
   assert.equal(merged[0].id, 'm11');
   assert.equal(merged.at(-1).id, 'm2');
+});
+
+test('extracts image and image-sticker resources while keeping surrounding text', () => {
+  assert.deepEqual(extractImageResources('[Image: img_v3_first]\n![Image](img_v3_second)'), [
+    { type: 'image', resourceKey: 'img_v3_first' },
+    { type: 'image', resourceKey: 'img_v3_second' }
+  ]);
+  const person = { id: 'one', name: 'One', source: 'test', matches: () => true, clean: String };
+  const [message] = extractMessages([person], [raw({
+    message_id: 'media',
+    msg_type: 'post',
+    content: '图片说明\n![Image](img_v3_sticker)'
+  })]).get('one');
+  assert.equal(message.content, '图片说明');
+  assert.deepEqual(message.media, [{ type: 'image', resourceKey: 'img_v3_sticker' }]);
 });
 
 test('PeopleMonitor prevents overlapping refreshes', async () => {

@@ -8,8 +8,31 @@ import {
   PEOPLE
 } from './config.js';
 
+const IMAGE_RESOURCE_PATTERN = /(?:!\[Image\]\(|\[Image:\s*)(img_[A-Za-z0-9_-]+)\)?\]?/gi;
+
+export function extractImageResources(content) {
+  const resources = [];
+  const seen = new Set();
+  for (const match of String(content || '').matchAll(IMAGE_RESOURCE_PATTERN)) {
+    const resourceKey = match[1];
+    if (seen.has(resourceKey)) continue;
+    seen.add(resourceKey);
+    resources.push({ type: 'image', resourceKey });
+  }
+  return resources;
+}
+
+function cleanMediaMarkers(content) {
+  return String(content || '')
+    .replace(IMAGE_RESOURCE_PATTERN, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function normalizeMessage(person, message) {
-  const content = person.clean(message.content).trim();
+  const rawContent = person.clean(message.content).trim();
+  const media = extractImageResources(rawContent);
+  const content = cleanMediaMarkers(rawContent);
   return {
     id: message.message_id || `${person.id}:${message.message_position || message.create_time}:${content}`,
     personId: person.id,
@@ -17,6 +40,7 @@ function normalizeMessage(person, message) {
     source: person.source,
     content,
     type: message.msg_type || 'text',
+    media,
     createdAt: message.create_time || '',
     position: message.message_position || '',
     url: message.message_app_link || ''
@@ -86,6 +110,15 @@ export class PeopleMonitor extends EventEmitter {
       const current = this.messages.get(person.id) || [];
       this.messages.set(person.id, mergeMessages(current, extracted.get(person.id) || [], this.limit));
     }
+  }
+
+  findMediaResource(messageId, resourceKey) {
+    for (const messages of this.messages.values()) {
+      const message = messages.find((candidate) => candidate.id === messageId);
+      const media = message?.media?.find((candidate) => candidate.resourceKey === resourceKey);
+      if (media) return { messageId, ...media };
+    }
+    return null;
   }
 
   async bootstrapChat(chat) {

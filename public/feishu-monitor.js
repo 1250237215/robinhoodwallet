@@ -63,21 +63,36 @@ async function fetchJson(path, options = {}) {
 
 function messageDate(value) {
   if (!value) return null;
-  const source = String(value);
-  const date = new Date(source.includes('T') ? source : `${source.replace(' ', 'T')}+08:00`);
+  const source = String(value).trim();
+  const numeric = Number(source);
+  if (/^\d{10,13}$/.test(source) && Number.isFinite(numeric)) {
+    const date = new Date(source.length === 10 ? numeric * 1_000 : numeric);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(source);
+  const normalized = source.replace(' ', 'T');
+  const date = new Date(hasZone ? normalized : `${normalized}+08:00`);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function timeLabel(value) {
   const date = messageDate(value);
   if (!date) return String(value || '');
-  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  return date.toLocaleTimeString('zh-CN', {
+    timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+  });
 }
 
 function dayLabel(value) {
   const date = messageDate(value);
   if (!date) return '日期未知';
-  return date.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
+  return date.toLocaleDateString('zh-CN', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: 'long', day: 'numeric'
+  });
+}
+
+function mediaUrl(messageId, resourceKey) {
+  return `${FEISHU_API_ROOT}/media/${encodeURIComponent(messageId)}/${encodeURIComponent(resourceKey)}`;
 }
 
 function updateLatestButton() {
@@ -137,8 +152,7 @@ function messageRow(message) {
   sender.textContent = message.personName || message.person?.name || '飞书';
   const content = document.createElement('p');
   content.className = 'telegram-message-text';
-  const image = message.type === 'image' || /^\[Image:/i.test(String(message.content || ''));
-  content.textContent = image ? '图片消息' : String(message.content || '空消息');
+  content.textContent = String(message.content || (message.media?.length ? '' : '空消息'));
   const footer = document.createElement('div');
   footer.className = 'feishu-message-footer';
   const source = document.createElement('span');
@@ -148,7 +162,27 @@ function messageRow(message) {
   time.dateTime = message.createdAt || '';
   time.textContent = timeLabel(message.createdAt);
   footer.append(source, time);
-  bubble.append(sender, content, footer);
+  bubble.append(sender);
+  if (content.textContent) bubble.append(content);
+  if (Array.isArray(message.media) && message.media.length) {
+    const gallery = document.createElement('div');
+    gallery.className = 'feishu-message-media';
+    for (const media of message.media) {
+      if (media.type !== 'image' || !media.resourceKey) continue;
+      const image = document.createElement('img');
+      image.src = mediaUrl(message.id, media.resourceKey);
+      image.alt = '飞书图片或表情包';
+      image.loading = 'lazy';
+      image.decoding = 'async';
+      image.addEventListener('error', () => {
+        image.classList.add('is-unavailable');
+        image.alt = '图片加载失败，点击右下角打开飞书原消息';
+      }, { once: true });
+      gallery.appendChild(image);
+    }
+    if (gallery.childElementCount) bubble.appendChild(gallery);
+  }
+  bubble.append(footer);
   if (message.url) {
     const link = document.createElement('a');
     link.className = 'feishu-message-link';

@@ -2955,6 +2955,30 @@ select:hover {
   margin-top: 0;
 }
 
+.feishu-message-media {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 5px;
+  width: min(360px, 100%);
+  margin-top: 5px;
+}
+
+.feishu-message-media img {
+  display: block;
+  width: 100%;
+  max-height: 340px;
+  border-radius: 5px;
+  background: #eef3f6;
+  object-fit: contain;
+}
+
+.feishu-message-media img.is-unavailable {
+  min-height: 72px;
+  padding: 8px;
+  color: #78909d;
+  font-size: 9px;
+}
+
 .feishu-message-link {
   position: absolute;
   right: 7px;

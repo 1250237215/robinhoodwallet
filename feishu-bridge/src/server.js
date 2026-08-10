@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs';
-import { realpath, stat } from 'node:fs/promises';
+import { open, realpath, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { dirname, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,6 +60,22 @@ function writeSse(response, event, body) {
   response.write(`event: ${event}\ndata: ${JSON.stringify(body)}\n\n`);
 }
 
+async function imageMimeType(file) {
+  const handle = await open(file, 'r');
+  try {
+    const bytes = Buffer.alloc(12);
+    const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+    const header = bytes.subarray(0, bytesRead);
+    if (header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+    if (header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) return 'image/jpeg';
+    if (header.subarray(0, 6).toString('ascii') === 'GIF87a' || header.subarray(0, 6).toString('ascii') === 'GIF89a') return 'image/gif';
+    if (header.subarray(0, 4).toString('ascii') === 'RIFF' && header.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+    return 'application/octet-stream';
+  } finally {
+    await handle.close();
+  }
+}
+
 async function serveStatic(request, response, pathname) {
   const root = await realpath(PUBLIC_DIR);
   const relative = pathname === '/' ? 'index.html' : decodeURIComponent(pathname).replace(/^\/+/, '');
@@ -77,8 +93,9 @@ async function serveStatic(request, response, pathname) {
   else createReadStream(file).pipe(response);
 }
 
-export function createMonitorServer(monitor, { caWatch = null } = {}) {
+export function createMonitorServer(monitor, { caWatch = null, mediaClient = null, mediaCacheDirectory = '' } = {}) {
   const clients = new Set();
+  const mediaDownloads = new Map();
   const broadcast = (snapshot) => {
     for (const response of [...clients]) {
       if (response.destroyed || response.writableEnded) clients.delete(response);
@@ -111,6 +128,36 @@ export function createMonitorServer(monitor, { caWatch = null } = {}) {
         clients.add(response);
         writeSse(response, 'snapshot', monitor.snapshot());
         request.on('close', () => clients.delete(response));
+        return;
+      }
+      const mediaMatch = url.pathname.match(/^\/api\/media\/(om_[A-Za-z0-9_-]+)\/(img_[A-Za-z0-9_-]+)$/);
+      if (mediaMatch) {
+        if (!['GET', 'HEAD'].includes(request.method || 'GET')) return sendJson(response, 405, { ok: false, error: 'method_not_allowed' });
+        const [, messageId, resourceKey] = mediaMatch;
+        const resource = monitor.findMediaResource?.(messageId, resourceKey);
+        if (!resource) return sendJson(response, 404, { ok: false, error: 'media_not_found' });
+        if (!mediaClient?.downloadMessageResource || !mediaCacheDirectory) return sendJson(response, 503, { ok: false, error: 'media_unavailable' });
+        const cacheKey = `${messageId}:${resourceKey}`;
+        let pending = mediaDownloads.get(cacheKey);
+        if (!pending) {
+          pending = mediaClient.downloadMessageResource({ messageId, resourceKey, outputDirectory: mediaCacheDirectory });
+          mediaDownloads.set(cacheKey, pending);
+        }
+        let file;
+        try {
+          file = await pending;
+        } catch (error) {
+          mediaDownloads.delete(cacheKey);
+          throw error;
+        }
+        const info = await stat(file);
+        response.writeHead(200, headers({
+          'cache-control': 'private, max-age=86400',
+          'content-type': await imageMimeType(file),
+          'content-length': info.size
+        }));
+        if (request.method === 'HEAD') response.end();
+        else createReadStream(file).pipe(response);
         return;
       }
       if (url.pathname === '/api/ca-watch') {
@@ -147,8 +194,9 @@ export function createMonitorServer(monitor, { caWatch = null } = {}) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const monitor = new PeopleMonitor({ client: createLarkClient(), pollMs: POLL_MS });
   const runtimeDirectory = process.env.FEISHU_RUNTIME_DIR || '/var/lib/robinhood-radar/feishu';
+  const client = createLarkClient();
+  const monitor = new PeopleMonitor({ client, pollMs: POLL_MS });
   const caWatch = new FeishuCaWatch({
     people: PEOPLE,
     dataFile: resolve(runtimeDirectory, 'ca-watch.json'),
@@ -161,7 +209,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     ]
   });
   monitor.on('snapshot', (snapshot) => caWatch.observe(snapshot));
-  const server = createMonitorServer(monitor, { caWatch });
+  const server = createMonitorServer(monitor, {
+    caWatch,
+    mediaClient: client,
+    mediaCacheDirectory: resolve(runtimeDirectory, 'media')
+  });
   server.listen(PORT, HOST, () => {
     console.log(`Feishu people monitor: http://${HOST}:${PORT}`);
     monitor.start().catch((error) => console.error(error));

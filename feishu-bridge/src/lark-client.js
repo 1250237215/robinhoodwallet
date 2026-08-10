@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { mkdir, stat } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -61,5 +63,42 @@ export function createLarkClient(options = {}) {
     };
   }
 
-  return { fetchChatPage };
+  async function downloadMessageResource({ messageId, resourceKey, outputDirectory }) {
+    if (!/^om_[A-Za-z0-9_-]+$/.test(messageId)) throw new TypeError('invalid message id');
+    if (!/^img_[A-Za-z0-9_-]+$/.test(resourceKey)) throw new TypeError('invalid image resource key');
+    await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
+    const outputName = `${messageId}-${resourceKey}`;
+    const outputPath = resolve(outputDirectory, outputName);
+    const cached = await stat(outputPath).catch(() => null);
+    if (cached?.isFile() && cached.size > 0) return outputPath;
+    let stdout;
+    try {
+      ({ stdout } = await execFileAsync(command, [
+        'im', '+messages-resources-download',
+        '--as', 'user',
+        '--message-id', messageId,
+        '--file-key', resourceKey,
+        '--type', 'image',
+        '--output', outputName,
+        '--format', 'json'
+      ], {
+        cwd: outputDirectory,
+        timeout,
+        maxBuffer: 2 * 1024 * 1024,
+        encoding: 'utf8'
+      }));
+    } catch (error) {
+      throw new LarkCliError(error.stderr?.trim() || error.message, { code: error.code, messageId, resourceKey });
+    }
+    let payload;
+    try {
+      payload = JSON.parse(stdout);
+    } catch {
+      throw new LarkCliError('lark-cli returned invalid resource JSON', { messageId, resourceKey });
+    }
+    if (!payload.ok) throw new LarkCliError(payload.error?.message || 'lark-cli resource download failed', { messageId, resourceKey });
+    return outputPath;
+  }
+
+  return { fetchChatPage, downloadMessageResource };
 }

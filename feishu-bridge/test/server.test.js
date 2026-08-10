@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import { createMonitorServer } from '../src/server.js';
@@ -26,6 +29,12 @@ class StubMonitor extends EventEmitter {
 
   stop() {
     this.stopped = true;
+  }
+
+  findMediaResource(messageId, resourceKey) {
+    return messageId === 'om_allowed' && resourceKey === 'img_allowed'
+      ? { messageId, resourceKey, type: 'image' }
+      : null;
   }
 }
 
@@ -84,4 +93,25 @@ test('CA watch rules are readable, writable, and reject invalid methods', async 
 
   const rejected = await fetch(`${baseUrl}/api/ca-watch`, { method: 'POST' });
   assert.equal(rejected.status, 405);
+});
+
+test('media endpoint serves only resources declared by a current Feishu message', async (t) => {
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-media-'));
+  t.after(() => fs.rmSync(cache, { recursive: true, force: true }));
+  const mediaClient = {
+    async downloadMessageResource({ outputDirectory }) {
+      const file = path.join(outputDirectory, 'image');
+      fs.writeFileSync(file, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+      return file;
+    }
+  };
+  const { baseUrl } = await startServer(t, { mediaClient, mediaCacheDirectory: cache });
+
+  const image = await fetch(`${baseUrl}/api/media/om_allowed/img_allowed`);
+  assert.equal(image.status, 200);
+  assert.equal(image.headers.get('content-type'), 'image/png');
+  assert.equal((await image.arrayBuffer()).byteLength, 8);
+
+  const rejected = await fetch(`${baseUrl}/api/media/om_other/img_allowed`);
+  assert.equal(rejected.status, 404);
 });
