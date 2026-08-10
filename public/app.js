@@ -2912,7 +2912,10 @@ function renderSocialBridgeStatus() {
   const telegramSummary = telegramChannelCount
     ? ` · ${formatInteger(telegramChannelCount)} 个 Telegram 频道`
     : '';
-  elements.socialMonitorSummary.textContent = `${formatInteger(socialFeedItems().length)} 条个人动态 · ${formatInteger(state.socialWatchlist.length)} 个 X 账号${telegramSummary}${lastSeen}${transport}`;
+  const xAccountCount = state.socialWatchlist.filter((entry) => entry.platform === 'twitter').length;
+  const fomoAccountCount = state.socialWatchlist.filter((entry) => entry.platform === 'fomo').length;
+  const fomoSummary = ` · ${formatInteger(fomoAccountCount)} 个 FOMO 账号`;
+  elements.socialMonitorSummary.textContent = `${formatInteger(socialFeedItems().length)} 条个人动态 · ${formatInteger(xAccountCount)} 个 X 账号${fomoSummary}${telegramSummary}${lastSeen}${transport}`;
   elements.socialPairingRow.hidden = !SOCIAL_WRITE_CONTEXT_ALLOWED
     || (state.socialExtensionReady && state.socialExtensionWritable);
 }

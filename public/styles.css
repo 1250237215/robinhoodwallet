@@ -4971,16 +4971,38 @@ button.telegram-reply {
 }
 
 .social-event-ca-bark-toggle {
-  display: flex;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
   align-items: center;
-  gap: 9px;
-  margin: 12px 0 4px;
-  color: #9a5b18;
-  font-weight: 700;
+  gap: 8px;
+  min-height: 42px;
+  margin: 12px 0 6px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
 }
 
 .social-event-ca-bark-toggle input {
-  accent-color: #c98222;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--positive);
+}
+
+.social-event-ca-bark-toggle:has(input:checked) {
+  border-color: #9ec7ad;
+  background: #edf8f1;
+}
+
+.social-event-ca-bark-toggle span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .social-event-ca-bark-toggle svg {

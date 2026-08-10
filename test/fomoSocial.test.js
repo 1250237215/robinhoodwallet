@@ -51,3 +51,17 @@ test('FOMO watch accounts are local and never create DeBot commands', (t) => {
   assert.equal(removed.entry.syncStatus, 'synced');
   assert.equal(removed.command, null);
 });
+
+test('DeBot X snapshots cannot remove or alter local FOMO accounts', (t) => {
+  const store = createSocialStore(':memory:');
+  t.after(() => store.close());
+  store.addWatchAccounts([{
+    platform: 'fomo', handle: 'binkieee', eventTypes: ['fomo_buy', 'fomo_thesis'], caBark: true
+  }]);
+  store.reconcileRemoteWatchlist([{ platform: 'twitter', handle: 'alice', remoteId: '1' }]);
+  const fomo = store.listWatchlist({ platform: 'fomo' });
+  assert.equal(fomo.length, 1);
+  assert.equal(fomo[0].desiredState, 'active');
+  assert.deepEqual(fomo[0].eventTypes, ['fomo_buy', 'fomo_thesis']);
+  assert.equal(fomo[0].caBark, true);
+});

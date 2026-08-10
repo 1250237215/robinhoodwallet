@@ -2170,7 +2170,10 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
             timestamp
           );
         }
-        const normalized = inputs.map((input) => normalizeWatchAccount(input));
+        // DeBot owns the remote X watchlist only. Local FOMO entries must never
+        // be created, removed, or acknowledged by an X snapshot reconciliation.
+        const normalized = inputs.map((input) => normalizeWatchAccount(input))
+          .filter((account) => account.platform !== 'fomo');
         const remoteKeys = new Set(normalized.map((account) => `${account.platform}:${account.accountKey}`));
         const changes = [];
         for (const account of normalized) {
@@ -2193,6 +2196,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         }
         const activeRows = db.prepare("SELECT * FROM social_watchlist WHERE desired_state = 'active'").all();
         for (const row of activeRows) {
+          if (row.platform === 'fomo') continue;
           if (remoteKeys.has(`${row.platform}:${row.account_key}`)) continue;
           if (row.sync_status !== 'synced') continue;
           const pendingAdd = db.prepare(`
@@ -2212,6 +2216,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         }
         const removedRows = db.prepare("SELECT * FROM social_watchlist WHERE desired_state = 'removed'").all();
         for (const row of removedRows) {
+          if (row.platform === 'fomo') continue;
           if (remoteKeys.has(`${row.platform}:${row.account_key}`)) continue;
           if (row.sync_status === 'synced') continue;
           db.prepare(`
