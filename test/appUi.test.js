@@ -1774,7 +1774,7 @@ test('social feed validates and accurately renders relationship and profile acti
     appJs.indexOf('function socialActivityIdentity'),
     appJs.indexOf('function socialPostKey')
   );
-  assert.match(appJs, /const SOCIAL_EVENT_KINDS = new Set\(\['post', 'reply', 'quote', 'repost', 'delete', 'follow', 'unfollow', 'profile'\]\)/);
+  assert.match(appJs, /const SOCIAL_EVENT_KINDS = new Set\(\[[\s\S]*'profile',[\s\S]*'fomo_buy',[\s\S]*'fomo_verified'[\s\S]*\]\)/);
   assert.match(eventValidationSource, /const expectedActor = authorHandle\.toLowerCase\(\)/);
   assert.match(eventValidationSource, /!expectedActor \|\| colon\[2\]\.toLowerCase\(\) === expectedActor/);
   assert.match(eventValidationSource, /SOCIAL_HANDLE_PATTERN\.test\(targetHandle\)/);

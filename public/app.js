@@ -127,11 +127,33 @@ const SOCIAL_EVENT_TYPES = Object.freeze([
   'unfollow',
   'profile_name',
   'profile_avatar',
-  'profile_bio'
-  ,'fomo_buy', 'fomo_sell', 'fomo_swap', 'fomo_thesis', 'fomo_consensus', 'fomo_cash', 'fomo_verified'
+  'profile_bio',
+  'fomo_buy',
+  'fomo_sell',
+  'fomo_swap',
+  'fomo_thesis',
+  'fomo_consensus',
+  'fomo_cash',
+  'fomo_verified'
 ]);
 const SOCIAL_EVENT_TYPE_SET = new Set(SOCIAL_EVENT_TYPES);
-const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'quote', 'repost', 'delete', 'follow', 'unfollow', 'profile']);
+const SOCIAL_EVENT_KINDS = new Set([
+  'post',
+  'reply',
+  'quote',
+  'repost',
+  'delete',
+  'follow',
+  'unfollow',
+  'profile',
+  'fomo_buy',
+  'fomo_sell',
+  'fomo_swap',
+  'fomo_thesis',
+  'fomo_consensus',
+  'fomo_cash',
+  'fomo_verified'
+]);
 const SOCIAL_PROFILE_CHANGE_TYPES = new Set(['name', 'avatar', 'bio']);
 const SOCIAL_EVENT_TYPE_LABELS = Object.freeze({
   post: '发帖',
@@ -143,8 +165,8 @@ const SOCIAL_EVENT_TYPE_LABELS = Object.freeze({
   unfollow: '取消关注',
   profile_name: '改名',
   profile_avatar: '换头像',
-  profile_bio: '改简介'
-  ,fomo_buy: '买入', fomo_sell: '卖出', fomo_swap: '换仓', fomo_thesis: '观点',
+  profile_bio: '改简介',
+  fomo_buy: '买入', fomo_sell: '卖出', fomo_swap: '换仓', fomo_thesis: '观点',
   fomo_consensus: '共识', fomo_cash: '资金调动', fomo_verified: '官方验证'
 });
 const socialMediaObserver = 'IntersectionObserver' in window
