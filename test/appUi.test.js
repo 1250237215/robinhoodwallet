@@ -1769,6 +1769,13 @@ test('each watched account exposes behavior controls and a searchable custom not
   ]).map((entry) => entry.handle), ['zulu', 'middle', 'alpha']);
 });
 
+test('FOMO accounts edit only FOMO event types without clearing saved selections', () => {
+  assert.match(indexHtml, /value="fomo_buy"[\s\S]*value="fomo_verified"/);
+  assert.match(appJs, /function configureSocialEventOptions\(platform\)[\s\S]*SOCIAL_FOMO_EVENT_TYPES\.has\(input\.value\) === fomo/);
+  assert.match(appJs, /function openSocialEventEditor[\s\S]*configureSocialEventOptions\(entry\.platform\);[\s\S]*setSocialEventEditorSelection\(entry\.eventTypes\)/);
+  assert.match(appJs, /input\.checked = !input\.disabled && enabled\.has\(input\.value\)/);
+});
+
 test('social feed validates and accurately renders relationship and profile activity from snapshots and SSE', () => {
   const eventValidationSource = appJs.slice(
     appJs.indexOf('function socialActivityIdentity'),

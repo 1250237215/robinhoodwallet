@@ -7,7 +7,7 @@
     <title>1874catch</title>
     <link rel="icon" href="assets/ikun-chick.png" type="image/png" />
     <link rel="apple-touch-icon" href="assets/ikun-chick.png" />
-    <link rel="stylesheet" href="styles.css?v=20260810-fomo-feed-fix" />
+    <link rel="stylesheet" href="styles.css?v=20260810-fomo-editor-fix" />
   </head>
   <body>
     <main class="app-shell">
@@ -842,6 +842,13 @@
           <label><input type="checkbox" name="socialEventType" value="profile_name" /><span><i data-lucide="signature" aria-hidden="true"></i>改名</span></label>
           <label><input type="checkbox" name="socialEventType" value="profile_avatar" /><span><i data-lucide="image" aria-hidden="true"></i>换头像</span></label>
           <label><input type="checkbox" name="socialEventType" value="profile_bio" /><span><i data-lucide="notebook-pen" aria-hidden="true"></i>改简介</span></label>
+          <label><input type="checkbox" name="socialEventType" value="fomo_buy" /><span><i data-lucide="shopping-cart" aria-hidden="true"></i>买入</span></label>
+          <label><input type="checkbox" name="socialEventType" value="fomo_sell" /><span><i data-lucide="badge-dollar-sign" aria-hidden="true"></i>卖出</span></label>
+          <label><input type="checkbox" name="socialEventType" value="fomo_swap" /><span><i data-lucide="arrow-left-right" aria-hidden="true"></i>换仓</span></label>
+          <label><input type="checkbox" name="socialEventType" value="fomo_thesis" /><span><i data-lucide="message-square-text" aria-hidden="true"></i>观点</span></label>
+          <label><input type="checkbox" name="socialEventType" value="fomo_consensus" /><span><i data-lucide="users-round" aria-hidden="true"></i>共识</span></label>
+          <label><input type="checkbox" name="socialEventType" value="fomo_cash" /><span><i data-lucide="wallet-cards" aria-hidden="true"></i>资金调动</span></label>
+          <label><input type="checkbox" name="socialEventType" value="fomo_verified" /><span><i data-lucide="badge-check" aria-hidden="true"></i>官方验证</span></label>
         </fieldset>
         <div class="social-event-editor-actions">
           <div id="social-event-selection-actions">
@@ -955,7 +962,7 @@
     </dialog>
 
     <script src="vendor/lucide.js"></script>
-    <script src="app.js?v=20260810-fomo-feed-fix" type="module"></script>
+    <script src="app.js?v=20260810-fomo-editor-fix" type="module"></script>
     <script src="telegram-monitor.js" type="module"></script>
     <script src="telegram-social.js" type="module"></script>
     <script src="feishu-monitor.js" type="module"></script>

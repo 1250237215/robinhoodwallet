@@ -136,6 +136,7 @@ const SOCIAL_EVENT_TYPES = Object.freeze([
   'fomo_cash',
   'fomo_verified'
 ]);
+const SOCIAL_FOMO_EVENT_TYPES = new Set(SOCIAL_EVENT_TYPES.filter((eventType) => eventType.startsWith('fomo_')));
 const SOCIAL_EVENT_TYPE_SET = new Set(SOCIAL_EVENT_TYPES);
 const SOCIAL_EVENT_KINDS = new Set([
   'post',
@@ -4219,6 +4220,7 @@ function addSocialWatchAccounts(event) {
   elements.socialEventOptions.hidden = false;
   elements.socialEventSelectionActions.hidden = false;
   elements.socialEventEditorSaveLabel.textContent = '加入监控';
+  configureSocialEventOptions(platform);
   setSocialEventEditorSelection(SOCIAL_EVENT_TYPES);
   elements.socialEventEditorSave.disabled = state.socialMutationBusy;
   elements.socialEventEditor.showModal();
@@ -4229,7 +4231,17 @@ function addSocialWatchAccounts(event) {
 function setSocialEventEditorSelection(eventTypes) {
   const enabled = new Set(normalizedSocialEventTypes(eventTypes));
   elements.socialEventOptions.querySelectorAll('input[name="socialEventType"]').forEach((input) => {
-    input.checked = enabled.has(input.value);
+    input.checked = !input.disabled && enabled.has(input.value);
+  });
+}
+
+function configureSocialEventOptions(platform) {
+  const fomo = platform === 'fomo';
+  elements.socialEventOptions.querySelectorAll('input[name="socialEventType"]').forEach((input) => {
+    const visible = SOCIAL_FOMO_EVENT_TYPES.has(input.value) === fomo;
+    input.disabled = !visible;
+    input.closest('label').hidden = !visible;
+    if (!visible) input.checked = false;
   });
 }
 
@@ -4251,7 +4263,10 @@ function openSocialEventEditor(id, { noteOnly = false } = {}) {
   elements.socialEventOptions.hidden = noteOnly;
   elements.socialEventSelectionActions.hidden = noteOnly;
   elements.socialEventEditorSaveLabel.textContent = noteOnly ? '保存备注' : '保存设置';
-  if (!noteOnly) setSocialEventEditorSelection(entry.eventTypes);
+  if (!noteOnly) {
+    configureSocialEventOptions(entry.platform);
+    setSocialEventEditorSelection(entry.eventTypes);
+  }
   elements.socialEventEditorSave.disabled = state.socialMutationBusy;
   elements.socialEventEditor.showModal();
   refreshIcons(elements.socialEventEditor);
@@ -4265,6 +4280,7 @@ function resetSocialEventEditor() {
   elements.socialEventNote.value = '';
   elements.socialEventCaBark.checked = false;
   elements.socialEventNote.placeholder = '输入该账号的备注';
+  configureSocialEventOptions('twitter');
   elements.socialEventOptions.hidden = false;
   elements.socialEventSelectionActions.hidden = false;
 }
