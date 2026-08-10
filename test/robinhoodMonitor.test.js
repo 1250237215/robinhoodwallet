@@ -61,6 +61,34 @@ test('formats even the smallest token amount without a minimum-value filter', ()
   assert.equal(formatTokenAmount(42n, 0), '42');
 });
 
+test('forwards Feishu CA notifications through the shared Bark notifier', async () => {
+  const store = createRobinhoodStore(':memory:');
+  const calls = [];
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    rpcClient: { getBlockNumber() {}, getLogs() {} },
+    barkNotifier: {
+      notifyFeishuMessage(payload) {
+        calls.push(payload);
+        return Promise.resolve({ attempted: 1, sent: 1, failed: 0 });
+      }
+    }
+  });
+  monitor.updateSettings({ barkSound: 'chime', barkVolume: 7 });
+
+  const result = await monitor.notifyFeishuMessage({ personName: '大齐', contractAddresses: [token] });
+
+  assert.deepEqual(result, { attempted: 1, sent: 1, failed: 0 });
+  assert.deepEqual(calls, [{
+    personName: '大齐',
+    contractAddresses: [token],
+    sound: 'chime',
+    volume: 7
+  }]);
+  monitor.close();
+  store.close();
+});
+
 test('scans 100-wallet topic chunks with at most two concurrent log requests', async () => {
   const store = createRobinhoodStore(':memory:');
   addMonitoredWallets(store, 201);

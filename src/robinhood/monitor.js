@@ -850,6 +850,18 @@ export class RobinhoodWalletMonitor {
     });
   }
 
+  notifyFeishuMessage(payload) {
+    if (!this.barkNotifier?.notifyFeishuMessage) {
+      throw new Error('Bark notifications are unavailable');
+    }
+    this.#syncBarkSettings();
+    return this.barkNotifier.notifyFeishuMessage({
+      ...payload,
+      sound: this.settings.barkSound,
+      volume: this.settings.barkVolume
+    });
+  }
+
   notifySocialContract(payload) {
     if (!this.barkNotifier?.notifySocialContract) {
       throw new Error('Bark notifications are unavailable');
