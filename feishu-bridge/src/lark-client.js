@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { mkdir, stat } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { mkdir, readdir, stat } from 'node:fs/promises';
+import { basename, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -68,9 +68,14 @@ export function createLarkClient(options = {}) {
     if (!/^img_[A-Za-z0-9_-]+$/.test(resourceKey)) throw new TypeError('invalid image resource key');
     await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
     const outputName = `${messageId}-${resourceKey}`;
-    const outputPath = resolve(outputDirectory, outputName);
-    const cached = await stat(outputPath).catch(() => null);
-    if (cached?.isFile() && cached.size > 0) return outputPath;
+    const outputRoot = resolve(outputDirectory);
+    const cachedNames = await readdir(outputRoot).catch(() => []);
+    for (const name of cachedNames) {
+      if (name !== outputName && !name.startsWith(`${outputName}.`)) continue;
+      const cachedPath = resolve(outputRoot, name);
+      const cached = await stat(cachedPath).catch(() => null);
+      if (cached?.isFile() && cached.size > 0) return cachedPath;
+    }
     let stdout;
     try {
       ({ stdout } = await execFileAsync(command, [
@@ -97,7 +102,16 @@ export function createLarkClient(options = {}) {
       throw new LarkCliError('lark-cli returned invalid resource JSON', { messageId, resourceKey });
     }
     if (!payload.ok) throw new LarkCliError(payload.error?.message || 'lark-cli resource download failed', { messageId, resourceKey });
-    return outputPath;
+    const savedPath = resolve(String(payload.data?.saved_path || ''));
+    const savedName = basename(savedPath);
+    if (!savedPath.startsWith(`${outputRoot}${sep}`) || (savedName !== outputName && !savedName.startsWith(`${outputName}.`))) {
+      throw new LarkCliError('lark-cli returned an unsafe resource path', { messageId, resourceKey });
+    }
+    const saved = await stat(savedPath).catch(() => null);
+    if (!saved?.isFile() || saved.size <= 0) {
+      throw new LarkCliError('lark-cli resource file is missing', { messageId, resourceKey });
+    }
+    return savedPath;
   }
 
   return { fetchChatPage, downloadMessageResource };
