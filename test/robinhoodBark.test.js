@@ -203,6 +203,37 @@ test('sends Telegram CA alerts to enabled targets in a separate Bark group', asy
   store.close();
 });
 
+test('sends Feishu CA alerts with a DeBot purchase link in the body and click target', async () => {
+  const store = createRobinhoodStore(':memory:');
+  const requests = [];
+  const notifier = new RobinhoodBarkNotifier({
+    store,
+    fetchImpl: async (url) => {
+      requests.push(new URL(url));
+      return new Response(JSON.stringify({ code: 200 }), { status: 200 });
+    }
+  });
+  notifier.createTarget({ endpoint: 'device_key_123456', label: 'Phone' });
+  const debotUrl = 'https://debot.ai/token/bsc/289942_0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const delivery = await notifier.notifyFeishuMessage({
+    personName: '大齐',
+    sourceName: 'crazysen全员群',
+    text: 'new CA 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    contractAddresses: ['0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+    contractChains: ['bsc'],
+    debotUrls: [debotUrl],
+    messageUrl: 'https://applink.feishu.cn/client/chat/open?openChatId=oc_test'
+  });
+
+  assert.deepEqual(delivery, { attempted: 1, sent: 1, failed: 0 });
+  assert.equal(requests.length, 1);
+  assert.match(decodeURIComponent(requests[0].pathname), /飞书 CA：大齐/);
+  assert.match(decodeURIComponent(requests[0].pathname), /debot\.ai\/token\/bsc\/289942_/);
+  assert.equal(requests[0].searchParams.get('url'), debotUrl);
+  assert.equal(requests[0].searchParams.get('group'), '飞书 CA 监控');
+  store.close();
+});
+
 test('sends watched social CA alerts with the account and source link', async () => {
   const store = createRobinhoodStore(':memory:');
   const requests = [];
