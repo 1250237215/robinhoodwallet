@@ -31,7 +31,7 @@ function quotedSpeakerMatcher(name) {
   };
 }
 
-const daqi = prefixMatcher('【大齐');
+const daqi = prefixMatcher('【大齐】');
 const luck = prefixMatcher('【luck(发财版');
 const lu = prefixMatcher('【LU');
 const mrdq = prefixMatcher('【#144 MrDQ 🐒🦄🔥');

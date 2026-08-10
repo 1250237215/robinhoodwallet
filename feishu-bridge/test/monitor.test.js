@@ -25,12 +25,14 @@ test('extracts each monitored speaker with the correct source rule', () => {
     [byId.get('daqi'), byId.get('luck'), byId.get('lu')],
     [
       raw({ message_id: 'daqi', content: '【大齐】：\n看懂了' }),
+      raw({ message_id: 'daqi-follower', content: '【大齐的小跟班】：\n不应出现' }),
       raw({ message_id: 'luck', content: '【luck(发财版】：\n就对了' }),
       raw({ message_id: 'lu', content: '【LU】：\n奶蛙更纯粹一点' }),
       raw({ message_id: 'other', content: '【其他人】：\n不应出现' })
     ]
   );
   assert.equal(crazyMessages.get('daqi')[0].content, '看懂了');
+  assert.equal(crazyMessages.get('daqi').length, 1);
   assert.equal(crazyMessages.get('luck')[0].content, '就对了');
   assert.equal(crazyMessages.get('lu')[0].content, '奶蛙更纯粹一点');
 
