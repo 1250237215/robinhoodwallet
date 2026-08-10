@@ -3030,17 +3030,23 @@ function fomoPostMarkup(posts) {
   }).join('');
   const ca = nativeAsset ? '' : String(f.ca || primary.contractAddresses?.[0]?.address || '');
   const tokenUrl = ca ? `https://fomo.family/tokens/${encodeURIComponent(String(f.chain || '').toLowerCase())}/${encodeURIComponent(ca)}?r=Jokki` : '';
+  const chainKey = String(f.chain || primary.contractAddresses?.[0]?.chain || '').toLowerCase() === 'bnb'
+    ? 'bsc'
+    : String(f.chain || primary.contractAddresses?.[0]?.chain || '').toLowerCase();
+  const debotBuyUrl = ca && CHAIN_CONFIGS[chainKey]?.debotTokenRoot
+    ? safeHttpUrl(`${CHAIN_CONFIGS[chainKey].debotTokenRoot}${encodeURIComponent(ca)}`)
+    : '';
   return `
     <article class="social-post fomo-post" data-source="fomo" data-kind="${escapeHtml(primary.kind)}">
       <div class="social-avatar">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" loading="lazy" />` : escapeHtml(socialInitials(primary))}</div>
       <div class="social-post-copy">
         <header class="social-post-head"><div class="social-post-author"><div class="social-post-author-line"><strong>${escapeHtml(author.name || author.handle)}</strong><a href="https://fomo.family/profile/${encodeURIComponent(author.handle || '')}?r=Jokki" target="_blank" rel="noopener noreferrer">@${escapeHtml(author.handle || '')}</a></div><div class="social-post-meta"><span class="social-post-kind">FOMO</span>${author.followers ? `<span>${escapeHtml(compactNumberFormatter.format(author.followers))} 关注者</span>` : ''}</div></div><div class="social-post-head-tools">${Number.isSafeInteger(watchId) ? `<button class="inline-icon-button social-post-watch-remove" type="button" data-social-feed-watch-remove="${watchId}" title="停止监控 @${escapeHtml(author.handle || '')}"><i data-lucide="user-round-x"></i></button>` : ''}<time class="social-post-time" data-live-timestamp="${escapeHtml(String(primary.publishedAt))}">${escapeHtml(formatMonitorAge(primary.publishedAt))}</time></div></header>
         <div class="fomo-action-line"><strong>${escapeHtml(kindLabels[primary.kind] || '动态')} ${escapeHtml(f.symbol || '')}${escapeHtml(seqLabel)}</strong>${f.usd ? `<b>${escapeHtml(formatMoney(f.usd))}</b>` : ''}<span>${escapeHtml(f.chain || '')}</span></div>
-        ${primary.kind === 'fomo_thesis' && primary.content ? `<p class="social-post-content">${escapeHtml(primary.content)}</p>${translated ? `<p class="social-post-translation">${escapeHtml(translated)}</p>` : ''}` : ''}
+        ${primary.kind === 'fomo_thesis' && primary.content ? `<p class="social-post-content">${escapeHtml(primary.content)}</p>${translated ? `<div class="social-post-translation is-fomo"><b>中文翻译</b><p>${escapeHtml(translated)}</p></div>` : ''}` : ''}
         ${!nativeAsset && f.mcap ? `<div class="fomo-market"><span>成交市值 ${escapeHtml(formatMoney(f.mcap))}</span>${f.price ? `<span>成交价 ${escapeHtml(formatMoney(f.price, f.symbol || 'TOKEN'))}</span>` : ''}</div>` : ''}
         ${ca ? `<div class="social-post-contracts"><a class="social-contract-link" href="${escapeHtml(tokenUrl)}" target="_blank" rel="noopener noreferrer"><i data-lucide="scan-line"></i>${escapeHtml(ca.slice(0, 8))}...${escapeHtml(ca.slice(-6))}</a></div>` : ''}
         ${legs ? `<details class="fomo-flow"><summary>资金轮动 · ${ordered.length} 个连续动作</summary><ol>${legs}</ol></details>` : ''}
-        ${primary.url ? `<footer class="social-post-footer"><a href="${escapeHtml(primary.url)}" target="_blank" rel="noopener noreferrer">查看交易<i data-lucide="square-arrow-out-up-right"></i></a></footer>` : ''}
+        ${primary.url || debotBuyUrl ? `<footer class="social-post-footer">${primary.url ? `<a href="${escapeHtml(primary.url)}" target="_blank" rel="noopener noreferrer">查看来源<i data-lucide="square-arrow-out-up-right"></i></a>` : ''}${debotBuyUrl ? `<a href="${escapeHtml(debotBuyUrl)}" target="_blank" rel="noopener noreferrer">DeBot 购买<i data-lucide="shopping-cart"></i></a>` : ''}</footer>` : ''}
       </div>
     </article>`;
 }

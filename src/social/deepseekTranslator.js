@@ -449,6 +449,7 @@ export function createDeepSeekSocialTranslator({
       priority = 'realtime',
       signal = null,
       onTranslated,
+      onFailed = null,
       onDropped = null
     } = {}) {
       if (typeof onTranslated !== 'function') throw new TypeError('DeepSeek translation onTranslated callback is required');
@@ -457,6 +458,7 @@ export function createDeepSeekSocialTranslator({
       void request.result
         .then((translated) => {
           if (translated && !closed) return onTranslated(translated);
+          if (!translated && !closed && typeof onFailed === 'function') return onFailed();
           return undefined;
         })
         .catch(() => {});

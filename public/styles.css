@@ -4844,14 +4844,16 @@ button.telegram-reply {
   line-height: 1.5;
 }
 
-.social-post-translation.is-telegram b {
+.social-post-translation.is-telegram b,
+.social-post-translation.is-fomo b {
   display: block;
   margin-bottom: 3px;
   color: #6b7771;
   font-size: 9px;
 }
 
-.social-post-translation.is-telegram p {
+.social-post-translation.is-telegram p,
+.social-post-translation.is-fomo p {
   margin: 0;
   color: inherit;
   font-size: inherit;

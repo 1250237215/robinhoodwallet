@@ -241,6 +241,7 @@ export function createSocialService({
   let xReferenceBackfillTimer = null;
   let xReferenceBackfillQueue = [];
   let translationBackfillTimer = null;
+  let translationRecoveryTimer = null;
   let translationBackfillCursor = null;
   const translationBackfill = {
     scanned: 0,
@@ -512,6 +513,7 @@ export function createSocialService({
           sourceText,
           translatedContent
         ),
+        onFailed: priority === 'realtime' ? scheduleTranslationRecovery : null,
         onDropped: priority === 'background'
           ? () => {
               translationBackfill.complete = false;
@@ -524,6 +526,17 @@ export function createSocialService({
       else rejected += 1;
     }
     return { eligible, scheduled, rejected };
+  }
+
+  function scheduleTranslationRecovery() {
+    if (closed || translationRecoveryTimer) return;
+    translationRecoveryTimer = setTimeout(() => {
+      translationRecoveryTimer = null;
+      translationBackfill.complete = false;
+      translationBackfillCursor = null;
+      scheduleTranslationBackfill(0);
+    }, 15_000);
+    translationRecoveryTimer.unref?.();
   }
 
   function scheduleTranslationBackfill(delayMs = 100) {
@@ -1026,6 +1039,8 @@ export function createSocialService({
       xReferenceBackfillQueue = [];
       if (translationBackfillTimer) clearTimeout(translationBackfillTimer);
       translationBackfillTimer = null;
+      if (translationRecoveryTimer) clearTimeout(translationRecoveryTimer);
+      translationRecoveryTimer = null;
       xFastAbortController.abort(abortError());
       activeXReplyEnricher?.close?.();
       activeSocialTranslator?.close?.();

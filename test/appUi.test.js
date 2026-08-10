@@ -1776,6 +1776,15 @@ test('FOMO accounts edit only FOMO event types without clearing saved selections
   assert.match(appJs, /input\.checked = !input\.disabled && enabled\.has\(input\.value\)/);
 });
 
+test('FOMO thesis cards show DeepSeek translations and finish with a chain-specific DeBot buy link', () => {
+  assert.match(appJs, /class="social-post-translation is-fomo"><b>中文翻译<\/b>/);
+  assert.match(appJs, /const debotBuyUrl = ca && CHAIN_CONFIGS\[chainKey\]\?\.debotTokenRoot/);
+  assert.match(appJs, /DeBot 购买<i data-lucide="shopping-cart"><\/i>/);
+  assert.match(appJs, /String\(f\.chain[\s\S]*\.toLowerCase\(\) === 'bnb'[\s\S]*\? 'bsc'/);
+  assert.match(stylesCss, /\.social-post-translation\.is-fomo b/);
+  assert.match(stylesCss, /\.social-post-translation\.is-fomo p/);
+});
+
 test('social feed validates and accurately renders relationship and profile activity from snapshots and SSE', () => {
   const eventValidationSource = appJs.slice(
     appJs.indexOf('function socialActivityIdentity'),

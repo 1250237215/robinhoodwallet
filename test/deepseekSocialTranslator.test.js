@@ -160,6 +160,22 @@ test('failed translations are retried only within the configured bound and are n
   assert.equal(requests, 4, 'an empty failure must not enter the success cache');
 });
 
+test('queued translation reports a terminal failure for service-level recovery', async (t) => {
+  let failures = 0;
+  const translator = createDeepSeekSocialTranslator({
+    apiKey: 'translation-test-key',
+    maxAttempts: 1,
+    fetchImpl: async () => new Response('temporary failure', { status: 503 })
+  });
+  t.after(() => translator.close());
+
+  assert.equal(translator.enqueue('translate this FOMO thesis', {
+    onTranslated: () => assert.fail('failed translation must not publish text'),
+    onFailed: () => { failures += 1; }
+  }), true);
+  await eventually(() => assert.equal(failures, 1));
+});
+
 test('bounded translation queue runs realtime work ahead of queued history', async (t) => {
   const requested = [];
   const releases = [];
