@@ -751,27 +751,28 @@ if [[ "$telegram_should_run" == "1" ]]; then
 fi
 
 feishu_health_file="$(mktemp)"
+feishu_ready=0
 for attempt in $(seq 1 30); do
   if curl --fail --silent --show-error \
     --connect-timeout "$health_connect_timeout_seconds" \
     --max-time "$health_request_timeout_seconds" \
-    "http://127.0.0.1:18124/api/snapshot" > "$feishu_health_file"; then
+    "http://127.0.0.1:18124/api/snapshot" > "$feishu_health_file" \
+    && node --input-type=module -e '
+      import fs from "node:fs";
+      const payload = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      if (!Array.isArray(payload.people) || payload.people.length !== 6) process.exit(1);
+    ' "$feishu_health_file" 2>/dev/null; then
+    feishu_ready=1
     break
   fi
-  if [[ $attempt -eq 30 ]]; then
-    echo "Feishu monitor health check did not become ready." >&2
-    rm -f "$feishu_health_file"
-    exit 1
-  fi
+  (( attempt < 30 )) || break
   sleep 1
 done
-node --input-type=module -e '
-  import fs from "node:fs";
-  const payload = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-  if (!Array.isArray(payload.people) || payload.people.length !== 6) {
-    throw new Error("Feishu people catalog is unavailable");
-  }
-' "$feishu_health_file"
+if [[ "$feishu_ready" != "1" ]]; then
+  echo "Feishu monitor health check did not load its people catalog." >&2
+  rm -f "$feishu_health_file"
+  exit 1
+fi
 rm -f "$feishu_health_file"
 systemctl is-active --quiet "$feishu_service.service"
 quick_check_database "$(social_database_path)"

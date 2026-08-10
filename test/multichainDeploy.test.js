@@ -217,6 +217,7 @@ test('remote installer backs up, checks, deploys, and validates all seven databa
   assert.match(installer, /readonly chains=\("robinhood" "base" "bsc" "solana"\)/);
   assert.match(installer, /declare -A ports=\(\[robinhood\]=18118 \[base\]=18119 \[bsc\]=18122 \[solana\]=18120\)/);
   assert.match(installer, /PRAGMA quick_check/);
+  assert.match(installer, /feishu_ready=0[\s\S]*payload\.people\.length !== 6[\s\S]*feishu_ready=1/);
   assert.match(installer, /database_backup_path/);
   assert.match(installer, /social_database_backup_path/);
   assert.match(installer, /evm_wallet_database_backup_path/);
