@@ -3021,14 +3021,15 @@ function renderSocialWatchlist() {
 
 function fomoPostMarkup(posts) {
   const ordered = [...posts].sort((a, b) => Number(a.publishedAt) - Number(b.publishedAt));
-  const primary = [...ordered].reverse().find((post) => post.kind === 'fomo_buy' || post.kind === 'fomo_thesis') || ordered.at(-1);
+  const primary = [...ordered].reverse().find((post) => ['fomo_buy', 'fomo_sell', 'fomo_thesis'].includes(post.kind)) || ordered.at(-1);
   const author = primary.author || {};
   const avatarUrl = safeHttpUrl(author.avatarUrl);
   const watchEntry = socialWatchEntryForPost(primary);
   const watchId = Number(watchEntry?.id);
   const f = primary.raw?.fomo || {};
   const kindLabels = { fomo_buy: '买入', fomo_sell: '卖出', fomo_swap: '换仓', fomo_thesis: '观点', fomo_consensus: '共识', fomo_cash: '资金调动', fomo_verified: '官方验证' };
-  const seqLabel = f.pos?.seq === 'first' ? ' · 首次' : f.pos?.seq === 'add' ? ' · 加仓' : f.closed ? ' · 清仓' : '';
+  const closed = f.closed === true || f.pos?.closed === true;
+  const seqLabel = f.pos?.seq === 'first' ? '首次' : f.pos?.seq === 'add' ? '加仓' : closed ? '清仓' : '';
   const nativeAsset = /^(BNB|WBNB|SOL|WSOL|USDC|USDT)$/i.test(String(f.symbol || ''));
   const translated = socialTranslationForDisplay(primary.content, primary.translatedContent);
   const legs = ordered.filter((post) => post !== primary).map((post) => {
@@ -3037,23 +3038,42 @@ function fomoPostMarkup(posts) {
     const route = detail.route ? ` · ${detail.route}` : '';
     return `<li><time>${escapeHtml(new Date(Number(post.publishedAt)).toLocaleTimeString('zh-CN', { hour12: false }))}</time><strong>${escapeHtml(label)} ${escapeHtml(detail.symbol || '')}</strong><span>${escapeHtml(formatMoney(detail.usd))}${escapeHtml(route)}</span></li>`;
   }).join('');
+  const caInfo = Array.isArray(primary.raw?.caInfo) ? primary.raw.caInfo : [];
+  const tokenInfo = caInfo.find((item) => String(item?.address || '').toLowerCase() === String(f.ca || '').toLowerCase()) || caInfo[0] || {};
   const ca = nativeAsset ? '' : String(f.ca || primary.contractAddresses?.[0]?.address || '');
-  const tokenUrl = ca ? `https://fomo.family/tokens/${encodeURIComponent(String(f.chain || '').toLowerCase())}/${encodeURIComponent(ca)}?r=Jokki` : '';
-  const chainKey = String(f.chain || primary.contractAddresses?.[0]?.chain || '').toLowerCase() === 'bnb'
-    ? 'bsc'
-    : String(f.chain || primary.contractAddresses?.[0]?.chain || '').toLowerCase();
+  const rawChain = String(f.chain || primary.contractAddresses?.[0]?.chain || tokenInfo.resolved_chain || '').toLowerCase();
+  const chainKey = ['bnb', 'bsc'].includes(rawChain) ? 'bsc' : rawChain === 'sol' ? 'solana' : rawChain;
+  const fomoChain = chainKey === 'bsc' ? 'bnb' : chainKey;
+  const tokenUrl = ca && fomoChain
+    ? `https://fomo.family/tokens/${encodeURIComponent(fomoChain)}/${encodeURIComponent(ca)}?r=Jokki`
+    : '';
   const debotBuyUrl = ca && CHAIN_CONFIGS[chainKey]?.debotTokenRoot
     ? safeHttpUrl(`${CHAIN_CONFIGS[chainKey].debotTokenRoot}${encodeURIComponent(ca)}`)
     : '';
+  const symbol = String(f.symbol || tokenInfo.symbol || '').trim() || (ca ? `${ca.slice(0, 6)}...${ca.slice(-4)}` : '未知币种');
+  const marketCap = finiteNumber(f.mcap ?? f.mc ?? tokenInfo.mc ?? tokenInfo.market_cap);
+  const volume24h = finiteNumber(f.volume24h ?? f.vol24h ?? tokenInfo.vol24h);
+  const tradeAmount = finiteNumber(f.amount);
+  const tradeUsd = finiteNumber(f.usd);
+  const tradePrice = finiteNumber(f.price ?? tokenInfo.price);
+  const chainLabel = CHAIN_CONFIGS[chainKey]?.label || String(f.chain || primary.contractAddresses?.[0]?.chain || '链待确认');
+  const tradeMetrics = [
+    ['成交金额', tradeUsd === null ? '暂无' : formatMoney(tradeUsd)],
+    ['成交数量', tradeAmount === null ? '暂无' : `${formatCompact(tradeAmount)} ${symbol}`],
+    ['成交价', tradePrice === null ? '暂无' : formatMoney(tradePrice)],
+    ['当时市值', marketCap === null ? '暂无' : formatMoney(marketCap)],
+    ['24h 成交量', volume24h === null ? '暂无' : formatMoney(volume24h)]
+  ].map(([label, value]) => `<div><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`).join('');
   return `
     <article class="social-post fomo-post" data-source="fomo" data-kind="${escapeHtml(primary.kind)}">
       <div class="social-avatar">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" loading="lazy" />` : escapeHtml(socialInitials(primary))}</div>
       <div class="social-post-copy">
         <header class="social-post-head"><div class="social-post-author"><div class="social-post-author-line"><strong>${escapeHtml(author.name || author.handle)}</strong><a href="https://fomo.family/profile/${encodeURIComponent(author.handle || '')}?r=Jokki" target="_blank" rel="noopener noreferrer">@${escapeHtml(author.handle || '')}</a></div><div class="social-post-meta"><span class="social-post-kind">FOMO</span>${author.followers ? `<span>${escapeHtml(compactNumberFormatter.format(author.followers))} 关注者</span>` : ''}</div></div><div class="social-post-head-tools">${Number.isSafeInteger(watchId) ? `<button class="inline-icon-button social-post-watch-remove" type="button" data-social-feed-watch-remove="${watchId}" title="停止监控 @${escapeHtml(author.handle || '')}"><i data-lucide="user-round-x"></i></button>` : ''}<time class="social-post-time" data-live-timestamp="${escapeHtml(String(primary.publishedAt))}">${escapeHtml(formatMonitorAge(primary.publishedAt))}</time></div></header>
-        <div class="fomo-action-line"><strong>${escapeHtml(kindLabels[primary.kind] || '动态')} ${escapeHtml(f.symbol || '')}${escapeHtml(seqLabel)}</strong>${f.usd ? `<b>${escapeHtml(formatMoney(f.usd))}</b>` : ''}<span>${escapeHtml(f.chain || '')}</span></div>
+        <div class="fomo-action-line"><strong>${escapeHtml(kindLabels[primary.kind] || '动态')} · ${escapeHtml(symbol)}</strong>${seqLabel ? `<b>${escapeHtml(seqLabel)}</b>` : ''}<span>${escapeHtml(chainLabel)}</span></div>
         ${primary.kind === 'fomo_thesis' && primary.content ? `<p class="social-post-content">${escapeHtml(primary.content)}</p>${translated ? `<div class="social-post-translation is-fomo"><b>中文翻译</b><p>${escapeHtml(translated)}</p></div>` : ''}` : ''}
-        ${!nativeAsset && f.mcap ? `<div class="fomo-market"><span>成交市值 ${escapeHtml(formatMoney(f.mcap))}</span>${f.price ? `<span>成交价 ${escapeHtml(formatMoney(f.price, f.symbol || 'TOKEN'))}</span>` : ''}</div>` : ''}
-        ${ca ? `<div class="social-post-contracts"><a class="social-contract-link" href="${escapeHtml(tokenUrl)}" target="_blank" rel="noopener noreferrer"><i data-lucide="scan-line"></i>${escapeHtml(ca.slice(0, 8))}...${escapeHtml(ca.slice(-6))}</a></div>` : ''}
+        ${['fomo_buy', 'fomo_sell', 'fomo_swap'].includes(primary.kind) ? `<div class="fomo-trade-grid">${tradeMetrics}</div>` : ''}
+        ${ca ? `<div class="fomo-contract-row"><span>CA</span>${tokenUrl ? `<a href="${escapeHtml(tokenUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(ca)}<i data-lucide="square-arrow-out-up-right"></i></a>` : `<code>${escapeHtml(ca)}</code>`}</div>` : ''}
+        ${f.route || f.via || closed ? `<div class="fomo-market">${f.route ? `<span>路径 ${escapeHtml(f.route)}</span>` : ''}${f.via ? `<span>来源 ${escapeHtml(f.via)}</span>` : ''}${closed ? '<span>仓位 已清仓</span>' : ''}</div>` : ''}
         ${legs ? `<details class="fomo-flow"><summary>资金轮动 · ${ordered.length} 个连续动作</summary><ol>${legs}</ol></details>` : ''}
         ${primary.url || debotBuyUrl ? `<footer class="social-post-footer">${primary.url ? `<a href="${escapeHtml(primary.url)}" target="_blank" rel="noopener noreferrer">查看来源<i data-lucide="square-arrow-out-up-right"></i></a>` : ''}${debotBuyUrl ? `<a href="${escapeHtml(debotBuyUrl)}" target="_blank" rel="noopener noreferrer">DeBot 购买<i data-lucide="shopping-cart"></i></a>` : ''}</footer>` : ''}
       </div>

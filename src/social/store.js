@@ -1314,7 +1314,8 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       discoveredAt: Math.min(existing.debotDiscoveredAt, normalized.discoveredAt),
       receivedAt: Math.min(existing.receivedAt, normalized.receivedAt),
       sourceUpdatedAt: Math.max(existing.sourceUpdatedAt, normalized.sourceUpdatedAt),
-      deletedAt: choose('deletedAt', existing.deletedAt)
+      deletedAt: choose('deletedAt', existing.deletedAt),
+      raw: choose('raw', existing.raw)
     };
     if (/^\d{5,25}$/.test(String(merged.replyContext?.externalId || ''))) {
       merged.replyToExternalId = String(merged.replyContext.externalId);
@@ -1354,7 +1355,8 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       receivedAt: merged.receivedAt,
       sourceUpdatedAt: merged.sourceUpdatedAt,
       deleted: merged.deletedAt !== null,
-      deletedAt: merged.deletedAt
+      deletedAt: merged.deletedAt,
+      raw: merged.raw
     };
     delete preview.updatedAt;
     delete preview.storedAt;
@@ -1390,7 +1392,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       merged.discoveredAt,
       merged.sourceUpdatedAt,
       merged.deletedAt,
-      json(normalized.raw),
+      json(merged.raw),
       timestamp,
       existing.id
     );

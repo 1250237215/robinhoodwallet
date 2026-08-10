@@ -23,12 +23,33 @@ test('FOMO catalog preserves source identity and resolves avatars', () => {
 test('FOMO events expose structured trade fields and CA for Bark', () => {
   const post = normalizeFomoEvent({ seq: 7, handle: 'binkieee', action: 'fomo_buy', ts: 1_786_320_655_000, payload: {
     tweet_id: 'fomo:ws:buy-1', author_name: 'Binkieee', content_text: '买入 SD',
-    extra: { fomo: { symbol: 'SD', ca: '3H7kMWRa7WfrpBGcyMpiAxkjBCc7k1pDShjQLDHJpump', chain: 'Solana', usd: 3088, followers: 128005 } }
+    extra: { fomo: { symbol: 'SD', ca: '3H7kMWRa7WfrpBGcyMpiAxkjBCc7k1pDShjQLDHJpump', chain: 'Solana', usd: 3088, followers: 128005 } },
+    ca_info: [{ address: '3H7kMWRa7WfrpBGcyMpiAxkjBCc7k1pDShjQLDHJpump', resolved_chain: 'solana', symbol: 'SD', mc: 230000, vol24h: 271000, price: 0.0003235 }]
   } });
   assert.equal(post.kind, 'fomo_buy');
   assert.equal(post.authorFollowers, 128005);
   assert.equal(post.contractAddresses[0].address, '3H7kMWRa7WfrpBGcyMpiAxkjBCc7k1pDShjQLDHJpump');
   assert.equal(post.raw.fomo.usd, 3088);
+  assert.equal(post.raw.fomo.mcap, 230000);
+  assert.equal(post.raw.fomo.volume24h, 271000);
+  assert.equal(post.raw.fomo.price, 0.0003235);
+});
+
+test('FOMO translation patches preserve structured buy and sell details', (t) => {
+  const store = createSocialStore(':memory:');
+  t.after(() => store.close());
+  const original = normalizeFomoEvent({ seq: 8, handle: 'binkieee', action: 'fomo_sell', ts: 1_786_320_655_000, payload: {
+    tweet_id: 'fomo:trade-8', content_text: '卖出 PIZZA',
+    extra: { fomo: { symbol: 'PIZZA', ca: '0x8554d38b95e4f7ca11d391008627df30b2b07777', chain: 'BNB', usd: 2615, amount: 3425704, price: 0.000763, closed: true } },
+    ca_info: [{ address: '0x8554d38b95e4f7ca11d391008627df30b2b07777', resolved_chain: 'bsc', mc: 748103, vol24h: 778304 }]
+  } });
+  store.upsertPosts([original]);
+  store.upsertPosts([{ source: 'fomo', externalId: original.externalId, sourceUpdatedAt: original.sourceUpdatedAt, translatedContent: '卖出 PIZZA' }]);
+  const stored = store.getPost('fomo', original.externalId);
+  assert.equal(stored.raw.fomo.symbol, 'PIZZA');
+  assert.equal(stored.raw.fomo.chain, 'bsc');
+  assert.equal(stored.raw.fomo.mcap, 748103);
+  assert.equal(stored.raw.fomo.closed, true);
 });
 
 test('duplicate firehose and on-chain trade frames collapse by transaction', () => {

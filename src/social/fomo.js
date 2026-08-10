@@ -8,6 +8,22 @@ function absoluteUrl(value, baseUrl) {
   try { return new URL(String(value), baseUrl).href; } catch { return ''; }
 }
 
+function finiteNumber(...values) {
+  for (const value of values) {
+    const number = Number(value);
+    if (value !== null && value !== '' && Number.isFinite(number)) return number;
+  }
+  return null;
+}
+
+function normalizedChain(value) {
+  const chain = String(value || '').trim().toLowerCase();
+  if (['bnb', 'bsc', 'binance', 'binance-smart-chain'].includes(chain)) return 'bsc';
+  if (['sol', 'solana'].includes(chain)) return 'solana';
+  if (['rh', 'robinhood', 'robinhood-chain'].includes(chain)) return 'robinhood';
+  return chain;
+}
+
 export function normalizeFomoCatalog(payload, baseUrl = 'https://wind.jokkimon.club') {
   return (Array.isArray(payload?.accounts) ? payload.accounts : []).map((account) => ({
     platform: 'fomo',
@@ -23,10 +39,24 @@ export function normalizeFomoEvent(event, baseUrl = 'https://wind.jokkimon.club'
   const payload = event?.payload && typeof event.payload === 'object' ? event.payload : {};
   const action = String(event?.action || payload.action || '').toLowerCase();
   if (!FOMO_ACTIONS.has(action)) return null;
-  const fomo = payload?.extra?.fomo && typeof payload.extra.fomo === 'object' ? payload.extra.fomo : {};
+  const sourceFomo = payload?.extra?.fomo && typeof payload.extra.fomo === 'object' ? payload.extra.fomo : {};
+  const caInfo = Array.isArray(payload.ca_info) ? payload.ca_info : [];
   const handle = String(event.handle || payload.handle || '').replace(/^@/, '').toLowerCase();
-  const ca = String(fomo.ca || payload.ca_info?.[0]?.address || '').trim();
-  const chain = String(fomo.chain || payload.ca_info?.[0]?.resolved_chain || '').trim();
+  const ca = String(sourceFomo.ca || caInfo[0]?.address || '').trim();
+  const tokenInfo = caInfo.find((item) => String(item?.address || '').toLowerCase() === ca.toLowerCase()) || caInfo[0] || {};
+  const chain = normalizedChain(sourceFomo.chain || tokenInfo.resolved_chain || tokenInfo.chain);
+  const fomo = {
+    ...sourceFomo,
+    symbol: String(sourceFomo.symbol || tokenInfo.symbol || '').trim(),
+    ca,
+    chain,
+    usd: finiteNumber(sourceFomo.usd),
+    amount: finiteNumber(sourceFomo.amount),
+    price: finiteNumber(sourceFomo.price, tokenInfo.price),
+    mcap: finiteNumber(sourceFomo.mcap, sourceFomo.mc, tokenInfo.mc, tokenInfo.market_cap),
+    volume24h: finiteNumber(sourceFomo.volume24h, sourceFomo.vol24h, tokenInfo.vol24h),
+    createdTs: finiteNumber(sourceFomo.createdTs, sourceFomo.created_ts, tokenInfo.created_ts)
+  };
   const avatar = absoluteUrl(payload.avatar_url, baseUrl);
   return {
     source: 'fomo',
@@ -38,11 +68,11 @@ export function normalizeFomoEvent(event, baseUrl = 'https://wind.jokkimon.club'
     authorFollowers: Number.isFinite(Number(fomo.followers)) ? Number(fomo.followers) : null,
     content: String(payload.content_text || ''),
     url: absoluteUrl(fomo.tx_url || payload.tweet_url || `https://fomo.family/profile/${handle}`),
-    contractAddresses: ca ? [{ address: ca, chain: chain.toLowerCase() }] : [],
-    chainTags: chain ? [chain.toLowerCase()] : [],
+    contractAddresses: ca ? [{ address: ca, chain }] : [],
+    chainTags: chain ? [chain] : [],
     publishedAt: Number(event.ts || payload.timestamp || Date.now()),
     sourceUpdatedAt: Number(event.ts || payload.timestamp || Date.now()),
-    raw: { fomo, caInfo: payload.ca_info || [], action, seq: event.seq || null }
+    raw: { fomo, caInfo, action, seq: event.seq || null }
   };
 }
 

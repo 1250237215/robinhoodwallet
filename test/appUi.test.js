@@ -1780,9 +1780,17 @@ test('FOMO thesis cards show DeepSeek translations and finish with a chain-speci
   assert.match(appJs, /class="social-post-translation is-fomo"><b>中文翻译<\/b>/);
   assert.match(appJs, /const debotBuyUrl = ca && CHAIN_CONFIGS\[chainKey\]\?\.debotTokenRoot/);
   assert.match(appJs, /DeBot 购买<i data-lucide="shopping-cart"><\/i>/);
-  assert.match(appJs, /String\(f\.chain[\s\S]*\.toLowerCase\(\) === 'bnb'[\s\S]*\? 'bsc'/);
+  assert.match(appJs, /const chainKey = \['bnb', 'bsc'\]\.includes\(rawChain\) \? 'bsc'/);
   assert.match(stylesCss, /\.social-post-translation\.is-fomo b/);
   assert.match(stylesCss, /\.social-post-translation\.is-fomo p/);
+});
+
+test('FOMO buy and sell cards show complete trade and market details with valid chain links', () => {
+  assert.match(appJs, /\['fomo_buy', 'fomo_sell', 'fomo_thesis'\]\.includes\(post\.kind\)/);
+  assert.match(appJs, /\['成交金额',[\s\S]*\['成交数量',[\s\S]*\['成交价',[\s\S]*\['当时市值',[\s\S]*\['24h 成交量'/);
+  assert.match(appJs, /const fomoChain = chainKey === 'bsc' \? 'bnb' : chainKey/);
+  assert.match(appJs, /class="fomo-contract-row"[\s\S]*escapeHtml\(ca\)/);
+  assert.match(stylesCss, /\.fomo-trade-grid \{[\s\S]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
 });
 
 test('social feed validates and accurately renders relationship and profile activity from snapshots and SSE', () => {
