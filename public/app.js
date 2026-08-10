@@ -408,6 +408,7 @@ const elements = {
   socialWatchlistForm: document.querySelector('#social-watchlist-form'),
   socialWatchlistInput: document.querySelector('#social-watchlist-input'),
   socialWatchlistPlatform: document.querySelector('#social-watchlist-platform'),
+  socialSourceCount: document.querySelector('#social-source-count'),
   socialFomoCatalog: document.querySelector('#social-fomo-catalog'),
   socialFomoResults: document.querySelector('#social-fomo-results'),
   socialWatchlistAdd: document.querySelector('#social-watchlist-add'),
@@ -417,7 +418,9 @@ const elements = {
   socialWatchlistSelectAll: document.querySelector('#social-watchlist-select-all'),
   socialWatchlistSelectedCount: document.querySelector('#social-watchlist-selected-count'),
   socialWatchlistDelete: document.querySelector('#social-watchlist-delete'),
+  socialWatchlistActions: document.querySelector('#social-watchlist-actions'),
   socialWatchlist: document.querySelector('#social-watchlist'),
+  telegramSocialWatchlist: document.querySelector('#telegram-social-watchlist'),
   socialEventEditor: document.querySelector('#social-event-editor'),
   socialEventEditorForm: document.querySelector('#social-event-editor-form'),
   socialEventEditorEyebrow: document.querySelector('#social-event-editor-eyebrow'),
@@ -2915,18 +2918,37 @@ function renderSocialBridgeStatus() {
 }
 
 function renderSocialWatchlist() {
-  const entries = state.socialWatchlist;
+  const platform = elements.socialWatchlistPlatform?.value || 'twitter';
+  const telegram = platform === 'telegram';
+  const entries = telegram
+    ? []
+    : state.socialWatchlist.filter((entry) => String(entry.platform || 'twitter') === platform);
+  elements.socialWatchlistForm.hidden = telegram;
+  elements.socialWatchlistActions.hidden = telegram;
+  elements.socialWatchlist.hidden = telegram;
+  elements.telegramSocialWatchlist.hidden = !telegram;
+  elements.socialPairingRow.hidden = telegram || !SOCIAL_WRITE_CONTEXT_ALLOWED
+    || (state.socialExtensionReady && state.socialExtensionWritable);
+  if (telegram) {
+    const selected = new Set((telegramSocialSnapshot().selected_chat_ids || []).map(String)).size;
+    elements.socialSourceCount.textContent = `${selected} 个已选频道`;
+    elements.socialWatchlistSummary.textContent = `Telegram · ${selected} 个已选频道`;
+    return;
+  }
   const validIds = new Set(entries.map((entry) => Number(entry.id)));
   for (const id of state.socialSelectedWatchlist) if (!validIds.has(id)) state.socialSelectedWatchlist.delete(id);
   const selectedCount = state.socialSelectedWatchlist.size;
-  elements.socialWatchlistSummary.textContent = `${entries.length} 个账号 · ${formatInteger(state.socialCounts.unsyncedWatchlist ?? 0)} 个待同步`;
+  const sourceLabel = platform === 'fomo' ? 'FOMO' : 'X';
+  const pending = entries.filter((entry) => entry.syncStatus !== 'synced').length;
+  elements.socialWatchlistSummary.textContent = `${sourceLabel} · ${entries.length} 个已选账号${pending ? ` · ${pending} 个待同步` : ''}`;
+  elements.socialSourceCount.textContent = `${entries.length} 个已选账号`;
   elements.socialWatchlistSelectedCount.textContent = `已选 ${selectedCount} 个`;
   elements.socialWatchlistDelete.disabled = selectedCount === 0 || state.socialMutationBusy;
   elements.socialWatchlistSelectAll.checked = entries.length > 0 && selectedCount === entries.length;
   elements.socialWatchlistSelectAll.indeterminate = selectedCount > 0 && selectedCount < entries.length;
   elements.socialWatchlistAdd.disabled = state.socialMutationBusy;
   if (!entries.length) {
-    elements.socialWatchlist.innerHTML = '<div class="monitor-empty-state"><i data-lucide="user-round-search" aria-hidden="true"></i><strong>监控名单为空</strong><span>加入账号后会同步到 DeBot。</span></div>';
+    elements.socialWatchlist.innerHTML = `<div class="monitor-empty-state"><i data-lucide="user-round-search" aria-hidden="true"></i><strong>${sourceLabel} 监控名单为空</strong><span>${platform === 'fomo' ? '在上方搜索 FOMO 账号并加入。' : '在上方输入 X 账号并加入。'}</span></div>`;
     refreshIcons(elements.socialWatchlist);
     return;
   }
@@ -2934,7 +2956,7 @@ function renderSocialWatchlist() {
     const id = Number(entry.id);
     const handle = String(entry.handle || entry.accountKey || 'unknown').replace(/^@/, '');
     const status = String(entry.syncStatus || 'pending');
-    const statusLabel = status === 'synced' ? '已同步' : status === 'failed' ? '失败' : '待同步';
+    const statusLabel = platform === 'fomo' ? '监控中' : status === 'synced' ? '已同步' : status === 'failed' ? '失败' : '待同步';
     const note = String(entry.note || '').trim();
     const eventTypes = normalizedSocialEventTypes(entry.eventTypes);
     const eventSummary = eventTypes.length === SOCIAL_EVENT_TYPES.length
@@ -7740,7 +7762,11 @@ elements.socialSearch.addEventListener('input', () => {
   }, SOCIAL_SEARCH_DEBOUNCE_MS);
 });
 elements.socialWatchlistForm.addEventListener('submit', addSocialWatchAccounts);
-elements.socialWatchlistPlatform?.addEventListener('change', () => void refreshFomoCatalog());
+elements.socialWatchlistPlatform?.addEventListener('change', () => {
+  state.socialSelectedWatchlist.clear();
+  renderSocialWatchlist();
+  void refreshFomoCatalog();
+});
 elements.socialWatchlistInput.addEventListener('input', () => {
   if (elements.socialWatchlistPlatform?.value !== 'fomo') return;
   clearTimeout(socialFomoSearchTimer);

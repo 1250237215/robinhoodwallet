@@ -605,14 +605,16 @@
                   <i data-lucide="x" aria-hidden="true"></i>
                 </button>
               </header>
+              <div class="social-source-switcher">
+                <label for="social-watchlist-platform">来源</label>
+                <select id="social-watchlist-platform" aria-label="监控来源">
+                  <option value="twitter">X</option>
+                  <option value="fomo">FOMO</option>
+                  <option value="telegram">Telegram</option>
+                </select>
+                <span id="social-source-count">0 个已选账号</span>
+              </div>
               <form class="social-watchlist-form" id="social-watchlist-form">
-                <label>
-                  <span>来源</span>
-                  <select id="social-watchlist-platform" aria-label="监控来源">
-                    <option value="twitter">X</option>
-                    <option value="fomo">FOMO</option>
-                  </select>
-                </label>
                 <label>
                   <span>账号，一行一个</span>
                   <textarea id="social-watchlist-input" rows="3" placeholder="@username&#10;https://x.com/username" list="social-fomo-catalog" required></textarea>
@@ -634,7 +636,7 @@
                   保存配对
                 </button>
               </div>
-              <div class="social-watchlist-actions">
+              <div class="social-watchlist-actions" id="social-watchlist-actions">
                 <label>
                   <input id="social-watchlist-select-all" type="checkbox" />
                   <span>全选</span>
@@ -647,7 +649,7 @@
               </div>
               <div class="social-watchlist" id="social-watchlist" aria-live="polite"></div>
 
-              <section class="telegram-social-watchlist" aria-labelledby="telegram-social-watchlist-title">
+              <section class="telegram-social-watchlist" id="telegram-social-watchlist" aria-labelledby="telegram-social-watchlist-title" hidden>
                 <header>
                   <div>
                     <h5 id="telegram-social-watchlist-title">Telegram 群组与频道</h5>

@@ -3922,12 +3922,35 @@ button.telegram-reply {
   align-items: end;
 }
 
-.social-watchlist-form select {
-  min-height: 40px;
+.social-source-switcher {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.social-source-switcher select {
+  width: auto;
+  min-width: 92px;
+  max-width: 126px;
+  height: 30px;
   border: 1px solid var(--line);
+  border-radius: 4px;
   background: var(--surface);
-  color: var(--text);
-  padding: 0 32px 0 10px;
+  color: var(--ink);
+  padding: 0 25px 0 8px;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.social-source-switcher > span {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .social-fomo-results {
