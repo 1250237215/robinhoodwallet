@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { PEOPLE } from '../src/config.js';
 import { extractImageResources, extractMessages, mergeMessages, PeopleMonitor } from '../src/monitor.js';
+import { normalizeRawMessage } from '../src/lark-client.js';
 
 function raw(overrides = {}) {
   return {
@@ -69,6 +70,19 @@ test('extracts image and image-sticker resources while keeping surrounding text'
   })]).get('one');
   assert.equal(message.content, '图片说明');
   assert.deepEqual(message.media, [{ type: 'image', resourceKey: 'img_v3_sticker' }]);
+});
+
+test('normalizes Feishu raw millisecond timestamps without a twelve-hour drift', () => {
+  const message = normalizeRawMessage({
+    message_id: 'om_mrdq',
+    chat_id: 'oc_chat',
+    message_position: '123',
+    create_time: '1786326730082',
+    body: { content: JSON.stringify({ text: '这risk你妈' }) },
+    msg_type: 'text'
+  });
+  assert.equal(message.create_time, '2026-08-10T01:52:10.082Z');
+  assert.match(message.message_app_link, /position=123/);
 });
 
 test('PeopleMonitor prevents overlapping refreshes', async () => {

@@ -13,20 +13,53 @@ export class LarkCliError extends Error {
   }
 }
 
+function contentText(value) {
+  if (Array.isArray(value)) return value.map(contentText).filter(Boolean).join('');
+  if (!value || typeof value !== 'object') return String(value || '');
+  if (value.tag === 'img' && value.image_key) return `[Image: ${value.image_key}]`;
+  if (value.tag === 'at') return `@${value.user_name || value.user_id || ''}`;
+  if (value.tag === 'text' || value.tag === 'a') return String(value.text || value.href || '');
+  return contentText(value.text || value.content || value.content_v2 || '');
+}
+
+export function normalizeRawMessage(message) {
+  let body = message.body?.content ?? message.content ?? '';
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch { /* keep plain text */ }
+  }
+  const content = contentText(body);
+  const timestamp = Number(message.create_time);
+  const createdAt = Number.isFinite(timestamp) && timestamp > 0
+    ? new Date(timestamp).toISOString()
+    : String(message.create_time || '');
+  return {
+    ...message,
+    content,
+    create_time: createdAt,
+    message_app_link: message.message_app_link || (message.chat_id && message.message_position
+      ? `https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(message.chat_id)}&position=${encodeURIComponent(message.message_position)}`
+      : '')
+  };
+}
+
 export function createLarkClient(options = {}) {
   const command = options.command || process.env.LARK_CLI || 'lark-cli';
   const timeout = Number(options.timeout || 30_000);
 
   async function fetchChatPage(chatId, { pageSize = 50, pageToken = '' } = {}) {
+    const params = {
+      container_id_type: 'chat',
+      container_id: chatId,
+      page_size: String(pageSize),
+      sort_type: 'ByCreateTimeDesc'
+    };
+    if (pageToken) params.page_token = pageToken;
     const args = [
-      'im', '+chat-messages-list',
+      'api', 'GET', '/open-apis/im/v1/messages',
       '--as', 'user',
-      '--chat-id', chatId,
-      '--page-size', String(pageSize),
-      '--sort', 'desc',
+      '--params', JSON.stringify(params),
       '--format', 'json'
     ];
-    if (pageToken) args.push('--page-token', pageToken);
 
     let stdout;
     try {
@@ -57,7 +90,7 @@ export function createLarkClient(options = {}) {
     }
 
     return {
-      messages: Array.isArray(payload.data?.messages) ? payload.data.messages : [],
+      messages: (Array.isArray(payload.data?.items) ? payload.data.items : []).map(normalizeRawMessage),
       hasMore: Boolean(payload.data?.has_more),
       pageToken: payload.data?.page_token || ''
     };
