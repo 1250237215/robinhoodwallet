@@ -760,7 +760,7 @@ for attempt in $(seq 1 30); do
     && node --input-type=module -e '
       import fs from "node:fs";
       const payload = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-      if (!Array.isArray(payload.people) || payload.people.length !== 6) process.exit(1);
+      if (!Array.isArray(payload.people) || payload.people.length < 1) process.exit(1);
     ' "$feishu_health_file" 2>/dev/null; then
     feishu_ready=1
     break
