@@ -43,6 +43,32 @@ test('extracts each monitored speaker with the correct source rule', () => {
   );
   assert.equal(laserMessages.get('lasercat')[0].content, '奥德赛');
   assert.equal(laserMessages.get('mrdq')[0].content, '有孩哥真好');
+
+  const jinwaMessages = extractMessages(
+    [byId.get('chenpepe')],
+    [
+      raw({ message_id: 'chenpepe', content: '0x1cd9dc24e2d2becfe09aa326fea14319f6a47777' }),
+      raw({ message_id: 'jinwa-other', content: '【其他人】：\n不应出现' })
+    ]
+  );
+  assert.deepEqual(jinwaMessages.get('chenpepe').map((message) => message.content), [
+    '0x1cd9dc24e2d2becfe09aa326fea14319f6a47777'
+  ]);
+
+  const ownerMessages = extractMessages(
+    [byId.get('cryptod'), byId.get('wangxiaoer'), byId.get('0xsun')],
+    [
+      raw({ message_id: 'cryptod', content: '群主引用 CryptoD ：睡一下 半夜起床' }),
+      raw({ message_id: 'wangxiaoer', content: '不骂没人买课引用 王小二 的消息 : 徐冲浪这傻逼之前骂所有币圈的' }),
+      raw({ message_id: '0xsun', content: '龟龟引用 孙嘉良0xSun 的消息 : 我这iPhone充电的时候太烫了' }),
+      raw({ message_id: 'crypto-d-caicai', content: '【Crypto D财财】：\n不应出现' }),
+      raw({ message_id: 'cryptodog', content: '引用 CryptoDog ：不应出现' }),
+      raw({ message_id: 'study-0xsun', content: '【Study 0xsun】：\n不应出现' })
+    ]
+  );
+  assert.deepEqual(ownerMessages.get('cryptod').map((message) => message.content), ['睡一下 半夜起床']);
+  assert.deepEqual(ownerMessages.get('wangxiaoer').map((message) => message.content), ['徐冲浪这傻逼之前骂所有币圈的']);
+  assert.deepEqual(ownerMessages.get('0xsun').map((message) => message.content), ['我这iPhone充电的时候太烫了']);
 });
 
 test('mergeMessages deduplicates, sorts newest first, and applies the limit', () => {

@@ -1,6 +1,6 @@
 # 飞书人物雷达
 
-VPS 实时读取服务，通过 VPS 上已授权的 `lark-cli` 监控 6 个飞书人物：
+VPS 实时读取服务，通过 VPS 上已授权的 `lark-cli` 监控 10 个飞书人物：
 
 - Sen（`crazySen个人发言`）
 - Lasercat（`Lasercat全员群` 中无昵称前缀的个人机器人流）
@@ -8,6 +8,10 @@ VPS 实时读取服务，通过 VPS 上已授权的 `lark-cli` 监控 6 个飞�
 - 大齐
 - luck(发财版
 - LU
+- Chenpepe（`金蛙聊天群｜erwanft` 中没有昵称前缀的发言）
+- CryptoD（`各大群主发言（一级）` 中的引用发言）
+- 王小二（`各大群主发言（一级）` 中的引用发言）
+- 0xSun（`各大群主发言（一级）` 中 `孙嘉良0xSun` 的引用发言）
 
 ## VPS 配置
 
@@ -31,7 +35,7 @@ sudo -u robinhood-radar \
 飞书官方页面确认完成后，生产服务由 `feishu-monitor.service` 启动，只监听
 `127.0.0.1:18124`，Caddy 将 `/robinhood-radar/feishu/*` 代理到该端口。
 
-服务默认每 2 秒并行读取三个飞书会话，通过 SSE 推送到主网站。飞书授权文件
+服务默认每 2 秒并行读取五个飞书会话，通过 SSE 推送到主网站。飞书授权文件
 只保存在 `/var/lib/robinhood-radar/feishu/.lark-cli/`，不会进入 Git、发布包或网页。
 本地电脑不运行上传器，也不参与读取。
 
