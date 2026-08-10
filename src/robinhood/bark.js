@@ -240,11 +240,14 @@ export class RobinhoodBarkNotifier {
     const targets = this.store.listMonitorBarkTargets().filter((target) => target.enabled);
     if (!targets.length) return { attempted: 0, sent: 0, failed: 0 };
     const message = walletEventMessage(event);
+    const eventUrl = event?.eventType === 'buy'
+      ? event?.debotTokenUrl || event?.explorerTxUrl || ''
+      : event?.explorerTxUrl || '';
     const results = await Promise.allSettled(targets.map((target) => this.#send(target, {
       ...message,
       sound,
       volume,
-      url: event?.explorerTxUrl || ''
+      url: eventUrl
     })));
     return {
       attempted: targets.length,

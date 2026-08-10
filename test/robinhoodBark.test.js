@@ -135,6 +135,37 @@ test('sends an immediate per-wallet event with the transaction link', async () =
   store.close();
 });
 
+test('uses the DeBot purchase page instead of the explorer for wallet buy alerts', async () => {
+  const store = createRobinhoodStore(':memory:');
+  const requests = [];
+  const notifier = new RobinhoodBarkNotifier({
+    store,
+    fetchImpl: async (url) => {
+      requests.push(new URL(url));
+      return new Response(JSON.stringify({ code: 200 }), { status: 200 });
+    }
+  });
+  notifier.createTarget({ endpoint: 'device_key_123456' });
+  await notifier.notifyWalletEvent({
+    event: {
+      eventType: 'buy',
+      walletAddress: '0x41e60000000000000000000000000000000033b9',
+      tokenSymbol: 'SpaceXcoin',
+      tokenAmount: '26.761596013994433926',
+      debotTokenUrl: 'https://debot.ai/token/bsc/289942_0x1111111111111111111111111111111111111111',
+      explorerTxUrl: 'https://bscscan.com/tx/0x86a6a7c1c65dd6585d9b156199a710e192ec89932c9d851b63dc1d060ad5c40c'
+    }
+  });
+
+  assert.equal(requests.length, 1);
+  assert.equal(
+    requests[0].searchParams.get('url'),
+    'https://debot.ai/token/bsc/289942_0x1111111111111111111111111111111111111111'
+  );
+  assert.equal(requests[0].searchParams.get('url').includes('bscscan.com'), false);
+  store.close();
+});
+
 test('sends Telegram CA alerts to enabled targets in a separate Bark group', async () => {
   const store = createRobinhoodStore(':memory:');
   const requests = [];
