@@ -430,6 +430,7 @@ export class SolanaRuntimeMonitor {
       clusters: this.getClusters(),
       alertedTokenAddresses: this.store.listMonitorTokenAlerts().map((item) => item.tokenAddress),
       barkTargets: this.listBarkTargets(),
+      barkFeatures: this.listBarkFeatures(),
       events: eventLimit > 0 ? this.getEvents({ limit: eventLimit }) : [],
       updatedAt: new Date(this.now()).toISOString()
     };
@@ -472,6 +473,15 @@ export class SolanaRuntimeMonitor {
 
   listBarkTargets() {
     return this.barkNotifier?.listTargets?.() || [];
+  }
+
+  listBarkFeatures() {
+    return this.barkNotifier?.listFeatures?.() || [];
+  }
+
+  updateBarkFeature(featureId, enabled) {
+    if (!this.barkNotifier?.updateFeature) throw new Error('Bark feature settings are unavailable');
+    return this.barkNotifier.updateFeature(featureId, enabled);
   }
 
   createBarkTarget(payload) {

@@ -8,6 +8,22 @@ export const BARK_SOUNDS = new Set([
   'telegraph', 'tiptoes', 'typewriters', 'update'
 ]);
 
+export const BARK_FEATURES = Object.freeze([
+  { id: 'wallet_buy', group: '链上流水', label: '钱包买入' },
+  { id: 'wallet_sell', group: '链上流水', label: '钱包卖出' },
+  { id: 'wallet_transfer', group: '链上流水', label: '钱包转出' },
+  { id: 'token_create', group: '链上流水', label: '钱包发币' },
+  { id: 'cluster_buy', group: '链上流水', label: '集合买入' },
+  { id: 'telegram_ca', group: '群聊监控', label: 'Telegram CA' },
+  { id: 'feishu_ca', group: '群聊监控', label: '飞书 CA' },
+  { id: 'twitter_ca', group: '社媒监控', label: 'X 账号 CA' },
+  { id: 'telegram_social_ca', group: '社媒监控', label: 'Telegram 频道 CA' },
+  { id: 'fomo_ca', group: '社媒监控', label: 'FOMO CA' },
+  { id: 'other_social_ca', group: '社媒监控', label: '其他社媒 CA' }
+]);
+
+const BARK_FEATURE_IDS = new Set(BARK_FEATURES.map((feature) => feature.id));
+
 function unixSeconds(now) {
   return Math.floor(now() / 1000);
 }
@@ -168,6 +184,23 @@ export class RobinhoodBarkNotifier {
     return this.store.listMonitorBarkTargets().map(publicTarget);
   }
 
+  listFeatures() {
+    const states = this.store.listMonitorBarkFeatureStates?.() || {};
+    return BARK_FEATURES.map((feature) => ({
+      ...feature,
+      enabled: states[feature.id] !== false
+    }));
+  }
+
+  updateFeature(featureId, enabled) {
+    const id = String(featureId || '').trim();
+    if (!BARK_FEATURE_IDS.has(id)) throw new TypeError('Unknown Bark feature');
+    if (typeof enabled !== 'boolean') throw new TypeError('enabled must be a boolean');
+    if (!this.store.setMonitorBarkFeatureState) throw new Error('Bark feature settings are unavailable');
+    this.store.setMonitorBarkFeatureState(id, enabled);
+    return this.listFeatures().find((feature) => feature.id === id);
+  }
+
   createTarget({ endpoint, label, enabled = true } = {}) {
     if (typeof enabled !== 'boolean') throw new TypeError('enabled must be a boolean');
     const normalizedEndpoint = normalizeBarkEndpoint(endpoint);
@@ -213,6 +246,7 @@ export class RobinhoodBarkNotifier {
   }
 
   async notifyAlert({ cluster, threshold, windowSeconds = 60, sound = 'alarm', volume = 5 } = {}) {
+    if (!this.#featureEnabled('cluster_buy')) return { attempted: 0, sent: 0, failed: 0 };
     const targets = this.store.listMonitorBarkTargets().filter((target) => target.enabled);
     if (!targets.length) return { attempted: 0, sent: 0, failed: 0 };
     const symbol = String(cluster?.tokenSymbol || 'TOKEN');
@@ -237,6 +271,13 @@ export class RobinhoodBarkNotifier {
   }
 
   async notifyWalletEvent({ event, sound = 'alarm', volume = 5 } = {}) {
+    const featureId = {
+      buy: 'wallet_buy',
+      sell: 'wallet_sell',
+      transfer: 'wallet_transfer',
+      token_create: 'token_create'
+    }[event?.eventType] || 'wallet_buy';
+    if (!this.#featureEnabled(featureId)) return { attempted: 0, sent: 0, failed: 0 };
     const targets = this.store.listMonitorBarkTargets().filter((target) => target.enabled);
     if (!targets.length) return { attempted: 0, sent: 0, failed: 0 };
     const message = walletEventMessage(event);
@@ -267,6 +308,7 @@ export class RobinhoodBarkNotifier {
     sound = 'alarm',
     volume = 5
   } = {}) {
+    if (!this.#featureEnabled('telegram_ca')) return { attempted: 0, sent: 0, failed: 0 };
     const targets = this.store.listMonitorBarkTargets().filter((target) => target.enabled);
     if (!targets.length) return { attempted: 0, sent: 0, failed: 0 };
     const addresses = [...new Set(
@@ -331,6 +373,7 @@ export class RobinhoodBarkNotifier {
     sound = 'alarm',
     volume = 5
   } = {}) {
+    if (!this.#featureEnabled('feishu_ca')) return { attempted: 0, sent: 0, failed: 0 };
     const targets = this.store.listMonitorBarkTargets().filter((target) => target.enabled);
     if (!targets.length) return { attempted: 0, sent: 0, failed: 0 };
     const addresses = [...new Set(
@@ -398,6 +441,15 @@ export class RobinhoodBarkNotifier {
     sound = 'alarm',
     volume = 5
   } = {}) {
+    const normalizedPlatform = String(platform || '').trim().toLowerCase();
+    const featureId = normalizedPlatform === 'fomo'
+      ? 'fomo_ca'
+      : ['twitter', 'x'].includes(normalizedPlatform)
+        ? 'twitter_ca'
+        : normalizedPlatform === 'telegram'
+          ? 'telegram_social_ca'
+          : 'other_social_ca';
+    if (!this.#featureEnabled(featureId)) return { attempted: 0, sent: 0, failed: 0 };
     const targets = this.store.listMonitorBarkTargets().filter((target) => target.enabled);
     if (!targets.length) return { attempted: 0, sent: 0, failed: 0 };
     const addresses = [...new Set(
@@ -464,6 +516,10 @@ export class RobinhoodBarkNotifier {
       });
       throw error;
     }
+  }
+
+  #featureEnabled(featureId) {
+    return (this.store.listMonitorBarkFeatureStates?.() || {})[featureId] !== false;
   }
 }
 

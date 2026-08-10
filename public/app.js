@@ -474,7 +474,9 @@ const elements = {
   monitorBarkLabel: document.querySelector('#monitor-bark-label'),
   monitorBarkAddButton: document.querySelector('#monitor-bark-add-button'),
   monitorBarkCount: document.querySelector('#monitor-bark-count'),
-  monitorBarkList: document.querySelector('#monitor-bark-list')
+  monitorBarkList: document.querySelector('#monitor-bark-list'),
+  monitorBarkFeatureCount: document.querySelector('#monitor-bark-feature-count'),
+  monitorBarkFeatureList: document.querySelector('#monitor-bark-feature-list')
 };
 
 const state = {
@@ -530,6 +532,8 @@ const state = {
   monitorBarkVolume: 5,
   monitorBarkTargets: [],
   monitorBarkBusy: new Set(),
+  monitorBarkFeatures: [],
+  monitorBarkFeatureBusy: new Set(),
   monitorNoteEditor: null,
   monitorNoteSessionSequence: 0,
   monitorFeedChainIds: new Set(),
@@ -1664,15 +1668,62 @@ function normalizeBarkTarget(raw) {
   };
 }
 
+function normalizeBarkFeature(raw) {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  return {
+    id: String(source.id || '').trim(),
+    group: String(source.group || '其他'),
+    label: String(source.label || source.id || 'Bark 功能'),
+    enabled: source.enabled !== false
+  };
+}
+
+function applyBarkFeatures(payload) {
+  const record = unwrapRecord(payload || {});
+  if (!Array.isArray(record.barkFeatures)) return;
+  state.monitorBarkFeatures = record.barkFeatures
+    .map(normalizeBarkFeature)
+    .filter((feature) => /^[a-z][a-z0-9_]{1,63}$/.test(feature.id));
+}
+
 function applyBarkTargets(payload) {
   const record = unwrapRecord(payload || {});
+  applyBarkFeatures(record);
   if (!Array.isArray(record.barkTargets)) return;
   state.monitorBarkTargets = record.barkTargets
     .map(normalizeBarkTarget)
     .filter((target) => Number.isSafeInteger(target.id) && target.id > 0);
 }
 
+function renderMonitorBarkFeatures() {
+  const features = state.monitorBarkFeatures;
+  const enabledCount = features.filter((feature) => feature.enabled).length;
+  elements.monitorBarkFeatureCount.textContent = features.length
+    ? `${enabledCount} / ${features.length} 已启用`
+    : '暂无功能';
+  if (!features.length) {
+    elements.monitorBarkFeatureList.innerHTML = '<div class="monitor-bark-feature-empty">暂无可管理的 Bark 功能</div>';
+    return;
+  }
+  elements.monitorBarkFeatureList.innerHTML = features.map((feature) => {
+    const busy = state.monitorBarkFeatureBusy.has(feature.id);
+    return `
+      <label class="monitor-bark-feature${feature.enabled ? '' : ' is-paused'}" data-bark-feature-id="${escapeHtml(feature.id)}">
+        <span class="monitor-bark-feature-copy">
+          <small>${escapeHtml(feature.group)}</small>
+          <strong>${escapeHtml(feature.label)}</strong>
+        </span>
+        <span class="monitor-feature-switch">
+          <input type="checkbox" data-bark-feature-toggle aria-label="${feature.enabled ? '暂停' : '启用'} ${escapeHtml(feature.label)}"${feature.enabled ? ' checked' : ''}${busy ? ' disabled' : ''} />
+          <span aria-hidden="true"></span>
+        </span>
+      </label>
+    `;
+  }).join('');
+}
+
 function renderMonitorBarkTargets() {
+  renderMonitorBarkFeatures();
   const targets = state.monitorBarkTargets;
   elements.monitorBarkCount.textContent = `${targets.length} 个 API`;
   if (!targets.length) {
@@ -3533,6 +3584,9 @@ function setMonitorMutationControlsDisabled(disabled) {
   elements.monitorSoundSaveButton.disabled = disabled;
   elements.monitorBarkSettingsSaveButton.disabled = disabled;
   elements.monitorBarkAddButton.disabled = disabled;
+  for (const input of elements.monitorBarkFeatureList.querySelectorAll('[data-bark-feature-toggle]')) {
+    input.disabled = disabled || state.monitorBarkFeatureBusy.has(input.closest('[data-bark-feature-id]')?.dataset.barkFeatureId);
+  }
 }
 
 function applyMonitorPayload(payload, {
@@ -3833,6 +3887,45 @@ async function runBarkAction(button) {
     if (chainRequestIsCurrent(context)) {
       state.monitorBarkBusy.delete(id);
       renderMonitorBarkTargets();
+    }
+  }
+}
+
+async function toggleBarkFeature(input) {
+  const context = captureChainRequestContext();
+  const item = input.closest('[data-bark-feature-id]');
+  const id = String(item?.dataset.barkFeatureId || '');
+  const feature = state.monitorBarkFeatures.find((entry) => entry.id === id);
+  if (!feature || state.monitorBarkFeatureBusy.has(id)) return;
+  const previousEnabled = feature.enabled;
+  const enabled = input.checked;
+  feature.enabled = enabled;
+  state.monitorBarkFeatureBusy.add(id);
+  renderMonitorBarkFeatures();
+  try {
+    const payload = await fetchChainJson(context, '/monitor/bark/features', {
+      method: 'PATCH',
+      body: JSON.stringify({ id, enabled })
+    });
+    if (!chainRequestIsCurrent(context)) return;
+    applyBarkFeatures(payload);
+    showToast(enabled ? `${feature.label} Bark 已启用` : `${feature.label} Bark 已暂停`);
+  } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
+    feature.enabled = previousEnabled;
+    try {
+      const payload = await fetchChainJson(context, '/monitor/bark/features');
+      if (!chainRequestIsCurrent(context)) return;
+      applyBarkFeatures(payload);
+    } catch {
+      // Preserve the previous state when status refresh is also unavailable.
+    }
+    if (!chainRequestIsCurrent(context)) return;
+    showToast(`Bark 功能修改失败：${error.message}`, 'error');
+  } finally {
+    if (chainRequestIsCurrent(context)) {
+      state.monitorBarkFeatureBusy.delete(id);
+      renderMonitorBarkFeatures();
     }
   }
 }
@@ -7586,6 +7679,8 @@ function resetChainState({ preserveMonitorFeed = false } = {}) {
     state.monitorAlertedTokens.clear();
     state.monitorBarkTargets = [];
     state.monitorBarkBusy.clear();
+    state.monitorBarkFeatures = [];
+    state.monitorBarkFeatureBusy.clear();
     state.monitorNoteEditor = null;
   } else {
     synchronizeCombinedMonitorEvents();
@@ -7801,6 +7896,10 @@ elements.monitorBarkForm.addEventListener('submit', createBarkTarget);
 elements.monitorBarkList.addEventListener('click', (event) => {
   const button = event.target.closest('[data-bark-action]');
   if (button) void runBarkAction(button);
+});
+elements.monitorBarkFeatureList.addEventListener('change', (event) => {
+  const input = event.target.closest('[data-bark-feature-toggle]');
+  if (input) void toggleBarkFeature(input);
 });
 elements.monitorEventFeed.addEventListener('click', (event) => {
   const editButton = event.target.closest('[data-monitor-note-edit]');

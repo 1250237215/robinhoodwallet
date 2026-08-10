@@ -532,7 +532,8 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
     const activeMonitor = requireMonitor(monitor);
     sendJson(res, 200, {
       ...activeMonitor.getSnapshot({ eventLimit: limit }),
-      barkTargets: activeMonitor.listBarkTargets()
+      barkTargets: activeMonitor.listBarkTargets(),
+      barkFeatures: activeMonitor.listBarkFeatures?.() || []
     });
     return true;
   }
@@ -547,7 +548,11 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
   if (url.pathname === '/api/robinhood/monitor/bark') {
     const activeMonitor = requireMonitor(monitor);
     if (req.method === 'GET') {
-      sendJson(res, 200, { ok: true, barkTargets: activeMonitor.listBarkTargets() });
+      sendJson(res, 200, {
+        ok: true,
+        barkTargets: activeMonitor.listBarkTargets(),
+        barkFeatures: activeMonitor.listBarkFeatures?.() || []
+      });
       return true;
     }
     if (req.method === 'POST') {
@@ -557,10 +562,39 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
       } catch (error) {
         throw new HttpError(400, error instanceof Error ? error.message : String(error), 'INVALID_BARK_TARGET');
       }
-      sendJson(res, 201, { ok: true, target, barkTargets: activeMonitor.listBarkTargets() });
+      sendJson(res, 201, {
+        ok: true,
+        target,
+        barkTargets: activeMonitor.listBarkTargets(),
+        barkFeatures: activeMonitor.listBarkFeatures?.() || []
+      });
       return true;
     }
     methodNotAllowed(['GET', 'POST']);
+  }
+
+  if (url.pathname === '/api/robinhood/monitor/bark/features') {
+    const activeMonitor = requireMonitor(monitor);
+    if (req.method === 'GET') {
+      sendJson(res, 200, { ok: true, barkFeatures: activeMonitor.listBarkFeatures?.() || [] });
+      return true;
+    }
+    if (req.method === 'PATCH') {
+      const body = await readJson(req);
+      let feature;
+      try {
+        feature = activeMonitor.updateBarkFeature(body.id, body.enabled);
+      } catch (error) {
+        throw new HttpError(400, error instanceof Error ? error.message : String(error), 'INVALID_BARK_FEATURE');
+      }
+      sendJson(res, 200, {
+        ok: true,
+        feature,
+        barkFeatures: activeMonitor.listBarkFeatures?.() || []
+      });
+      return true;
+    }
+    methodNotAllowed(['GET', 'PATCH']);
   }
 
   const barkTargetMatch = url.pathname.match(/^\/api\/robinhood\/monitor\/bark\/(\d+)(?:\/(test))?$/);
@@ -576,7 +610,12 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
         throw new HttpError(502, error instanceof Error ? error.message : String(error), 'BARK_TEST_FAILED');
       }
       if (!target) throw new HttpError(404, 'Bark target was not found', 'BARK_TARGET_NOT_FOUND');
-      sendJson(res, 200, { ok: true, target, barkTargets: activeMonitor.listBarkTargets() });
+      sendJson(res, 200, {
+        ok: true,
+        target,
+        barkTargets: activeMonitor.listBarkTargets(),
+        barkFeatures: activeMonitor.listBarkFeatures?.() || []
+      });
       return true;
     }
     if (req.method === 'PATCH') {
@@ -588,14 +627,24 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
         throw new HttpError(400, error instanceof Error ? error.message : String(error), 'INVALID_BARK_TARGET');
       }
       if (!target) throw new HttpError(404, 'Bark target was not found', 'BARK_TARGET_NOT_FOUND');
-      sendJson(res, 200, { ok: true, target, barkTargets: activeMonitor.listBarkTargets() });
+      sendJson(res, 200, {
+        ok: true,
+        target,
+        barkTargets: activeMonitor.listBarkTargets(),
+        barkFeatures: activeMonitor.listBarkFeatures?.() || []
+      });
       return true;
     }
     if (req.method === 'DELETE') {
       if (!activeMonitor.deleteBarkTarget(id)) {
         throw new HttpError(404, 'Bark target was not found', 'BARK_TARGET_NOT_FOUND');
       }
-      sendJson(res, 200, { ok: true, deleted: true, barkTargets: activeMonitor.listBarkTargets() });
+      sendJson(res, 200, {
+        ok: true,
+        deleted: true,
+        barkTargets: activeMonitor.listBarkTargets(),
+        barkFeatures: activeMonitor.listBarkFeatures?.() || []
+      });
       return true;
     }
     methodNotAllowed(['PATCH', 'DELETE']);
@@ -620,6 +669,7 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
       clusters: snapshot.clusters,
       alertedTokenAddresses: snapshot.alertedTokenAddresses,
       barkTargets: activeMonitor.listBarkTargets(),
+      barkFeatures: activeMonitor.listBarkFeatures?.() || [],
       events,
       after,
       latestId: events.reduce((latest, event) => Math.max(latest, Number(event.id) || 0), after)

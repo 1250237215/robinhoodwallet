@@ -492,6 +492,7 @@ test('standalone refresh endpoint reports manual-only mode without accepting dis
 test('standalone monitor routes expose snapshots, incremental events, and validated persistent settings', async () => {
   const updates = [];
   const barkTargets = [];
+  const barkFeatures = [{ id: 'fomo_ca', group: '社媒监控', label: 'FOMO CA', enabled: true }];
   const event = {
     id: 7,
     walletAddress: wallet,
@@ -528,6 +529,15 @@ test('standalone monitor routes expose snapshots, incremental events, and valida
     },
     listBarkTargets() {
       return barkTargets;
+    },
+    listBarkFeatures() {
+      return barkFeatures;
+    },
+    updateBarkFeature(id, enabled) {
+      const feature = barkFeatures.find((entry) => entry.id === id);
+      if (!feature || typeof enabled !== 'boolean') throw new TypeError('Invalid Bark feature');
+      feature.enabled = enabled;
+      return feature;
     },
     createBarkTarget(payload) {
       const target = { id: 1, label: payload.label || 'Bark', endpointMasked: 'https://api.day.app/abcd***wxyz', enabled: true };
@@ -599,6 +609,7 @@ test('standalone monitor routes expose snapshots, incremental events, and valida
       clusters: [],
       alertedTokenAddresses: [token],
       barkTargets: [],
+      barkFeatures,
       events: [event],
       after: 5,
       latestId: 7
@@ -614,6 +625,14 @@ test('standalone monitor routes expose snapshots, incremental events, and valida
 
     const list = await fetch(`${baseUrl}/api/robinhood/monitor/bark`);
     assert.equal((await list.json()).barkTargets.length, 1);
+    const pausedFeature = await fetch(`${baseUrl}/api/robinhood/monitor/bark/features`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'fomo_ca', enabled: false })
+    });
+    assert.equal((await pausedFeature.json()).feature.enabled, false);
+    const featureList = await fetch(`${baseUrl}/api/robinhood/monitor/bark/features`);
+    assert.equal((await featureList.json()).barkFeatures[0].enabled, false);
     const paused = await fetch(`${baseUrl}/api/robinhood/monitor/bark/1`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },

@@ -144,6 +144,13 @@ test('shares Bark targets and settings immediately across all chain stores', (t)
   assert.equal(solana.getMeta('solana:monitor:bark-sound'), 'typewriters');
   assert.equal(solana.getMeta('solana:monitor:bark-volume'), '7');
 
+  base.setMonitorBarkFeatureState('fomo_ca', false);
+  assert.equal(robinhood.listMonitorBarkFeatureStates().fomo_ca, false);
+  assert.equal(bsc.listMonitorBarkFeatureStates().fomo_ca, false);
+  assert.equal(solana.listMonitorBarkFeatureStates().fomo_ca, false);
+  solana.setMonitorBarkFeatureState('fomo_ca', true);
+  assert.equal(robinhood.listMonitorBarkFeatureStates().fomo_ca, true);
+
   solana.deleteMonitorBarkTarget(target.id);
   assert.deepEqual(robinhood.listMonitorBarkTargets(), []);
   assert.deepEqual(base.listMonitorBarkTargets(), []);

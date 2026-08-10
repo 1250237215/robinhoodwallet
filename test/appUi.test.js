@@ -2631,6 +2631,19 @@ test('Bark targets can be added, tested, paused, resumed, and deleted without ex
   }
 });
 
+test('Bark manager exposes persistent per-feature pause controls without a sleep mode', () => {
+  for (const id of ['monitor-bark-feature-title', 'monitor-bark-feature-count', 'monitor-bark-feature-list']) {
+    assert.match(indexHtml, new RegExp(`id="${id}"`));
+  }
+  assert.match(appJs, /function normalizeBarkFeature\(raw\)/);
+  assert.match(appJs, /fetchChainJson\(context, '\/monitor\/bark\/features', \{[\s\S]*method: 'PATCH'[\s\S]*JSON\.stringify\(\{ id, enabled \}\)/);
+  assert.match(appJs, /data-bark-feature-toggle/);
+  assert.match(appJs, /state\.monitorBarkFeatureBusy\.add\(id\)/);
+  assert.match(stylesCss, /\.monitor-bark-feature-list \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(stylesCss, /@media \(max-width: 440px\)[\s\S]*\.monitor-bark-feature-list \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.doesNotMatch(indexHtml, /睡眠模式/);
+});
+
 test('real-time monitoring remains contained on narrow mobile screens', () => {
   assert.match(stylesCss, /\.monitor-page \{[\s\S]*min-width: 0/);
   assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.monitor-control-band \{[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);

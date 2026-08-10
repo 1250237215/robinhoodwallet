@@ -20,6 +20,7 @@ const LEGACY_PROFIT_RANK_ALIAS_PATTERN = /^(.+?) 盈利榜第 ([1-9][0-9]*|待�
 const COMPACT_PROFIT_RANK_ALIAS_PATTERN = /^.+?\s+[1-9][0-9]*$/;
 const BUY_FREQUENCY_TIMEZONE = 'Asia/Shanghai';
 const BUY_FREQUENCY_UTC_OFFSET_SECONDS = 8 * 60 * 60;
+const BARK_FEATURE_METADATA_PREFIX = 'bark-feature:';
 
 const defaultAddressNormalizer = (value) => String(value || '').toLowerCase();
 const defaultAddressValidator = (value) => ADDRESS_PATTERN.test(defaultAddressNormalizer(value));
@@ -1658,6 +1659,25 @@ export function createRobinhoodStore(filename, {
         .prepare(`SELECT * FROM ${barkTargetTable} ORDER BY created_at, id`)
         .all()
         .map(monitorBarkTargetFromRow);
+    },
+    listMonitorBarkFeatureStates() {
+      return Object.fromEntries(db.prepare(`
+        SELECT key, value
+        FROM ${barkMetadataTable}
+        WHERE key LIKE ?
+        ORDER BY key
+      `).all(`${BARK_FEATURE_METADATA_PREFIX}%`).map((row) => [
+        String(row.key).slice(BARK_FEATURE_METADATA_PREFIX.length),
+        String(row.value) !== '0'
+      ]));
+    },
+    setMonitorBarkFeatureState(featureId, enabled) {
+      const key = `${BARK_FEATURE_METADATA_PREFIX}${String(featureId || '')}`;
+      runSharedBarkWrite(() => {
+        db.prepare(`INSERT OR REPLACE INTO ${barkMetadataTable}(key, value) VALUES (?, ?)`)
+          .run(key, enabled ? '1' : '0');
+      });
+      return enabled === true;
     },
     getMonitorBarkTarget(id) {
       return monitorBarkTargetFromRow(

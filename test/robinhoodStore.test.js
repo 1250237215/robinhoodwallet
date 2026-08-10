@@ -543,6 +543,25 @@ test('persists Bark targets and their delivery status across restarts', (t) => {
   store.close();
 });
 
+test('persists independent Bark feature states across restarts', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-bark-features-'));
+  const filename = path.join(directory, 'radar.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  let store = createRobinhoodStore(filename);
+  assert.deepEqual(store.listMonitorBarkFeatureStates(), {});
+  store.setMonitorBarkFeatureState('fomo_ca', false);
+  store.setMonitorBarkFeatureState('telegram_ca', true);
+  store.close();
+
+  store = createRobinhoodStore(filename);
+  assert.deepEqual(store.listMonitorBarkFeatureStates(), {
+    fomo_ca: false,
+    telegram_ca: true
+  });
+  store.close();
+});
+
 test('persists alerted token CAs idempotently across restarts', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-monitor-alert-store-'));
   const filename = path.join(directory, 'radar.sqlite');

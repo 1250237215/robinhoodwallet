@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  BARK_FEATURES,
   RobinhoodBarkNotifier,
   maskBarkEndpoint,
   normalizeBarkEndpoint
@@ -33,6 +34,47 @@ test('persists multiple Bark targets without returning full keys', () => {
   assert.equal(notifier.updateTarget(first.id, { enabled: false }).enabled, false);
   assert.equal(notifier.deleteTarget(second.id), true);
   assert.equal(notifier.listTargets().length, 1);
+  store.close();
+});
+
+test('independent Bark feature switches pause delivery without disabling targets or tests', async () => {
+  const store = createRobinhoodStore(':memory:');
+  const requests = [];
+  const notifier = new RobinhoodBarkNotifier({
+    store,
+    fetchImpl: async (url) => {
+      requests.push(new URL(url));
+      return new Response(JSON.stringify({ code: 200 }), { status: 200 });
+    }
+  });
+  const target = notifier.createTarget({ endpoint: 'device_key_123456' });
+  assert.equal(notifier.listFeatures().length, BARK_FEATURES.length);
+  assert.equal(notifier.listFeatures().every((feature) => feature.enabled), true);
+
+  for (const feature of BARK_FEATURES) notifier.updateFeature(feature.id, false);
+  assert.equal(notifier.listTargets()[0].enabled, true);
+  assert.equal((await notifier.notifyAlert({})).attempted, 0);
+  for (const eventType of ['buy', 'sell', 'transfer', 'token_create']) {
+    assert.equal((await notifier.notifyWalletEvent({ event: { eventType } })).attempted, 0);
+  }
+  assert.equal((await notifier.notifyTelegramMessage({})).attempted, 0);
+  assert.equal((await notifier.notifyFeishuMessage({})).attempted, 0);
+  for (const platform of ['Twitter', 'Telegram', 'fomo', 'other']) {
+    assert.equal((await notifier.notifySocialContract({ platform })).attempted, 0);
+  }
+  assert.equal(requests.length, 0);
+
+  await notifier.testTarget(target.id);
+  assert.equal(requests.length, 1);
+  notifier.updateFeature('fomo_ca', true);
+  const delivery = await notifier.notifySocialContract({
+    platform: 'fomo',
+    contractAddresses: ['0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa']
+  });
+  assert.deepEqual(delivery, { attempted: 1, sent: 1, failed: 0 });
+  assert.equal(requests.length, 2);
+  assert.throws(() => notifier.updateFeature('missing', false), /Unknown Bark feature/);
+  assert.throws(() => notifier.updateFeature('fomo_ca', 'false'), /boolean/);
   store.close();
 });
 

@@ -848,6 +848,15 @@ export class RobinhoodWalletMonitor {
     return this.barkNotifier?.listTargets?.() || [];
   }
 
+  listBarkFeatures() {
+    return this.barkNotifier?.listFeatures?.() || [];
+  }
+
+  updateBarkFeature(featureId, enabled) {
+    if (!this.barkNotifier?.updateFeature) throw new Error('Bark feature settings are unavailable');
+    return this.barkNotifier.updateFeature(featureId, enabled);
+  }
+
   createBarkTarget(payload) {
     if (!this.barkNotifier?.createTarget) throw new Error('Bark notifications are unavailable');
     return this.barkNotifier.createTarget(payload);
@@ -978,6 +987,7 @@ export class RobinhoodWalletMonitor {
       status,
       settings: { ...this.settings },
       barkTargets: this.listBarkTargets(),
+      barkFeatures: this.listBarkFeatures(),
       health: {
         ...this.health,
         deepStatus,
