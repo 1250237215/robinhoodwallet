@@ -103,6 +103,26 @@ test('post kinds normalize known aliases and reject explicitly unknown values', 
   );
 });
 
+test('translation backfill includes watched deleted posts', (t) => {
+  const { store } = fixture(t);
+  store.addWatchAccounts([{ platform: 'twitter', handle: 'deleted_fixture' }]);
+  store.upsertPosts([{
+    source: 'twitter',
+    externalId: 'tweet_delete:2081700497174734777',
+    kind: 'delete',
+    author: { handle: 'deleted_fixture' },
+    content: 'this deleted post still needs translation',
+    deleted: true,
+    deletedAt: Date.parse('2026-07-17T12:01:00Z'),
+    publishedAt: Date.parse('2026-07-17T12:00:00Z')
+  }]);
+
+  assert.deepEqual(
+    store.listPostsForTranslation().map((post) => post.externalId),
+    ['tweet_delete:2081700497174734777']
+  );
+});
+
 test('follow and unfollow activity IDs normalize without splitting underscored handles', () => {
   const encodedUnfollow = Buffer.from('unfollow:fixture_star:bankrbot').toString('base64url');
   assert.deepEqual(parseSocialActivityIdentity(encodedUnfollow, '@Fixture_Star'), {

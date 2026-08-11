@@ -1736,8 +1736,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       return db.prepare(`
         SELECT *
         FROM social_posts
-        WHERE deleted_at IS NULL
-          AND (? IS NULL OR id < ?)
+        WHERE (? IS NULL OR id < ?)
           AND EXISTS (
             SELECT 1
             FROM social_watchlist AS watched

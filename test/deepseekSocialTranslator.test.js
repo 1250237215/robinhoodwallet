@@ -497,6 +497,60 @@ test('missing DeepSeek configuration never restores untrusted DeBot translations
   });
 });
 
+test('deleted posts are translated from both realtime events and the delete endpoint', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-deepseek-deleted-'));
+  const translations = new Map([
+    ['deleted realtime text', '实时删推译文'],
+    ['deleted endpoint text', '删除接口译文']
+  ]);
+  const service = createSocialService({
+    config: {
+      ...createSocialConfig({
+        DEEPSEEK_TRANSLATION_API_KEY: 'translation-test-key',
+        DEEPSEEK_TRANSLATION_MAX_ATTEMPTS: '1'
+      }, { fallbackDirectory: directory }),
+      dataFile: path.join(directory, 'social.sqlite')
+    },
+    fetchImpl: async (_url, options) => {
+      const source = JSON.parse(options.body).messages[1].content;
+      return deepSeekResponse(translations.get(source));
+    }
+  });
+  t.after(() => {
+    service.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  service.ingestPosts([{
+    source: 'twitter',
+    externalId: 'tweet_delete:2081700497174734881',
+    kind: 'delete',
+    author: { handle: 'deleted_fixture' },
+    content: 'deleted realtime text',
+    deleted: true,
+    deletedAt: Date.now(),
+    publishedAt: Date.now()
+  }]);
+  await eventually(() => assert.equal(
+    service.store.getPost('twitter', 'tweet_delete:2081700497174734881').translatedContent,
+    '实时删推译文'
+  ));
+
+  service.ingestPosts([{
+    source: 'twitter',
+    externalId: '2081700497174734882',
+    kind: 'post',
+    author: { handle: 'deleted_fixture' },
+    content: 'deleted endpoint text',
+    publishedAt: Date.now()
+  }], { skipTranslation: true });
+  service.deletePost('twitter', '2081700497174734882', Date.now());
+  await eventually(() => assert.equal(
+    service.store.getPost('twitter', '2081700497174734882').translatedContent,
+    '删除接口译文'
+  ));
+});
+
 test('translation backfill pages through more than five hundred watched posts', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robinhood-deepseek-backfill-'));
   const dataFile = path.join(directory, 'social.sqlite');

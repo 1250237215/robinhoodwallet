@@ -3214,7 +3214,7 @@ function renderSocialFeed() {
           ${socialLatencyMarkup(post)}
           ${String(post.kind || '').toLowerCase() === 'reply' ? referenceMarkup : ''}
           ${activityMarkup || profileActivityMarkup || (post.content ? `<p class="social-post-content">${escapeHtml(post.content)}</p>` : '')}
-          ${!nonPostActivity && translatedContent ? `<p class="social-post-translation">${escapeHtml(translatedContent)}</p>` : ''}
+          ${!nonPostActivity && translatedContent ? `<div class="social-post-translation is-x"><b>中文翻译</b><p>${escapeHtml(translatedContent)}</p></div>` : ''}
           ${String(post.kind || '').toLowerCase() === 'quote' ? referenceMarkup : ''}
           ${!nonPostActivity && contractMarkup ? `<div class="social-post-contracts">${contractMarkup}</div>` : ''}
           ${!nonPostActivity ? mediaMarkup : ''}

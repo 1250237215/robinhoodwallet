@@ -5027,7 +5027,8 @@ button.telegram-reply {
 }
 
 .social-post-translation.is-telegram b,
-.social-post-translation.is-fomo b {
+.social-post-translation.is-fomo b,
+.social-post-translation.is-x b {
   display: block;
   margin-bottom: 3px;
   color: #6b7771;
@@ -5035,7 +5036,8 @@ button.telegram-reply {
 }
 
 .social-post-translation.is-telegram p,
-.social-post-translation.is-fomo p {
+.social-post-translation.is-fomo p,
+.social-post-translation.is-x p {
   margin: 0;
   color: inherit;
   font-size: inherit;

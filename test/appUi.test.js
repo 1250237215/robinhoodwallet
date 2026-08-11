@@ -2063,6 +2063,12 @@ test('quote cards show and search the quoted account, original, translation and 
   }
 });
 
+test('X quote and delete cards label their main Chinese translation', () => {
+  assert.match(appJs, /class="social-post-translation is-x"><b>中文翻译<\/b>/);
+  assert.match(stylesCss, /\.social-post-translation\.is-x b/);
+  assert.match(stylesCss, /\.social-post-translation\.is-x p/);
+});
+
 test('social media markup renders safe main images without nesting its grid wrapper', () => {
   const renderMedia = executableSocialMediaMarkup();
   const markup = renderMedia([

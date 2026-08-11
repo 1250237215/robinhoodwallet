@@ -491,7 +491,7 @@ export function createSocialService({
   }
 
   function schedulePostTranslations(post, priority = 'realtime') {
-    if (!activeSocialTranslator || !post || post.deleted) {
+    if (!activeSocialTranslator || !post) {
       return { eligible: 0, scheduled: 0, rejected: 0 };
     }
     let scheduled = 0;
@@ -809,6 +809,7 @@ export function createSocialService({
       const latestBefore = activeStore.getLatestChangeId();
       const result = activeStore.deletePost(source, externalId, deletedAt);
       publishAfter(latestBefore);
+      schedulePostTranslations(result.post, 'realtime');
       return { ok: true, ...result, counts: activeStore.getCounts() };
     },
     heartbeat(body) {
