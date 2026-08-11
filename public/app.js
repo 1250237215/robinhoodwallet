@@ -340,6 +340,7 @@ const elements = {
   statusTitle: document.querySelector('#status-title'),
   statusMessage: document.querySelector('#status-message'),
   statusProgress: document.querySelector('#status-progress'),
+  mobileBarkTestButton: document.querySelector('#mobile-bark-test-button'),
   refreshButton: document.querySelector('#refresh-button'),
   scanButton: document.querySelector('#scan-button'),
   submissionDock: document.querySelector('#submission-dock'),
@@ -532,6 +533,7 @@ const state = {
   monitorBarkVolume: 5,
   monitorBarkTargets: [],
   monitorBarkBusy: new Set(),
+  monitorMobileBarkTesting: false,
   monitorBarkFeatures: [],
   monitorBarkFeatureBusy: new Set(),
   monitorNoteEditor: null,
@@ -1725,6 +1727,21 @@ function renderMonitorBarkFeatures() {
 function renderMonitorBarkTargets() {
   renderMonitorBarkFeatures();
   const targets = state.monitorBarkTargets;
+  const enabledTargets = targets.filter((target) => target.enabled);
+  if (elements.mobileBarkTestButton) {
+    const label = elements.mobileBarkTestButton.querySelector('span');
+    elements.mobileBarkTestButton.disabled = !state.monitorSettingsLoaded
+      || !enabledTargets.length
+      || state.monitorMobileBarkTesting;
+    elements.mobileBarkTestButton.classList.toggle('is-testing', state.monitorMobileBarkTesting);
+    if (label) {
+      label.textContent = state.monitorMobileBarkTesting
+        ? '正在测试 Bark 推送'
+        : enabledTargets.length > 1
+          ? `测试 Bark 推送（${enabledTargets.length}）`
+          : '测试 Bark 推送';
+    }
+  }
   elements.monitorBarkCount.textContent = `${targets.length} 个 API`;
   if (!targets.length) {
     elements.monitorBarkList.innerHTML = `
@@ -3888,6 +3905,41 @@ async function runBarkAction(button) {
       state.monitorBarkBusy.delete(id);
       renderMonitorBarkTargets();
     }
+  }
+}
+
+async function testEnabledBarkTargetsFromMobile() {
+  if (!state.monitorSettingsLoaded || state.monitorMobileBarkTesting) return;
+  const targets = state.monitorBarkTargets.filter((target) => target.enabled);
+  if (!targets.length) {
+    showToast('没有已启用的 Bark API', 'error');
+    return;
+  }
+  const context = captureChainRequestContext();
+  state.monitorMobileBarkTesting = true;
+  for (const target of targets) state.monitorBarkBusy.add(target.id);
+  renderMonitorBarkTargets();
+  try {
+    const results = await Promise.allSettled(targets.map((target) => fetchChainJson(
+      context,
+      `/monitor/bark/${target.id}/test`,
+      { method: 'POST' }
+    )));
+    if (!chainRequestIsCurrent(context)) return;
+    const sent = results.filter((result) => result.status === 'fulfilled').length;
+    const failed = results.length - sent;
+    try {
+      applyBarkTargets(await fetchChainJson(context, '/monitor/bark'));
+    } catch {
+      // Test delivery already completed; keep the current list if refreshing status fails.
+    }
+    if (!chainRequestIsCurrent(context)) return;
+    if (failed) showToast(`Bark 测试完成：成功 ${sent}，失败 ${failed}`, 'error');
+    else showToast(`Bark 测试推送已发送至 ${sent} 个地址`);
+  } finally {
+    state.monitorMobileBarkTesting = false;
+    for (const target of targets) state.monitorBarkBusy.delete(target.id);
+    renderMonitorBarkTargets();
   }
 }
 
@@ -7856,6 +7908,7 @@ elements.refreshButton.addEventListener('click', () => {
   if (state.activeTab === 'monitor') void startMonitorPage({ manual: true });
   else void loadData();
 });
+elements.mobileBarkTestButton?.addEventListener('click', () => void testEnabledBarkTargetsFromMobile());
 elements.scanButton.addEventListener('click', () => void startScan());
 elements.manualForm.addEventListener('submit', addManualWinner);
 elements.walletEditorForm.addEventListener('submit', saveWalletEditor);

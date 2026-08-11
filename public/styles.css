@@ -102,6 +102,10 @@ svg {
   border-bottom: 1px solid var(--line-strong);
 }
 
+.mobile-bark-test-button {
+  display: none;
+}
+
 .chain-switcher {
   display: inline-grid;
   grid-template-columns: repeat(4, minmax(72px, auto));
@@ -6587,7 +6591,49 @@ button.telegram-reply {
     padding: 3px 2px 11px;
   }
 
+  .mobile-bark-test-button {
+    width: 100%;
+    min-height: 40px;
+    grid-column: 1 / -1;
+    grid-row: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    border: 1px solid #e3b2ae;
+    border-radius: 6px;
+    background: #fff3f2;
+    color: #9c302b;
+    font-size: 12px;
+    font-weight: 760;
+  }
+
+  .mobile-bark-test-button:hover {
+    border-color: #cf8e88;
+    background: #ffe9e7;
+  }
+
+  .mobile-bark-test-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  .mobile-bark-test-button.is-testing svg {
+    animation: spin 1.1s linear infinite;
+  }
+
+  .brand-block {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .header-actions {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
   .chain-switcher {
+    grid-row: 3;
     width: 100%;
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
@@ -6634,6 +6680,7 @@ button.telegram-reply {
   }
 
   .header-stats {
+    grid-row: 4;
     min-width: 0;
     grid-template-columns: repeat(2, 1fr);
     gap: 8px 0;

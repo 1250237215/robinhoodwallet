@@ -2637,6 +2637,15 @@ test('Bark targets can be added, tested, paused, resumed, and deleted without ex
   }
 });
 
+test('mobile header exposes a phone-only Bark test button for every enabled target', () => {
+  assert.match(indexHtml, /<header class="app-header">\s*<button class="mobile-bark-test-button" id="mobile-bark-test-button"/);
+  assert.match(appJs, /state\.monitorBarkTargets\.filter\(\(target\) => target\.enabled\)/);
+  assert.match(appJs, /Promise\.allSettled\(targets\.map/);
+  assert.match(appJs, /\/monitor\/bark\/\$\{target\.id\}\/test/);
+  assert.match(stylesCss, /\.mobile-bark-test-button\s*\{\s*display: none;/);
+  assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.mobile-bark-test-button\s*\{[\s\S]*display: inline-flex;/);
+});
+
 test('Bark manager exposes persistent per-feature pause controls without a sleep mode', () => {
   for (const id of ['monitor-bark-feature-title', 'monitor-bark-feature-count', 'monitor-bark-feature-list']) {
     assert.match(indexHtml, new RegExp(`id="${id}"`));
