@@ -34,6 +34,15 @@ function quotedSpeakerMatcher(name) {
 const daqi = prefixMatcher('【大齐】');
 const luck = prefixMatcher('【luck(发财版');
 const lu = prefixMatcher('【LU');
+const sencrazyWuwei = prefixMatcher('【Sencrazy💎👋（無為版');
+const gule = {
+  matches(message) {
+    return /^【古乐\([^\n]*?】[：:]?/u.test(String(message.content || ''));
+  },
+  clean(content) {
+    return String(content || '').replace(/^【古乐\([^\n]*?】[：:]?\s*/u, '');
+  }
+};
 const mrdq = prefixMatcher('【#144 MrDQ 🐒🦄🔥');
 const cryptoD = quotedSpeakerMatcher('CryptoD');
 const wangXiaoer = quotedSpeakerMatcher('王小二');
@@ -109,6 +118,26 @@ export const PEOPLE = Object.freeze([
     accent: 'blue',
     matches: lu.matches,
     clean: lu.clean
+  },
+  {
+    id: 'sencrazy_wuwei',
+    name: 'Sencrazy💎👋（無為版',
+    shortName: 'SC',
+    source: 'crazysen全员群',
+    chatId: CRAZYSEN_GROUP_ID,
+    accent: 'coral',
+    matches: sencrazyWuwei.matches,
+    clean: sencrazyWuwei.clean
+  },
+  {
+    id: 'gule',
+    name: '古乐',
+    shortName: '古',
+    source: 'crazysen全员群',
+    chatId: CRAZYSEN_GROUP_ID,
+    accent: 'cyan',
+    matches: gule.matches,
+    clean: gule.clean
   },
   {
     id: 'chenpepe',

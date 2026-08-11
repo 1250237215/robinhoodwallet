@@ -1,6 +1,6 @@
 # 飞书人物雷达
 
-VPS 实时读取服务，通过 VPS 上已授权的 `lark-cli` 监控 11 个飞书人物：
+VPS 实时读取服务，通过 VPS 上已授权的 `lark-cli` 监控 13 个飞书人物：
 
 - Sen（`crazySen个人发言`）
 - Lasercat（`Lasercat全员群` 中无昵称前缀的个人机器人流）
@@ -8,6 +8,8 @@ VPS 实时读取服务，通过 VPS 上已授权的 `lark-cli` 监控 11 个飞�
 - 大齐
 - luck(发财版
 - LU
+- Sencrazy💎👋（無為版（`crazysen全员群`）
+- 古乐（`crazysen全员群`，兼容状态昵称后缀）
 - Chenpepe（`金蛙聊天群｜erwanft` 中没有昵称前缀的发言）
 - CryptoD（`各大群主发言（一级）` 中的引用发言）
 - 王小二（`各大群主发言（一级）` 中的引用发言）

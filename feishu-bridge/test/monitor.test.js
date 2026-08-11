@@ -22,12 +22,15 @@ test('extracts each monitored speaker with the correct source rule', () => {
   const byId = new Map(PEOPLE.map((person) => [person.id, person]));
 
   const crazyMessages = extractMessages(
-    [byId.get('daqi'), byId.get('luck'), byId.get('lu')],
+    [byId.get('daqi'), byId.get('luck'), byId.get('lu'), byId.get('sencrazy_wuwei'), byId.get('gule')],
     [
       raw({ message_id: 'daqi', content: '【大齐】：\n看懂了' }),
       raw({ message_id: 'daqi-follower', content: '【大齐的小跟班】：\n不应出现' }),
       raw({ message_id: 'luck', content: '【luck(发财版】：\n就对了' }),
       raw({ message_id: 'lu', content: '【LU】：\n奶蛙更纯粹一点' }),
+      raw({ message_id: 'sencrazy-wuwei', content: '【Sencrazy💎👋（無為版】：\n出个小本' }),
+      raw({ message_id: 'gule', content: '【古乐(投降认输退出bsc版)】：\n太狠了  2m' }),
+      raw({ message_id: 'gule-follower', content: '【古乐的小跟班】：\n不应出现' }),
       raw({ message_id: 'other', content: '【其他人】：\n不应出现' })
     ]
   );
@@ -35,6 +38,8 @@ test('extracts each monitored speaker with the correct source rule', () => {
   assert.equal(crazyMessages.get('daqi').length, 1);
   assert.equal(crazyMessages.get('luck')[0].content, '就对了');
   assert.equal(crazyMessages.get('lu')[0].content, '奶蛙更纯粹一点');
+  assert.deepEqual(crazyMessages.get('sencrazy_wuwei').map((message) => message.content), ['出个小本']);
+  assert.deepEqual(crazyMessages.get('gule').map((message) => message.content), ['太狠了  2m']);
 
   const laserMessages = extractMessages(
     [byId.get('lasercat'), byId.get('mrdq')],
