@@ -925,8 +925,78 @@ function renderTokenLogo(token, size = 'normal') {
   `;
 }
 
+function prepareIconTooltips(root = document) {
+  const controls = [];
+  if (root instanceof Element && root.matches('button, a')) controls.push(root);
+  controls.push(...root.querySelectorAll('button, a'));
+  for (const control of controls) {
+    if (!control.querySelector('[data-lucide], svg')) continue;
+    const iconOnly = control.matches('.icon-button, .inline-icon-button')
+      || control.textContent.trim() === '';
+    if (!iconOnly) continue;
+    const label = String(control.getAttribute('title') || control.getAttribute('aria-label') || '').trim();
+    if (!label) continue;
+    control.dataset.iconTooltip = label;
+    control.removeAttribute('title');
+  }
+}
+
 function refreshIcons(root = document) {
   if (window.lucide?.createIcons) window.lucide.createIcons({ root });
+  prepareIconTooltips(root);
+}
+
+function initializeIconTooltips() {
+  const tooltip = document.createElement('div');
+  tooltip.className = 'icon-tooltip';
+  tooltip.setAttribute('role', 'tooltip');
+  tooltip.hidden = true;
+  document.body.append(tooltip);
+  let activeControl = null;
+
+  const hide = () => {
+    activeControl = null;
+    tooltip.hidden = true;
+  };
+  const show = (control) => {
+    const label = String(control?.dataset.iconTooltip || '').trim();
+    if (!label) return;
+    activeControl = control;
+    tooltip.textContent = label;
+    tooltip.hidden = false;
+    const controlRect = control.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const gap = 7;
+    const margin = 8;
+    const left = Math.min(
+      window.innerWidth - tooltipRect.width - margin,
+      Math.max(margin, controlRect.left + (controlRect.width - tooltipRect.width) / 2)
+    );
+    const below = controlRect.bottom + gap;
+    const top = below + tooltipRect.height <= window.innerHeight - margin
+      ? below
+      : Math.max(margin, controlRect.top - tooltipRect.height - gap);
+    tooltip.style.left = `${Math.round(left)}px`;
+    tooltip.style.top = `${Math.round(top)}px`;
+  };
+
+  document.addEventListener('pointerover', (event) => {
+    const control = event.target.closest?.('[data-icon-tooltip]');
+    if (control && control !== activeControl) show(control);
+  });
+  document.addEventListener('pointerout', (event) => {
+    if (!activeControl || activeControl.contains(event.relatedTarget)) return;
+    if (event.target.closest?.('[data-icon-tooltip]') === activeControl) hide();
+  });
+  document.addEventListener('focusin', (event) => {
+    const control = event.target.closest?.('[data-icon-tooltip]');
+    if (control) show(control);
+  });
+  document.addEventListener('focusout', (event) => {
+    if (event.target.closest?.('[data-icon-tooltip]') === activeControl) hide();
+  });
+  window.addEventListener('scroll', hide, true);
+  window.addEventListener('resize', hide);
 }
 
 function getCollection(payload, keys, depth = 0) {
@@ -8152,4 +8222,5 @@ state.monitorFeedChainIds = readStoredMonitorFeedChainIds();
 syncChainUi();
 syncToolbarVisibility();
 refreshIcons();
+initializeIconTooltips();
 void startMonitorPage();

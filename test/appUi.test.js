@@ -784,6 +784,21 @@ test('Lucide powers icon controls and scan controls are accessible', () => {
   assert.match(appJs, /window\.lucide\?\.createIcons/);
 });
 
+test('every icon-only control receives an immediate concise Chinese tooltip', () => {
+  const tooltipSource = appSourceBetween('function prepareIconTooltips(root = document)', 'function getCollection(payload');
+  assert.match(tooltipSource, /control\.matches\('\.icon-button, \.inline-icon-button'\)/);
+  assert.match(tooltipSource, /control\.textContent\.trim\(\) === ''/);
+  assert.match(tooltipSource, /control\.getAttribute\('title'\) \|\| control\.getAttribute\('aria-label'\)/);
+  assert.match(tooltipSource, /control\.dataset\.iconTooltip = label/);
+  assert.match(tooltipSource, /control\.removeAttribute\('title'\)/);
+  assert.match(tooltipSource, /document\.addEventListener\('pointerover'/);
+  assert.match(tooltipSource, /document\.addEventListener\('focusin'/);
+  assert.match(tooltipSource, /window\.innerWidth - tooltipRect\.width - margin/);
+  assert.match(appJs, /refreshIcons\(\);\s+initializeIconTooltips\(\);/);
+  assert.match(stylesCss, /\.icon-tooltip \{[\s\S]*position: fixed[\s\S]*z-index: 10000/);
+  assert.match(stylesCss, /@media \(hover: none\) and \(pointer: coarse\)[\s\S]*\.icon-tooltip \{[\s\S]*display: none/);
+});
+
 test('relative static assets and a scoped API root support VPS prefix deployment', () => {
   assert.match(indexHtml, /href="styles\.css(?:\?[^\"]+)?"/);
   assert.match(indexHtml, /src="app\.js(?:\?[^\"]+)?"/);
@@ -1173,7 +1188,7 @@ test('real-time monitoring is the default first-level page and replaces the rese
   assert.match(indexHtml, /data-tab="monitor"[^>]*aria-selected="true"[\s\S]*?实时监控/);
   assert.doesNotMatch(indexHtml, /id="monitor-page"[^>]*hidden/);
   assert.match(indexHtml, /id="research-board"[^>]*hidden/);
-  assert.match(appJs, /syncToolbarVisibility\(\);\s+refreshIcons\(\);\s+void startMonitorPage\(\);/);
+  assert.match(appJs, /syncToolbarVisibility\(\);\s+refreshIcons\(\);\s+initializeIconTooltips\(\);\s+void startMonitorPage\(\);/);
   for (const id of [
     'monitor-settings-form',
     'monitor-health-status',
