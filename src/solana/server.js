@@ -508,6 +508,10 @@ export class SolanaRuntimeMonitor {
     });
   }
 
+  recordBarkTestAudit(entry) {
+    return this.barkNotifier?.recordTestAudit?.(entry);
+  }
+
   ingestWebhook(payload, { authorization = '' } = {}) {
     const run = () => this.#ingestWebhook(payload, { authorization });
     const pending = this.ingestQueue.then(run, run);

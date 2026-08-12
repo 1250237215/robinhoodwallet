@@ -168,6 +168,7 @@ const WALLET_LIBRARY_ORIGIN_TABLE = `${WALLET_LIBRARY_SCHEMA}.wallet_annotation_
 
 const BARK_LIBRARY_SCHEMA = 'bark_library';
 const BARK_LIBRARY_TABLE = `${BARK_LIBRARY_SCHEMA}.monitor_bark_targets`;
+const BARK_LIBRARY_AUDIT_TABLE = `${BARK_LIBRARY_SCHEMA}.bark_test_audit`;
 const BARK_LIBRARY_METADATA_TABLE = `${BARK_LIBRARY_SCHEMA}.metadata`;
 const SHARED_BARK_SOUND_KEY = 'bark:sound';
 const SHARED_BARK_VOLUME_KEY = 'bark:volume';
@@ -388,6 +389,22 @@ function ensureSharedBarkLibrary(db) {
       last_error_at INTEGER,
       last_error TEXT NOT NULL DEFAULT ''
     );
+    CREATE TABLE IF NOT EXISTS ${BARK_LIBRARY_AUDIT_TABLE} (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id TEXT NOT NULL UNIQUE,
+      chain_id TEXT NOT NULL DEFAULT '',
+      target_id INTEGER,
+      target_label TEXT NOT NULL DEFAULT '',
+      client_ip TEXT NOT NULL DEFAULT '',
+      user_agent TEXT NOT NULL DEFAULT '',
+      device_type TEXT NOT NULL DEFAULT 'unknown',
+      started_at_ms INTEGER NOT NULL,
+      completed_at_ms INTEGER NOT NULL,
+      success INTEGER NOT NULL CHECK (success IN (0, 1)),
+      error TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ${BARK_LIBRARY_SCHEMA}.bark_test_audit_started_at_idx
+      ON bark_test_audit(started_at_ms DESC);
   `);
 }
 
@@ -682,6 +699,22 @@ export function createRobinhoodStore(filename, {
       last_error_at INTEGER,
       last_error TEXT NOT NULL DEFAULT ''
     );
+    CREATE TABLE IF NOT EXISTS bark_test_audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id TEXT NOT NULL UNIQUE,
+      chain_id TEXT NOT NULL DEFAULT '',
+      target_id INTEGER,
+      target_label TEXT NOT NULL DEFAULT '',
+      client_ip TEXT NOT NULL DEFAULT '',
+      user_agent TEXT NOT NULL DEFAULT '',
+      device_type TEXT NOT NULL DEFAULT 'unknown',
+      started_at_ms INTEGER NOT NULL,
+      completed_at_ms INTEGER NOT NULL,
+      success INTEGER NOT NULL CHECK (success IN (0, 1)),
+      error TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS bark_test_audit_started_at_idx
+      ON bark_test_audit(started_at_ms DESC);
     CREATE TABLE IF NOT EXISTS monitor_token_alerts (
       token_address TEXT PRIMARY KEY,
       alerted_at INTEGER NOT NULL
@@ -789,6 +822,7 @@ export function createRobinhoodStore(filename, {
     walletAnnotationTable = WALLET_LIBRARY_TABLE;
   }
   let barkTargetTable = 'main.monitor_bark_targets';
+  let barkAuditTable = 'main.bark_test_audit';
   let barkMetadataTable = 'main.metadata';
   if (normalizedBarkLibraryFile) {
     db.prepare(`ATTACH DATABASE ? AS ${BARK_LIBRARY_SCHEMA}`).run(normalizedBarkLibraryFile);
@@ -796,6 +830,7 @@ export function createRobinhoodStore(filename, {
     ensureSharedBarkLibrary(db);
     migrateLegacyBarkConfiguration(db, normalizedChainId);
     barkTargetTable = BARK_LIBRARY_TABLE;
+    barkAuditTable = BARK_LIBRARY_AUDIT_TABLE;
     barkMetadataTable = BARK_LIBRARY_METADATA_TABLE;
   }
   function runSharedBarkWrite(operation) {
@@ -1725,6 +1760,30 @@ export function createRobinhoodStore(filename, {
       return monitorBarkTargetFromRow(
         db.prepare(`SELECT * FROM ${barkTargetTable} WHERE id = ?`).get(Number(id))
       );
+    },
+    recordBarkTestAudit(entry = {}) {
+      const requestId = String(entry.requestId || '').trim().slice(0, 100);
+      if (!requestId) throw new TypeError('Bark test audit request id is required');
+      runSharedBarkWrite(() => {
+        db.prepare(`
+          INSERT INTO ${barkAuditTable}(
+            request_id, chain_id, target_id, target_label, client_ip, user_agent,
+            device_type, started_at_ms, completed_at_ms, success, error
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          requestId,
+          String(entry.chainId || normalizedChainId).slice(0, 40),
+          Number.isSafeInteger(Number(entry.targetId)) ? Number(entry.targetId) : null,
+          String(entry.targetLabel || '').slice(0, 100),
+          String(entry.clientIp || '').slice(0, 200),
+          String(entry.userAgent || '').slice(0, 1000),
+          String(entry.deviceType || 'unknown').slice(0, 40),
+          Number(entry.startedAtMs) || Date.now(),
+          Number(entry.completedAtMs) || Date.now(),
+          entry.success === true ? 1 : 0,
+          String(entry.error || '').slice(0, 1000)
+        );
+      });
     },
     deleteMonitorBarkTarget(id) {
       return runSharedBarkWrite(() => {

@@ -60,6 +60,29 @@ function methodNotAllowed(methods) {
   throw new HttpError(405, 'Method not allowed', 'METHOD_NOT_ALLOWED', { allow: methods.join(', ') });
 }
 
+function requestClientIp(req) {
+  const remoteAddress = String(req.socket?.remoteAddress || '').trim();
+  const loopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remoteAddress.toLowerCase());
+  if (loopback) {
+    const forwarded = Array.isArray(req.headers['x-forwarded-for'])
+      ? req.headers['x-forwarded-for'].join(',')
+      : String(req.headers['x-forwarded-for'] || '');
+    const client = forwarded.split(',')[0]?.trim();
+    if (client) return client.slice(0, 200);
+    const realIp = String(req.headers['x-real-ip'] || '').trim();
+    if (realIp) return realIp.slice(0, 200);
+  }
+  return remoteAddress.slice(0, 200) || 'unknown';
+}
+
+function requestDeviceType(userAgent) {
+  const value = String(userAgent || '');
+  if (/ipad|tablet/i.test(value)) return 'tablet';
+  if (/mobile|iphone|ipod|android/i.test(value)) return 'mobile';
+  if (value) return 'desktop';
+  return 'unknown';
+}
+
 function internalTokenMatches(req, expectedToken) {
   const expected = Buffer.from(String(expectedToken || ''));
   const authorization = String(req.headers.authorization || '');
@@ -603,12 +626,34 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
     const id = Number(barkTargetMatch[1]);
     if (barkTargetMatch[2] === 'test') {
       if (req.method !== 'POST') methodNotAllowed(['POST']);
+      const requestId = crypto.randomUUID();
+      const startedAtMs = Date.now();
+      const userAgent = String(req.headers['user-agent'] || '');
       let target;
+      let testError = null;
       try {
         target = await activeMonitor.testBarkTarget(id);
       } catch (error) {
-        throw new HttpError(502, error instanceof Error ? error.message : String(error), 'BARK_TEST_FAILED');
+        testError = error;
+      } finally {
+        try {
+          activeMonitor.recordBarkTestAudit?.({
+            requestId,
+            targetId: id,
+            targetLabel: target?.label || activeMonitor.listBarkTargets().find((item) => item.id === id)?.label || '',
+            clientIp: requestClientIp(req),
+            userAgent,
+            deviceType: requestDeviceType(userAgent),
+            startedAtMs,
+            completedAtMs: Date.now(),
+            success: !testError && Boolean(target),
+            error: testError instanceof Error ? testError.message : testError ? String(testError) : target ? '' : 'Bark target was not found'
+          });
+        } catch (auditError) {
+          console.error('Failed to record Bark test audit:', auditError instanceof Error ? auditError.message : auditError);
+        }
       }
+      if (testError) throw new HttpError(502, testError instanceof Error ? testError.message : String(testError), 'BARK_TEST_FAILED');
       if (!target) throw new HttpError(404, 'Bark target was not found', 'BARK_TARGET_NOT_FOUND');
       sendJson(res, 200, {
         ok: true,

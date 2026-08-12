@@ -233,6 +233,11 @@ export class RobinhoodBarkNotifier {
     return this.store.deleteMonitorBarkTarget(targetId(id));
   }
 
+  recordTestAudit(entry) {
+    if (!this.store.recordBarkTestAudit) throw new Error('Bark test auditing is unavailable');
+    this.store.recordBarkTestAudit(entry);
+  }
+
   async testTarget(id, { sound = 'alarm', volume = 5 } = {}) {
     const target = this.store.getMonitorBarkTarget(targetId(id));
     if (!target) return null;

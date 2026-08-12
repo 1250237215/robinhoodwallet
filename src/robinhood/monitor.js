@@ -881,6 +881,10 @@ export class RobinhoodWalletMonitor {
     });
   }
 
+  recordBarkTestAudit(entry) {
+    return this.barkNotifier?.recordTestAudit?.(entry);
+  }
+
   notifyTelegramMessage(payload) {
     if (!this.barkNotifier?.notifyTelegramMessage) {
       throw new Error('Bark notifications are unavailable');

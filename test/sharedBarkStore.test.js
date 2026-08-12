@@ -111,6 +111,34 @@ function runConcurrentWriter({ chainFile, barkFile, chainId, prefix, count }) {
   });
 }
 
+test('stores Bark test audits in the shared database without exposing them through the UI API', (t) => {
+  const files = testFiles(t);
+  const store = openStore(files.robinhood, 'robinhood', files.bark);
+  t.after(() => store.close());
+
+  store.recordBarkTestAudit({
+    requestId: 'audit-request-1',
+    targetId: 7,
+    targetLabel: 'My iPhone',
+    clientIp: '203.0.113.24',
+    userAgent: 'Mobile Safari',
+    deviceType: 'mobile',
+    startedAtMs: 1_723_456_789_000,
+    completedAtMs: 1_723_456_789_125,
+    success: true
+  });
+
+  const row = store.db.prepare('SELECT * FROM bark_library.bark_test_audit').get();
+  assert.equal(row.request_id, 'audit-request-1');
+  assert.equal(row.chain_id, 'robinhood');
+  assert.equal(row.target_id, 7);
+  assert.equal(row.target_label, 'My iPhone');
+  assert.equal(row.client_ip, '203.0.113.24');
+  assert.equal(row.device_type, 'mobile');
+  assert.equal(row.completed_at_ms - row.started_at_ms, 125);
+  assert.equal(row.success, 1);
+});
+
 test('shares Bark targets and settings immediately across all chain stores', (t) => {
   const files = testFiles(t);
   const stores = [

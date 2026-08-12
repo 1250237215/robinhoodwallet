@@ -491,6 +491,7 @@ test('standalone refresh endpoint reports manual-only mode without accepting dis
 
 test('standalone monitor routes expose snapshots, incremental events, and validated persistent settings', async () => {
   const updates = [];
+  const barkTestAudits = [];
   const barkTargets = [];
   const barkFeatures = [{ id: 'fomo_ca', group: '社媒监控', label: 'FOMO CA', enabled: true }];
   const event = {
@@ -556,6 +557,9 @@ test('standalone monitor routes expose snapshots, incremental events, and valida
     },
     async testBarkTarget(id) {
       return id === 1 ? barkTargets[0] : null;
+    },
+    recordBarkTestAudit(entry) {
+      barkTestAudits.push(entry);
     },
     subscribe() {
       return () => {};
@@ -639,7 +643,20 @@ test('standalone monitor routes expose snapshots, incremental events, and valida
       body: JSON.stringify({ enabled: false })
     });
     assert.equal((await paused.json()).target.enabled, false);
-    assert.equal((await fetch(`${baseUrl}/api/robinhood/monitor/bark/1/test`, { method: 'POST' })).status, 200);
+    assert.equal((await fetch(`${baseUrl}/api/robinhood/monitor/bark/1/test`, {
+      method: 'POST',
+      headers: {
+        'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile',
+        'x-forwarded-for': '203.0.113.24'
+      }
+    })).status, 200);
+    assert.equal(barkTestAudits.length, 1);
+    assert.equal(barkTestAudits[0].targetId, 1);
+    assert.equal(barkTestAudits[0].targetLabel, 'Phone');
+    assert.equal(barkTestAudits[0].clientIp, '203.0.113.24');
+    assert.equal(barkTestAudits[0].deviceType, 'mobile');
+    assert.equal(barkTestAudits[0].success, true);
+    assert.match(barkTestAudits[0].requestId, /^[0-9a-f-]{36}$/);
     assert.equal((await fetch(`${baseUrl}/api/robinhood/monitor/bark/1`, { method: 'DELETE' })).status, 200);
   }, monitor);
 });
