@@ -412,7 +412,7 @@ test('candidate rows support DeBot inspection, confirmation, exclusion and deter
   assert.match(appJs, /method: 'PATCH',[\s\S]*status: 'active',[\s\S]*alias: walletSuggestedAlias\(wallet\)/);
   assert.match(appJs, /firstValue\(wallet, \['suggestedAlias', 'suggested_alias'\]/);
   assert.match(appJs, /return `\$\{bestSymbol\} \$\{profitRank\}`/);
-  assert.match(appJs, /fetchChainJson\(context, `\/wallets\/\$\{encodeURIComponent\(normalized\)\}`, \{ method: 'DELETE' \}\)/);
+  assert.match(appJs, /fetchMonitorSessionJson\(context, `\/wallets\/\$\{encodeURIComponent\(normalized\)\}`, \{ method: 'DELETE' \}\)/);
   assert.match(appJs, /之后不会再出现在默认候选中/);
   assert.match(appJs, /reviewMode \? `[\s\S]*data-confirm-candidate[\s\S]*` : `[\s\S]*data-edit-wallet/);
 });
@@ -1028,9 +1028,7 @@ test('all API reads and writes use an immutable abortable chain context', () => 
     ['confirmSelectedCandidates', 'deleteSelectedWallets'],
     ['deleteSelectedWallets', 'excludeCandidate'],
     ['excludeCandidate', 'walletBatchCount'],
-    ['addManualWalletBatch', 'openWalletEditor'],
-    ['saveWalletEditor', 'disableConfirmedWallet'],
-    ['disableConfirmedWallet', 'excludeEditedWallet']
+    ['addManualWalletBatch', 'openWalletEditor']
   ];
   for (const [name, nextName] of guardedOperations) {
     const source = appJs.slice(
@@ -1039,6 +1037,18 @@ test('all API reads and writes use an immutable abortable chain context', () => 
     );
     assert.match(source, /const context = captureChainRequestContext\(\)/, `${name} must capture its chain before awaiting`);
     assert.match(source, /(?:chainRequestIsCurrent|requireCurrentChainRequest)\(context\)/, `${name} must reject stale completion`);
+  }
+  for (const [name, nextName] of [
+    ['openMonitorWalletEditor', 'renderMonitorPage'],
+    ['saveWalletEditor', 'disableConfirmedWallet'],
+    ['disableConfirmedWallet', 'excludeEditedWallet']
+  ]) {
+    const source = appJs.slice(
+      appJs.indexOf(`async function ${name}`),
+      appJs.indexOf(`function ${nextName}`, appJs.indexOf(`async function ${name}`) + 1)
+    );
+    assert.match(source, /const context = captureMonitorSessionContext\(session\)/, `${name} must capture its monitor session before awaiting`);
+    assert.match(source, /monitorSessionRequestIsCurrent\(context\)/, `${name} must reject stale completion`);
   }
   const monitorSessionHelpers = appSourceBetween('function captureMonitorSessionContext(session)', 'function selectedMonitorEvents()');
   assert.match(monitorSessionHelpers, /return Object\.freeze\(\{[\s\S]*chainId: session\.chainId[\s\S]*signal: session\.abortController\.signal/);
@@ -1090,7 +1100,7 @@ test('live monitor refreshes preserve an unsaved settings draft', () => {
   assert.match(resetSource, /state\.monitorSettingsSaving = false/);
 });
 
-test('DeBot and explorer links use the active chain for research and each event chain for the mixed monitor feed', () => {
+test('DeBot links use the active chain for research and each event chain for the mixed monitor feed', () => {
   for (const [chain, debotAddress, debotToken, manager, explorer] of [
     ['robinhood', 'https://debot.ai/address/robinhood', 'https://debot.ai/token/robinhood/289942_', 'https://debot.ai/track?chain=robinhood&tab=manager', 'https://robinhoodchain.blockscout.com'],
     ['base', 'https://debot.ai/address/base', 'https://debot.ai/token/base/289942_', 'https://debot.ai/track?chain=base&tab=manager', 'https://base.blockscout.com'],
@@ -1124,7 +1134,7 @@ test('DeBot and explorer links use the active chain for research and each event 
   assert.match(monitorRender, /const eventChain = monitorChain\(event\.chain\)/);
   assert.match(monitorRender, /`\$\{eventChain\.debotAddressRoot\}\/\$\{event\.walletAddress\}`/);
   assert.match(monitorRender, /`\$\{eventChain\.debotTokenRoot\}\$\{event\.tokenAddress\}`/);
-  assert.match(monitorRender, /explorerUrlForChain\(eventChain\.id, 'tx', event\.txHash\)/);
+  assert.doesNotMatch(monitorRender, /explorerUrlForChain\(eventChain\.id, 'tx', event\.txHash\)/);
   assert.doesNotMatch(monitorRender, /robinhoodchain|basescan|solscan/i);
   assert.match(appJs, /managerLink\.href = context\.debotWalletManagerUrl/);
   assert.match(appJs, /explorerUrl\('address', address\)/);
@@ -1592,16 +1602,16 @@ test('multi-chain monitor sessions keep identities, cursors, streams and merged 
   assert.deepEqual(selectedMonitorEvents().map((event) => `${event.chain}:${event.id}`), ['bsc:1', 'robinhood:1']);
 });
 
-test('mixed-chain events render chain-scoped links, notes, labels and distinct backgrounds', () => {
-  const renderSource = appSourceBetween('function renderMonitorEvents()', 'function monitorEventByKey(eventKey)');
+test('mixed-chain events render chain-scoped links, wallet editing, labels and distinct backgrounds', () => {
+  const renderSource = appSourceBetween('function renderMonitorEvents()', 'function updateMonitorWalletAnnotation(address');
   assert.match(renderSource, /data-chain="\$\{eventChain\.id\}"/);
   assert.match(renderSource, /class="monitor-chain-badge" data-chain="\$\{eventChain\.id\}"/);
   assert.match(renderSource, /eventChain\.nativeSymbol/);
   assert.match(renderSource, /eventChain\.debotAddressRoot/);
   assert.match(renderSource, /eventChain\.debotTokenRoot/);
-  assert.match(renderSource, /explorerUrlForChain\(eventChain\.id, 'tx', event\.txHash\)/);
-  assert.match(renderSource, /data-monitor-note-chain="\$\{eventChain\.id\}"/);
-  assert.match(appJs, /fetchMonitorSessionJson\(context, `\/wallets\/\$\{encodeURIComponent\(editor\.address\)\}`, \{[\s\S]*method: 'PATCH'/);
+  assert.match(renderSource, /data-monitor-wallet-chain="\$\{eventChain\.id\}"/);
+  assert.match(renderSource, /data-monitor-wallet-edit="\$\{escapeHtml\(event\.walletAddress\)\}"/);
+  assert.match(appJs, /fetchMonitorSessionJson\(context, `\/wallets\/\$\{encodeURIComponent\(address\)\}`, \{[\s\S]*method: 'PATCH'/);
   assert.match(appJs, /const normalizeAddress = \(value\) => normalizeAddressForChain\(value, chainId\)/);
   assert.match(appJs, /const normalizeTransactionHash = \(value\) => normalizeTransactionHashForChain\(value, chainId\)/);
 
@@ -2260,7 +2270,7 @@ test('realtime feeds cap live DOM and reconcile stable cards instead of replacin
   assert.match(socialRenderSource, /reconcileKeyedFeed\(elements\.socialFeed, markup\)/);
   assert.doesNotMatch(socialRenderSource, /elements\.socialFeed\.innerHTML = items\.map/);
 
-  const monitorRenderSource = appSourceBetween('function renderMonitorEvents()', 'function monitorEventByKey(eventKey)');
+  const monitorRenderSource = appSourceBetween('function renderMonitorEvents()', 'function updateMonitorWalletAnnotation(address');
   assert.match(monitorRenderSource, /reconcileKeyedFeed\(elements\.monitorEventFeed, markup\)/);
   assert.doesNotMatch(monitorRenderSource, /elements\.monitorEventFeed\.innerHTML = events\.map/);
 });
@@ -2540,32 +2550,38 @@ test('real-time feed distinguishes proven top-profit buyers and manually named w
   assert.match(stylesCss, /\.monitor-event-meta \.monitor-profit-rank-badge \{[\s\S]*max-width: min\(150px, 100%\)/);
 });
 
-test('real-time feed supports immediate wallet-note editing without a full dashboard reload', () => {
-  assert.match(appJs, /walletNote: String\(pickPresent\(\['walletNote', 'wallet_note', 'note'\]/);
-  assert.match(appJs, /data-monitor-note-edit="\$\{escapeHtml\(event\.walletAddress\)\}"/);
-  assert.match(appJs, /data-monitor-note-form="\$\{escapeHtml\(eventKey\)\}"/);
-  assert.match(appJs, /maxlength="4000"/);
-  assert.match(appJs, /elements\.monitorEventFeed\.addEventListener\('submit', \(event\) => void saveMonitorNote\(event\)\)/);
-  const quickNoteSource = appJs.slice(
-    appJs.indexOf('function updateMonitorWalletAnnotation'),
-    appJs.indexOf('function renderMonitorPage')
+test('real-time feed exposes only the full chain-scoped wallet editor action', () => {
+  const renderSource = appSourceBetween('function renderMonitorEvents()', 'function updateMonitorWalletAnnotation(address');
+  const actionMarkup = renderSource.slice(
+    renderSource.indexOf('<div class="monitor-event-links">'),
+    renderSource.indexOf('</div>', renderSource.indexOf('<div class="monitor-event-links">')) + 6
   );
-  assert.match(quickNoteSource, /const session = monitorSession\(editor\.chainId\)[\s\S]*fetchMonitorSessionJson\(context, `\/wallets\/\$\{encodeURIComponent\(editor\.address\)\}`, \{[\s\S]*method: 'PATCH'/);
-  assert.match(quickNoteSource, /body: JSON\.stringify\(\{ note \}\)/);
-  assert.match(quickNoteSource, /session\.events = session\.events\.map/);
-  assert.match(quickNoteSource, /walletNoteKnown: true/);
-  assert.doesNotMatch(quickNoteSource, /loadData\(/);
-  assert.match(stylesCss, /\.monitor-note-editor \{[\s\S]*grid-template-columns: 11px minmax\(0, 1fr\) 24px 24px/);
-  assert.match(stylesCss, /\.monitor-note-chip \{[\s\S]*text-overflow|\.monitor-note-chip span \{[\s\S]*text-overflow: ellipsis/);
-  assert.match(appJs, /event\.isComposing \|\| event\.keyCode === 229/);
-  assert.match(appJs, /addEventListener\('compositionstart'/);
-  assert.match(appJs, /addEventListener\('compositionend'/);
-  assert.match(appJs, /state\.monitorNoteEditor\?\.composing[\s\S]*state\.monitorNoteEditor\.value = activeInput\.value;[\s\S]*return;/);
-  assert.match(appJs, /input\.focus\(\{ preventScroll: true \}\)/);
-  assert.match(appJs, /input\.setSelectionRange\(activeEditor\.selectionStart, activeEditor\.selectionEnd\)/);
-  assert.match(appJs, /const pickPresent = \(keys, fallback = null\)/);
-  assert.match(quickNoteSource, /const sessionId = \+\+state\.monitorNoteSessionSequence/);
-  assert.match(quickNoteSource, /state\.monitorNoteEditor\?\.sessionId === sessionId/);
+  assert.equal((actionMarkup.match(/<button\b/g) || []).length, 1);
+  assert.match(actionMarkup, /data-monitor-wallet-edit="\$\{escapeHtml\(event\.walletAddress\)\}"/);
+  assert.match(actionMarkup, /data-monitor-wallet-chain="\$\{eventChain\.id\}"/);
+  assert.match(actionMarkup, /data-lucide="pencil"/);
+  assert.doesNotMatch(actionMarkup, /data-monitor-note|DeBot 地址|DeBot 代币|浏览器查看交易/);
+  assert.doesNotMatch(appJs, /monitorNoteEditor|monitorNoteSessionSequence|monitor-note-editor|monitor-note-chip/);
+  assert.doesNotMatch(stylesCss, /\.monitor-note-editor|\.monitor-note-chip/);
+
+  const openSource = appSourceBetween('async function openMonitorWalletEditor(button)', 'function renderMonitorPage()');
+  assert.match(openSource, /const chainId = monitorChainId\(button\?\.dataset\.monitorWalletChain\)/);
+  assert.match(openSource, /const address = normalizeAddressForChain\(button\?\.dataset\.monitorWalletEdit, chainId\)/);
+  assert.match(openSource, /fetchMonitorSessionJson\(context, `\/wallets\/\$\{encodeURIComponent\(address\)\}`\)/);
+  assert.match(openSource, /openWalletEditor\(\{ \.\.\.wallet, address \}, \{ chainId \}\)/);
+  assert.match(appJs, /elements\.monitorEventFeed\.addEventListener\('click',[\s\S]*closest\('\[data-monitor-wallet-edit\]'\)[\s\S]*openMonitorWalletEditor\(button\)/);
+
+  const editorSource = appSourceBetween('function openWalletEditor(wallet', 'async function saveWalletEditor(event)');
+  for (const field of [
+    'walletEditorAddress',
+    'walletEditorAlias',
+    'walletEditorTags',
+    'walletEditorStatus',
+    'walletEditorMonitorTier',
+    'walletEditorClassification',
+    'walletEditorNote'
+  ]) assert.match(editorSource, new RegExp(`elements\\.${field}`));
+  assert.match(editorSource, /renderWalletMonitorRules\(firstValue\(wallet, \['monitorRules', 'monitor_rules'\]/);
 });
 
 test('wallet editor immediately refreshes monitor alias provenance', () => {
@@ -2574,8 +2590,8 @@ test('wallet editor immediately refreshes monitor alias provenance', () => {
     appJs.indexOf('async function disableConfirmedWallet')
   );
   assert.match(source, /const savedWallet = record\.wallet/);
-  assert.match(source, /updateMonitorWalletAnnotation\(address, savedWallet\)/);
-  assert.match(source, /updateMonitorWalletAnnotation\(address, savedWallet\)[\s\S]*renderMonitorEvents\(\)/);
+  assert.match(source, /updateMonitorWalletAnnotation\(address, savedWallet, chainId\)/);
+  assert.match(source, /updateMonitorWalletAnnotation\(address, savedWallet, chainId\)[\s\S]*renderMonitorEvents\(\)/);
 });
 
 test('real-time feed uses a compact scan-friendly hierarchy, event colors and one-shot arrival emphasis', () => {
@@ -2607,7 +2623,7 @@ test('single-wallet browser sound is gesture-driven and strictly gated by soundA
   assert.match(appJs, /if \(!initial && state\.monitorFeedChainIds\.has\(session\.chainId\)\) playMonitorEventSounds\(added\)/);
   assert.match(appJs, /playMonitorEventSounds\(added\);[\s\S]*synchronizeMonitorAlerts\(\{[\s\S]*sessions: \[session\]/);
   assert.match(appJs, /const walletUrl = safeHttpUrl\(event\.debotAddressUrl\) \|\| `\$\{eventChain\.debotAddressRoot\}\/\$\{event\.walletAddress\}`/);
-  assert.match(appJs, /const transactionUrl = safeHttpUrl\(event\.explorerTxUrl\) \|\| explorerUrlForChain\(eventChain\.id, 'tx', event\.txHash\)/);
+  assert.doesNotMatch(appJs, /const transactionUrl = safeHttpUrl\(event\.explorerTxUrl\) \|\| explorerUrlForChain\(eventChain\.id, 'tx', event\.txHash\)/);
   assert.match(appJs, /金额不限/);
 });
 

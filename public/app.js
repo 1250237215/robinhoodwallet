@@ -536,8 +536,7 @@ const state = {
   monitorMobileBarkTesting: false,
   monitorBarkFeatures: [],
   monitorBarkFeatureBusy: new Set(),
-  monitorNoteEditor: null,
-  monitorNoteSessionSequence: 0,
+  walletEditorChainId: 'robinhood',
   monitorFeedChainIds: new Set(),
   monitorSessions: new Map(),
   socialStarted: false,
@@ -3289,24 +3288,11 @@ function renderMonitorChainFilter() {
 
 function renderMonitorEvents() {
   const events = state.monitorEvents;
-  const activeInput = document.activeElement?.closest?.('[data-monitor-note-input]');
-  const activeEditor = activeInput && state.monitorNoteEditor?.eventKey === activeInput.dataset.monitorNoteInput
-    ? {
-        eventKey: activeInput.dataset.monitorNoteInput,
-        selectionStart: activeInput.selectionStart,
-        selectionEnd: activeInput.selectionEnd,
-        scrollTop: activeInput.scrollTop
-      }
-    : null;
   const selectedChains = Object.values(CHAIN_CONFIGS)
     .filter((chain) => state.monitorFeedChainIds.has(chain.id))
     .map((chain) => chain.label)
     .join(' + ');
   elements.monitorFeedSummary.textContent = `${selectedChains} · ${events.length} 条记录 · 按检测时间倒序 · 金额不限`;
-  if (activeEditor && state.monitorNoteEditor?.composing && !state.monitorNoteEditor.saving) {
-    state.monitorNoteEditor.value = activeInput.value;
-    return;
-  }
   if (!events.length) {
     elements.monitorEventFeed.innerHTML = `
       <div class="monitor-empty-state">
@@ -3325,10 +3311,6 @@ function renderMonitorEvents() {
     const wallet = eventChain.id === activeChainId ? walletForAddress(event.walletAddress) : null;
     const walletLabel = String(event.walletNoteKnown ? event.walletAlias : wallet?.alias ?? event.walletAlias).trim()
       || shortAddress(event.walletAddress);
-    const walletNote = String(event.walletNoteKnown ? event.walletNote : wallet?.note ?? event.walletNote ?? '').trim();
-    const noteEditor = state.monitorNoteEditor?.eventKey === eventKey
-      ? state.monitorNoteEditor
-      : null;
     const eventType = MONITOR_EVENT_TYPES.includes(event.eventType) ? event.eventType : 'buy';
     const aliasSource = String(event.walletAliasSource || wallet?.aliasSource || wallet?.alias_source || '')
       .trim()
@@ -3345,7 +3327,6 @@ function renderMonitorEvents() {
     const tokenUrl = event.tokenAddress
       ? safeHttpUrl(event.debotTokenUrl) || `${eventChain.debotTokenRoot}${event.tokenAddress}`
       : '';
-    const transactionUrl = safeHttpUrl(event.explorerTxUrl) || explorerUrlForChain(eventChain.id, 'tx', event.txHash);
     const recipientLabel = event.recipient ? shortAddress(event.recipient) : '';
     const hasTokenMetrics = Boolean(event.tokenAddress) && event.assetType !== 'native';
     const hasMarketCap = event.marketCapUsd !== null;
@@ -3386,16 +3367,7 @@ function renderMonitorEvents() {
             <span>${escapeHtml(event.tokenName || (event.tokenAddress ? shortAddress(event.tokenAddress) : symbol))}</span>
             ${event.recipient ? `<span title="${escapeHtml(event.recipient)}">接收方 ${escapeHtml(recipientLabel)}</span>` : ''}
             ${event.platform ? `<span title="${escapeHtml(event.platform)}">平台 ${escapeHtml(monitorPlatformLabel(event.platform))}</span>` : ''}
-            ${walletNote ? `<button class="monitor-note-chip" type="button" data-monitor-note-edit="${escapeHtml(event.walletAddress)}" data-monitor-note-event="${escapeHtml(eventKey)}" data-monitor-note-chain="${eventChain.id}" title="修改地址备注"><i data-lucide="sticky-note" aria-hidden="true"></i><span>${escapeHtml(walletNote)}</span></button>` : ''}
           </div>
-          ${noteEditor ? `
-            <form class="monitor-note-editor" data-monitor-note-form="${escapeHtml(eventKey)}" data-monitor-note-address="${escapeHtml(event.walletAddress)}" data-monitor-note-chain="${eventChain.id}">
-              <i data-lucide="sticky-note" aria-hidden="true"></i>
-              <textarea rows="1" maxlength="4000" placeholder="地址备注" aria-label="地址备注" data-monitor-note-input="${escapeHtml(eventKey)}" ${noteEditor.saving ? 'disabled' : ''}>${escapeHtml(noteEditor.value)}</textarea>
-              <button class="inline-icon-button" type="submit" title="保存备注" aria-label="保存备注" ${noteEditor.saving ? 'disabled' : ''}><i data-lucide="check" aria-hidden="true"></i></button>
-              <button class="inline-icon-button" type="button" data-monitor-note-cancel title="取消" aria-label="取消修改备注" ${noteEditor.saving ? 'disabled' : ''}><i data-lucide="x" aria-hidden="true"></i></button>
-            </form>
-          ` : ''}
         </div>
         <strong class="monitor-event-amount">${escapeHtml(formatMonitorAmount(event))}</strong>
         ${hasTokenMetrics ? `
@@ -3416,10 +3388,7 @@ function renderMonitorEvents() {
         ` : ''}
         ${renderMonitorTokenRisk(event)}
         <div class="monitor-event-links">
-          <button class="inline-icon-button monitor-note-button" type="button" data-monitor-note-edit="${escapeHtml(event.walletAddress)}" data-monitor-note-event="${escapeHtml(eventKey)}" data-monitor-note-chain="${eventChain.id}" title="${walletNote ? '修改备注' : '添加备注'}" aria-label="${walletNote ? '修改' : '添加'} ${escapeHtml(walletLabel)} 的备注"><i data-lucide="notebook-pen" aria-hidden="true"></i></button>
-          <a class="inline-icon-button" href="${escapeHtml(walletUrl)}" target="_blank" rel="noopener noreferrer" title="DeBot 地址" aria-label="在 DeBot 查看地址"><i data-lucide="wallet" aria-hidden="true"></i></a>
-          ${tokenUrl ? `<a class="inline-icon-button" href="${escapeHtml(tokenUrl)}" target="_blank" rel="noopener noreferrer" title="DeBot 代币" aria-label="在 DeBot 查看代币"><i data-lucide="coins" aria-hidden="true"></i></a>` : ''}
-          ${transactionUrl ? `<a class="inline-icon-button" href="${escapeHtml(transactionUrl)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(eventChain.label)} 浏览器交易" aria-label="在 ${escapeHtml(eventChain.label)} 浏览器查看交易"><i data-lucide="square-arrow-out-up-right" aria-hidden="true"></i></a>` : ''}
+          <button class="inline-icon-button monitor-wallet-edit-button" type="button" data-monitor-wallet-edit="${escapeHtml(event.walletAddress)}" data-monitor-wallet-chain="${eventChain.id}" title="编辑钱包" aria-label="编辑 ${escapeHtml(walletLabel)}"><i data-lucide="pencil" aria-hidden="true"></i></button>
         </div>
       </article>
     `;
@@ -3427,21 +3396,6 @@ function renderMonitorEvents() {
   }).join('');
   reconcileKeyedFeed(elements.monitorEventFeed, markup);
   refreshIcons(elements.monitorEventFeed);
-  if (activeEditor && !state.monitorNoteEditor?.saving) {
-    requestAnimationFrame(() => {
-      if (state.monitorNoteEditor?.eventKey !== activeEditor.eventKey || state.monitorNoteEditor.saving) return;
-      const input = [...elements.monitorEventFeed.querySelectorAll('[data-monitor-note-input]')]
-        .find((candidate) => candidate.dataset.monitorNoteInput === activeEditor.eventKey);
-      if (!input) return;
-      input.focus({ preventScroll: true });
-      input.setSelectionRange(activeEditor.selectionStart, activeEditor.selectionEnd);
-      input.scrollTop = activeEditor.scrollTop;
-    });
-  }
-}
-
-function monitorEventByKey(eventKey) {
-  return state.monitorEvents.find((event) => monitorEventKey(event) === eventKey) || null;
 }
 
 function updateMonitorWalletAnnotation(address, annotation = {}, chainId = activeChainId) {
@@ -3485,92 +3439,25 @@ function updateMonitorWalletAnnotation(address, annotation = {}, chainId = activ
   if (normalizedChainId === activeChainId) state.visibleWallets = updateWallets(state.visibleWallets);
 }
 
-function focusMonitorNoteEditor(eventKey) {
-  requestAnimationFrame(() => {
-    const input = [...elements.monitorEventFeed.querySelectorAll('[data-monitor-note-input]')]
-      .find((candidate) => candidate.dataset.monitorNoteInput === eventKey);
-    input?.focus();
-    input?.select();
-  });
-}
-
-async function openMonitorNoteEditor(button) {
-  const sessionId = ++state.monitorNoteSessionSequence;
-  const eventKey = String(button?.dataset.monitorNoteEvent || '');
-  const monitorEvent = monitorEventByKey(eventKey);
-  const chainId = monitorChainId(button?.dataset.monitorNoteChain || monitorEvent?.chain);
+async function openMonitorWalletEditor(button) {
+  const chainId = monitorChainId(button?.dataset.monitorWalletChain);
   const session = monitorSession(chainId);
   const context = captureMonitorSessionContext(session);
-  const address = normalizeAddressForChain(button?.dataset.monitorNoteEdit, chainId);
-  if (!address || !monitorEvent || monitorEvent.chain !== chainId || monitorEvent.walletAddress !== address) return;
-  const cachedWallet = chainId === activeChainId ? walletForAddress(address) : null;
-  let note = monitorEvent.walletNoteKnown
-    ? String(monitorEvent.walletNote || '')
-    : typeof cachedWallet?.note === 'string'
-      ? cachedWallet.note
-      : null;
-  if (note === null) {
-    button.disabled = true;
-    try {
-      const payload = await fetchMonitorSessionJson(context, `/wallets/${encodeURIComponent(address)}`);
-      if (!monitorSessionRequestIsCurrent(context)) return;
-      const record = unwrapRecord(payload);
-      const wallet = record.wallet && typeof record.wallet === 'object' ? record.wallet : record;
-      note = String(wallet.note || '');
-      updateMonitorWalletAnnotation(address, wallet, chainId);
-      if (chainId === activeChainId) state.detailCache.set(address, payload);
-    } catch (error) {
-      if (monitorSessionRequestIsCurrent(context)) showToast(`读取备注失败：${error.message}`, 'error');
-      return;
-    } finally {
-      if (monitorSessionRequestIsCurrent(context)) button.disabled = false;
-    }
-  }
-  if (!monitorSessionRequestIsCurrent(context) || sessionId !== state.monitorNoteSessionSequence) return;
-  state.monitorNoteEditor = { address, chainId, eventKey, sessionId, value: note, saving: false, composing: false };
-  renderMonitorEvents();
-  focusMonitorNoteEditor(eventKey);
-}
-
-function cancelMonitorNoteEditor() {
-  state.monitorNoteEditor = null;
-  renderMonitorEvents();
-}
-
-async function saveMonitorNote(event) {
-  event.preventDefault();
-  const editor = state.monitorNoteEditor;
-  const form = event.target.closest('[data-monitor-note-form]');
-  if (!editor || form?.dataset.monitorNoteForm !== editor.eventKey || editor.saving) return;
-  const session = monitorSession(editor.chainId);
-  const context = captureMonitorSessionContext(session);
-  const noteInput = form.querySelector('[data-monitor-note-input]');
-  const note = String(noteInput?.value ?? editor.value ?? '').trim();
-  const sessionId = editor.sessionId;
-  state.monitorNoteEditor = { ...editor, value: note, saving: true, composing: false };
-  renderMonitorEvents();
+  const address = normalizeAddressForChain(button?.dataset.monitorWalletEdit, chainId);
+  if (!address) return;
+  button.disabled = true;
   try {
-    const payload = await fetchMonitorSessionJson(context, `/wallets/${encodeURIComponent(editor.address)}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ note })
-    });
+    const payload = await fetchMonitorSessionJson(context, `/wallets/${encodeURIComponent(address)}`);
     if (!monitorSessionRequestIsCurrent(context)) return;
     const record = unwrapRecord(payload);
     const wallet = record.wallet && typeof record.wallet === 'object' ? record.wallet : record;
-    const savedNote = typeof wallet.note === 'string' ? wallet.note : note;
-    updateMonitorWalletAnnotation(editor.address, { ...wallet, note: savedNote }, editor.chainId);
-    if (editor.chainId === activeChainId) state.detailCache.set(editor.address, payload);
-    if (state.monitorNoteEditor?.sessionId === sessionId) state.monitorNoteEditor = null;
-    renderMonitorEvents();
-    showToast(savedNote ? '地址备注已保存' : '地址备注已清除');
+    updateMonitorWalletAnnotation(address, wallet, chainId);
+    if (chainId === activeChainId) state.detailCache.set(address, payload);
+    openWalletEditor({ ...wallet, address }, { chainId });
   } catch (error) {
-    if (!monitorSessionRequestIsCurrent(context)) return;
-    if (state.monitorNoteEditor?.sessionId === sessionId) {
-      state.monitorNoteEditor = { ...editor, value: note, saving: false, composing: false };
-      renderMonitorEvents();
-      focusMonitorNoteEditor(editor.eventKey);
-    }
-    showToast(`备注保存失败：${error.message}`, 'error');
+    if (monitorSessionRequestIsCurrent(context)) showToast(`读取钱包资料失败：${error.message}`, 'error');
+  } finally {
+    if (monitorSessionRequestIsCurrent(context)) button.disabled = false;
   }
 }
 
@@ -4865,7 +4752,6 @@ async function updateMonitorFeedChainSelection(chainId, selected) {
   }
   state.monitorFeedChainIds = next;
   storeMonitorFeedChainIds();
-  if (state.monitorNoteEditor && !next.has(state.monitorNoteEditor.chainId)) state.monitorNoteEditor = null;
   synchronizeCombinedMonitorEvents();
   renderMonitorChainFilter();
   renderMonitorEvents();
@@ -7559,9 +7445,11 @@ async function addManualWalletBatch(event) {
   }
 }
 
-function openWalletEditor(wallet) {
-  const address = normalizeAddress(wallet?.address);
+function openWalletEditor(wallet, { chainId = activeChainId } = {}) {
+  const normalizedChainId = monitorChainId(chainId);
+  const address = normalizeAddressForChain(wallet?.address, normalizedChainId);
   if (!address) return;
+  state.walletEditorChainId = normalizedChainId;
   elements.walletEditorTitle.textContent = address;
   elements.walletEditorAddress.value = address;
   elements.walletEditorAlias.value = wallet.alias || '';
@@ -7578,13 +7466,15 @@ function openWalletEditor(wallet) {
 
 async function saveWalletEditor(event) {
   event.preventDefault();
-  const context = captureChainRequestContext();
-  const address = normalizeAddress(elements.walletEditorAddress.value);
+  const chainId = monitorChainId(state.walletEditorChainId);
+  const session = monitorSession(chainId);
+  const context = captureMonitorSessionContext(session);
+  const address = normalizeAddressForChain(elements.walletEditorAddress.value, chainId);
   if (!address) return;
   const submit = elements.walletEditorForm.querySelector('button[type="submit"]');
   submit.disabled = true;
   try {
-    const payload = await fetchChainJson(context, `/wallets/${encodeURIComponent(address)}`, {
+    const payload = await fetchMonitorSessionJson(context, `/wallets/${encodeURIComponent(address)}`, {
       method: 'PATCH',
       body: JSON.stringify({
         alias: elements.walletEditorAlias.value.trim(),
@@ -7596,51 +7486,58 @@ async function saveWalletEditor(event) {
         note: elements.walletEditorNote.value.trim()
       })
     });
-    requireCurrentChainRequest(context);
+    if (!monitorSessionRequestIsCurrent(context)) return;
     const record = unwrapRecord(payload);
     const savedWallet = record.wallet && typeof record.wallet === 'object' ? record.wallet : record;
-    updateMonitorWalletAnnotation(address, savedWallet);
+    updateMonitorWalletAnnotation(address, savedWallet, chainId);
     renderMonitorEvents();
-    state.detailCache.set(address, payload);
+    if (chainId === activeChainId) state.detailCache.set(address, payload);
     elements.walletEditor.close();
     showToast('地址库已更新');
-    await loadData({ quiet: true });
-    if (!chainRequestIsCurrent(context)) return;
-    const updatedWallet = walletForAddress(address);
-    if (updatedWallet && state.selectedAddress === address) renderWalletDetail(updatedWallet, payload);
+    if (chainId === activeChainId) {
+      await loadData({ quiet: true });
+      if (!monitorSessionRequestIsCurrent(context)) return;
+      const updatedWallet = walletForAddress(address);
+      if (updatedWallet && state.selectedAddress === address) renderWalletDetail(updatedWallet, payload);
+    }
   } catch (error) {
-    if (!chainRequestIsCurrent(context)) return;
+    if (!monitorSessionRequestIsCurrent(context)) return;
     showToast(`保存失败：${error.message}`, 'error');
   } finally {
-    if (chainRequestIsCurrent(context)) submit.disabled = false;
+    if (monitorSessionRequestIsCurrent(context)) submit.disabled = false;
   }
 }
 
-async function disableConfirmedWallet(address, { fromEditor = false } = {}) {
-  const context = captureChainRequestContext();
-  const normalized = normalizeAddress(address);
+async function disableConfirmedWallet(address, { fromEditor = false, chainId = activeChainId } = {}) {
+  const normalizedChainId = monitorChainId(chainId);
+  const session = monitorSession(normalizedChainId);
+  const context = captureMonitorSessionContext(session);
+  const normalized = normalizeAddressForChain(address, normalizedChainId);
   if (!normalized) return;
-  const wallet = walletForAddress(normalized);
+  const wallet = normalizedChainId === activeChainId ? walletForAddress(normalized) : null;
   const label = String(wallet?.alias || shortAddress(normalized));
   if (!window.confirm(`确认从已确认地址库删除并禁用“${label}”？该地址会立即停止实时监控，可在“已排除”筛选中恢复。`)) return;
   if (fromEditor) elements.walletEditorExclude.disabled = true;
   try {
-    await fetchChainJson(context, `/wallets/${encodeURIComponent(normalized)}`, { method: 'DELETE' });
-    requireCurrentChainRequest(context);
-    state.detailCache.delete(normalized);
+    await fetchMonitorSessionJson(context, `/wallets/${encodeURIComponent(normalized)}`, { method: 'DELETE' });
+    if (!monitorSessionRequestIsCurrent(context)) return;
+    if (normalizedChainId === activeChainId) state.detailCache.delete(normalized);
     if (fromEditor) elements.walletEditor.close();
     showToast('地址已删除并停止监控');
-    await loadData({ quiet: true });
+    if (normalizedChainId === activeChainId) await loadData({ quiet: true });
   } catch (error) {
-    if (!chainRequestIsCurrent(context)) return;
+    if (!monitorSessionRequestIsCurrent(context)) return;
     showToast(`删除失败：${error.message}`, 'error');
   } finally {
-    if (fromEditor && chainRequestIsCurrent(context)) elements.walletEditorExclude.disabled = false;
+    if (fromEditor && monitorSessionRequestIsCurrent(context)) elements.walletEditorExclude.disabled = false;
   }
 }
 
 async function excludeEditedWallet() {
-  await disableConfirmedWallet(elements.walletEditorAddress.value, { fromEditor: true });
+  await disableConfirmedWallet(elements.walletEditorAddress.value, {
+    fromEditor: true,
+    chainId: state.walletEditorChainId
+  });
 }
 
 async function copyText(value) {
@@ -7733,7 +7630,6 @@ function resetChainState({ preserveMonitorFeed = false } = {}) {
     state.monitorBarkBusy.clear();
     state.monitorBarkFeatures = [];
     state.monitorBarkFeatureBusy.clear();
-    state.monitorNoteEditor = null;
   } else {
     synchronizeCombinedMonitorEvents();
     synchronizeActiveMonitorSessionState();
@@ -7955,51 +7851,9 @@ elements.monitorBarkFeatureList.addEventListener('change', (event) => {
   if (input) void toggleBarkFeature(input);
 });
 elements.monitorEventFeed.addEventListener('click', (event) => {
-  const editButton = event.target.closest('[data-monitor-note-edit]');
-  if (editButton) {
-    void openMonitorNoteEditor(editButton);
-    return;
-  }
-  if (event.target.closest('[data-monitor-note-cancel]')) cancelMonitorNoteEditor();
+  const button = event.target.closest('[data-monitor-wallet-edit]');
+  if (button) void openMonitorWalletEditor(button);
 });
-elements.monitorEventFeed.addEventListener('input', (event) => {
-  const input = event.target.closest('[data-monitor-note-input]');
-  if (!input || state.monitorNoteEditor?.eventKey !== input.dataset.monitorNoteInput) return;
-  state.monitorNoteEditor.value = input.value;
-});
-elements.monitorEventFeed.addEventListener('compositionstart', (event) => {
-  const input = event.target.closest('[data-monitor-note-input]');
-  if (!input || state.monitorNoteEditor?.eventKey !== input.dataset.monitorNoteInput) return;
-  state.monitorNoteEditor.composing = true;
-});
-elements.monitorEventFeed.addEventListener('compositionend', (event) => {
-  const input = event.target.closest('[data-monitor-note-input]');
-  const editor = state.monitorNoteEditor;
-  if (!input || !editor || editor.eventKey !== input.dataset.monitorNoteInput) return;
-  editor.value = input.value;
-  editor.composing = false;
-  const sessionId = editor.sessionId;
-  requestAnimationFrame(() => {
-    if (state.monitorNoteEditor?.sessionId === sessionId && !state.monitorNoteEditor.composing) {
-      renderMonitorEvents();
-    }
-  });
-});
-elements.monitorEventFeed.addEventListener('keydown', (event) => {
-  const input = event.target.closest('[data-monitor-note-input]');
-  if (!input) return;
-  if (event.isComposing || event.keyCode === 229) return;
-  if (event.key === 'Escape') {
-    event.preventDefault();
-    cancelMonitorNoteEditor();
-    return;
-  }
-  if (event.key === 'Enter' && !event.shiftKey) {
-    event.preventDefault();
-    input.closest('form')?.requestSubmit();
-  }
-});
-elements.monitorEventFeed.addEventListener('submit', (event) => void saveMonitorNote(event));
 elements.socialRefreshButton.addEventListener('click', () => void loadSocialSnapshot());
 elements.socialManageButton.addEventListener('click', () => {
   const nextHidden = !elements.socialWatchlistManager.hidden;
