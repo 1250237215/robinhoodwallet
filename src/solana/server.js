@@ -17,6 +17,7 @@ import { SolanaHolderClient, SPL_TOKEN_2022_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID } f
 import { HeliusWebhookManager } from './heliusWebhookManager.js';
 import { SolanaCompositeMarketClient, SolanaDexScreenerClient } from './marketClient.js';
 import { SOLANA_PUBLIC_RPC_URL, SolanaRpcClient } from './rpcClient.js';
+import { normalizeSolanaRpcTransaction, SolanaRpcPollingMonitor } from './rpcPollingMonitor.js';
 import {
   SOLANA_USDC_MINT,
   SOLANA_USDT_MINT,
@@ -138,6 +139,11 @@ export function createSolanaConfig(env = process.env) {
     heliusWebhookUrl: String(env.SOLANA_HELIUS_WEBHOOK_URL || ''),
     heliusAuthHeader: String(env.SOLANA_HELIUS_AUTH_HEADER || ''),
     heliusSyncIntervalMs: boundedNumber(env.SOLANA_HELIUS_SYNC_INTERVAL_MS, 30_000, 1_000, 10 * 60_000),
+    monitorMode: String(env.SOLANA_MONITOR_MODE || (env.HELIUS_API_KEY || env.SOLANA_HELIUS_API_KEY ? 'helius' : 'public_rpc')),
+    pollIntervalMs: boundedNumber(env.SOLANA_POLL_INTERVAL_MS, 3_000, 1_000, 60_000),
+    pollConcurrency: boundedNumber(env.SOLANA_POLL_CONCURRENCY, 4, 1, 12),
+    pollSignatureLimit: boundedNumber(env.SOLANA_POLL_SIGNATURE_LIMIT, 10, 1, 100),
+    pollBackoffMaxMs: boundedNumber(env.SOLANA_POLL_BACKOFF_MAX_MS, 30_000, 3_000, 300_000),
     host: String(env.SOLANA_HOST || env.HOST || '127.0.0.1'),
     port: boundedNumber(env.SOLANA_PORT, 18_120, 1, 65_535)
   };
@@ -250,6 +256,8 @@ export class SolanaRuntimeMonitor {
     marketDataClient = null,
     debotClient = null,
     heliusWebhookManager = null,
+    rpcPollingMonitor = null,
+    signatureStore = null,
     now = Date.now
   } = {}) {
     if (!store?.insertMonitorEvent || !store?.listMonitorEvents || !store?.listWalletAnnotations) {
@@ -263,6 +271,8 @@ export class SolanaRuntimeMonitor {
     this.barkNotifier = barkNotifier;
     this.marketDataClient = marketDataClient || debotClient;
     this.heliusWebhookManager = heliusWebhookManager;
+    this.rpcPollingMonitor = rpcPollingMonitor;
+    this.signatureStore = signatureStore || webhookMonitor.signatureStore;
     this.now = now;
     this.listeners = new Set();
     this.closed = false;
@@ -283,7 +293,8 @@ export class SolanaRuntimeMonitor {
   }
 
   async start() {
-    await this.heliusWebhookManager?.start?.();
+    if (this.rpcPollingMonitor) await this.rpcPollingMonitor.start();
+    else await this.heliusWebhookManager?.start?.();
     const snapshot = this.getSnapshot();
     this.#emit('health', snapshot.health);
     return snapshot;
@@ -293,6 +304,7 @@ export class SolanaRuntimeMonitor {
     if (this.closed) return;
     this.closed = true;
     this.heliusWebhookManager?.close?.();
+    this.rpcPollingMonitor?.close?.();
     this.#emit('close', { stoppedAt: new Date(this.now()).toISOString() });
     this.listeners.clear();
   }
@@ -315,6 +327,17 @@ export class SolanaRuntimeMonitor {
 
   getHealth() {
     const ingest = this.webhookMonitor.getHealth();
+    if (this.rpcPollingMonitor) {
+      const polling = this.rpcPollingMonitor.getHealth();
+      const monitoredWallets = this.store.listMonitoredWalletAnnotations().length;
+      return {
+        ...polling,
+        monitoredWallets,
+        lastWebhookAt: this.lastWebhookAt,
+        lastWebhookError: this.lastWebhookError,
+        lastEnrichmentError: this.lastEnrichmentError
+      };
+    }
     const provider = this.heliusWebhookManager?.getHealth?.() || {
       status: 'degraded',
       realtimeReady: false,
@@ -348,6 +371,13 @@ export class SolanaRuntimeMonitor {
   }
 
   scheduleProviderSync() {
+    if (this.rpcPollingMonitor?.pollNow) {
+      return this.rpcPollingMonitor.pollNow().then(() => {
+        const health = this.getHealth();
+        this.#emit('health', health);
+        return health;
+      });
+    }
     if (!this.heliusWebhookManager?.syncNow) return Promise.resolve(this.getHealth());
     return this.heliusWebhookManager.syncNow().then(() => {
       const health = this.getHealth();
@@ -519,6 +549,61 @@ export class SolanaRuntimeMonitor {
     return pending;
   }
 
+  async ingestRpcTransaction(transaction) {
+    const signature = normalizeSolanaSignature(transaction?.transaction?.signatures?.[0]);
+    const claimed = await this.signatureStore.claim(signature);
+    if (!claimed) return { acceptedTransactions: 0, duplicateSignatures: [signature], events: [] };
+    try {
+      const events = normalizeSolanaRpcTransaction(transaction, {
+        monitoredWallets: this.store.listMonitoredWalletAnnotations(),
+        quoteMints: SOLANA_CHAIN.quoteTokens,
+        now: this.now
+      });
+      const insertedEvents = this.#persistEvents(events);
+      this.lastWebhookAt = new Date(this.now()).toISOString();
+      this.lastWebhookError = '';
+      return { acceptedTransactions: 1, duplicateSignatures: [], events: insertedEvents };
+    } catch (error) {
+      await this.signatureStore.release(signature);
+      this.lastWebhookError = error instanceof Error ? error.message : String(error);
+      throw error;
+    }
+  }
+
+  #persistEvents(candidates) {
+    const insertedEvents = [];
+    for (const candidate of candidates) {
+      const cached = candidate.tokenAddress ? this.store.getMonitorTokenMetadata(candidate.tokenAddress) : null;
+      const enriched = cached ? {
+        ...candidate,
+        tokenSymbol: cached.symbol || candidate.tokenSymbol,
+        tokenName: cached.name || candidate.tokenName,
+        tokenDecimals: cached.decimals ?? candidate.tokenDecimals,
+        marketCapUsd: cached.marketCapUsd,
+        tokenCreationTimestamp: cached.tokenCreationTimestamp,
+        marketDataAt: cached.marketDataAt
+      } : candidate;
+      const stored = this.store.insertMonitorEvent(enriched);
+      if (!stored.inserted) continue;
+      const annotation = this.store.getWalletAnnotation?.(stored.event.walletAddress) || null;
+      const event = publicEvent(stored.event, annotation);
+      insertedEvents.push(event);
+      this.#emit('event', event);
+      if (event.barkAlert) {
+        this.#syncBarkSettings();
+        void this.barkNotifier?.notifyWalletEvent?.({
+          event,
+          sound: this.settings.barkSound,
+          volume: this.settings.barkVolume
+        }).catch(() => {});
+      }
+      if (event.tokenAddress) this.#queueEnrichment(event.tokenAddress, event.id, event);
+    }
+    this.#reconcileClusterAlerts();
+    if (insertedEvents.length) this.#emit('snapshot', this.getSnapshot());
+    return insertedEvents;
+  }
+
   async #ingestWebhook(payload, { authorization }) {
     if (!this.webhookMonitor.authHeader) {
       const error = new Error('Solana webhook authorization is not configured');
@@ -534,38 +619,9 @@ export class SolanaRuntimeMonitor {
         authorization,
         monitoredWallets: this.store.listMonitoredWalletAnnotations()
       });
-      const insertedEvents = [];
-      for (const candidate of result.events) {
-        const cached = candidate.tokenAddress ? this.store.getMonitorTokenMetadata(candidate.tokenAddress) : null;
-        const enriched = cached ? {
-          ...candidate,
-          tokenSymbol: cached.symbol || candidate.tokenSymbol,
-          tokenName: cached.name || candidate.tokenName,
-          tokenDecimals: cached.decimals ?? candidate.tokenDecimals,
-          marketCapUsd: cached.marketCapUsd,
-          tokenCreationTimestamp: cached.tokenCreationTimestamp,
-          marketDataAt: cached.marketDataAt
-        } : candidate;
-        const stored = this.store.insertMonitorEvent(enriched);
-        if (!stored.inserted) continue;
-        const annotation = this.store.getWalletAnnotation?.(stored.event.walletAddress) || null;
-        const event = publicEvent(stored.event, annotation);
-        insertedEvents.push(event);
-        this.#emit('event', event);
-        if (event.barkAlert) {
-          this.#syncBarkSettings();
-          void this.barkNotifier?.notifyWalletEvent?.({
-            event,
-            sound: this.settings.barkSound,
-            volume: this.settings.barkVolume
-          }).catch(() => {});
-        }
-        if (event.tokenAddress) this.#queueEnrichment(event.tokenAddress, event.id, event);
-      }
+      const insertedEvents = this.#persistEvents(result.events);
       this.lastWebhookAt = new Date(this.now()).toISOString();
       this.lastWebhookError = '';
-      this.#reconcileClusterAlerts();
-      if (insertedEvents.length) this.#emit('snapshot', this.getSnapshot());
       return { ...result, events: insertedEvents };
     } catch (error) {
       if (result?.acceptedSignatures?.length) {
@@ -818,7 +874,8 @@ export function createSolanaRuntime(env = process.env, overrides = {}) {
     signatureStore,
     quoteMints: SOLANA_CHAIN.quoteTokens
   });
-  const heliusWebhookManager = overrides.heliusWebhookManager || new HeliusWebhookManager({
+  const usePublicRpcPolling = config.monitorMode === 'public_rpc' || !config.heliusApiKey;
+  const heliusWebhookManager = usePublicRpcPolling ? null : (overrides.heliusWebhookManager || new HeliusWebhookManager({
     store,
     apiKey: config.heliusApiKey,
     webhookUrl: config.heliusWebhookUrl,
@@ -827,13 +884,28 @@ export function createSolanaRuntime(env = process.env, overrides = {}) {
     fetchImpl: overrides.heliusFetchImpl || globalThis.fetch,
     timeoutMs: Math.min(15_000, config.requestTimeoutMs),
     syncIntervalMs: config.heliusSyncIntervalMs
-  });
-  const monitor = overrides.monitor || new SolanaRuntimeMonitor({
+  }));
+  let monitor = overrides.monitor || null;
+  const rpcPollingMonitor = usePublicRpcPolling && !monitor
+    ? (overrides.rpcPollingMonitor || new SolanaRpcPollingMonitor({
+        store,
+        rpcClient,
+        walletProvider: () => store.listMonitoredWalletAnnotations(),
+        onTransaction: (transaction) => monitor.ingestRpcTransaction(transaction),
+        intervalMs: config.pollIntervalMs,
+        concurrency: config.pollConcurrency,
+        signatureLimit: config.pollSignatureLimit,
+        backoffMaxMs: config.pollBackoffMaxMs
+      }))
+    : null;
+  monitor ||= new SolanaRuntimeMonitor({
     store,
     webhookMonitor,
     barkNotifier,
     marketDataClient,
-    heliusWebhookManager
+    heliusWebhookManager,
+    rpcPollingMonitor,
+    signatureStore
   });
   return {
     config,
@@ -842,6 +914,7 @@ export function createSolanaRuntime(env = process.env, overrides = {}) {
     monitor,
     webhookMonitor,
     heliusWebhookManager,
+    rpcPollingMonitor,
     barkNotifier,
     rpcClient,
     holderClient,

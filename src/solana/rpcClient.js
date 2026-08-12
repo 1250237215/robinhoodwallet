@@ -1,6 +1,6 @@
-import { normalizeSolanaAddress } from './address.js';
+import { normalizeSolanaAddress, normalizeSolanaSignature } from './address.js';
 
-export const SOLANA_PUBLIC_RPC_URL = 'https://api.mainnet-beta.solana.com';
+export const SOLANA_PUBLIC_RPC_URL = 'https://solana-rpc.publicnode.com';
 
 function boundedInteger(value, fallback, minimum, maximum) {
   const number = Number(value);
@@ -257,6 +257,41 @@ export class SolanaRpcClient {
       });
     }
     return result.value;
+  }
+
+  async getSignaturesForAddress(address, {
+    signal,
+    limit = 10,
+    until = '',
+    before = ''
+  } = {}) {
+    const options = {
+      commitment: 'confirmed',
+      limit: boundedInteger(limit, 10, 1, 1_000)
+    };
+    if (until) options.until = normalizeSolanaSignature(until);
+    if (before) options.before = normalizeSolanaSignature(before);
+    const result = await this.request('getSignaturesForAddress', [
+      normalizeSolanaAddress(address),
+      options
+    ], { signal });
+    if (!Array.isArray(result)) {
+      throw new SolanaRpcError('Solana RPC getSignaturesForAddress returned a non-array result', {
+        kind: 'invalid-response', method: 'getSignaturesForAddress', retryable: false
+      });
+    }
+    return result;
+  }
+
+  async getTransaction(signature, { signal } = {}) {
+    return this.request('getTransaction', [
+      normalizeSolanaSignature(signature),
+      {
+        encoding: 'jsonParsed',
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0
+      }
+    ], { signal });
   }
 
   async getMultipleAccounts(addresses, { signal, encoding = 'jsonParsed' } = {}) {

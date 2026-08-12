@@ -44,7 +44,7 @@ Robinhood 与 BSC 通过同一个 `evm-wallets.sqlite`共用已确认地址库�
 - 构建机上的 Git、Node.js 22.13.0、npm、OpenSSH client（提供 `ssh`和
   `scp`）及 `rsync`
 - 开放入站 TCP `80`和 `443`
-- 要启用 Solana 实时监控时，需要一个 Helius API Key
+- Solana 默认可使用无需 API Key 的公共 RPC 轮询实时监控；需要更低延迟和更强稳定性时可改用 Helius
 - 要启用 DeBot 社媒监控时，需要一台长期运行 Chrome 的电脑和已登录的
   DeBot 账号
 - 要启用手机推送时，需要 Bark 应用提供的设备 Key
@@ -54,8 +54,8 @@ Robinhood 与 BSC 通过同一个 `evm-wallets.sqlite`共用已确认地址库�
   `robinhood-radar`用户完成一次应用配置和账号授权；本地电脑无需常驻
 
 Robinhood、Base 和 BSC 默认使用公开 RPC，可以启动和体验。大量钱包的长期生产
-监控建议配置自己的稳定 RPC。Solana 公共 RPC 只用于人工 Holder 查询，不能
-代替 Helius 实时 Webhook。
+环境仍建议配置自己的稳定 RPC。Solana 默认公共 RPC 同时用于 Holder 查询和实时轮询，
+正常发现延迟约为 3-8 秒，公共节点拥堵或限流时会自动退避，因此不能保证固定延迟。
 
 ## 3. 安装主机依赖
 
@@ -394,31 +394,29 @@ DEEPSEEK_TRANSLATION_CONCURRENCY=3
 走低优先级回填，成功结果保存在 `social.sqlite` 的专用缓存表；长文本会分段完整
 翻译，不会在 5000 字符处静默截断。
 
-### Solana 和 Helius
-
-生成独立的 Webhook Authorization 值：
-
-```bash
-openssl rand -hex 32
-```
+### Solana 实时监控
 
 编辑 `/etc/robinhood-radar/solana.env`：
 
 ```dotenv
-SOLANA_RPC_URL=
+SOLANA_RPC_URL=https://solana-rpc.publicnode.com
 SOLANA_REQUEST_TIMEOUT_MS=20000
+SOLANA_MONITOR_MODE=public_rpc
+SOLANA_POLL_INTERVAL_MS=3000
+SOLANA_POLL_CONCURRENCY=4
+SOLANA_POLL_SIGNATURE_LIMIT=10
+SOLANA_POLL_BACKOFF_MAX_MS=30000
 
-HELIUS_API_KEY=替换为自己的HeliusKey
-SOLANA_HELIUS_WEBHOOK_URL=https://radar.example.com/robinhood-radar/api/solana/monitor/webhook
-SOLANA_HELIUS_AUTH_HEADER=替换为另一个随机值
+HELIUS_API_KEY=
+SOLANA_HELIUS_WEBHOOK_URL=
+SOLANA_HELIUS_AUTH_HEADER=
 ```
 
-服务会使用 Helius API 自动创建、更新和去重 Enhanced Webhook，并随已确认钱包
-名单变化同步地址，不需要手工在 Helius 后台重复维护地址。回调 URL 必须是公网
-HTTPS，Authorization 必须与服务器配置完全相同。
+公共 RPC 模式不需要 API Key。服务每 3 秒轮询已确认的 Solana 地址，首次启动只建立
+游标，不补播旧交易；遇到限流或超时会自动指数退避，恢复后自动回到正常轮询。
 
-没有 Helius 时可以先部署 Holder 查询和手工功能，但必须在安装时明确设置
-`ALLOW_SOLANA_DEGRADED=1`。此时网页会如实显示 Solana 实时监控未就绪。
+需要改用 Helius 时，将 `SOLANA_MONITOR_MODE`设为 `helius`，再填写 Helius Key、
+公网 HTTPS Webhook URL 和随机 Authorization 值。服务会自动同步已确认钱包名单。
 
 ## 7. 配置 Caddy 和 HTTPS
 

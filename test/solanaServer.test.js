@@ -313,9 +313,13 @@ test('Solana API stays isolated and ingests authenticated Helius events idempote
   await closeRuntime(runtime, server);
 });
 
-test('Solana monitor remains available but clearly degraded without Helius configuration', async () => {
+test('Solana monitor uses keyless public RPC polling without Helius configuration', async () => {
   const runtime = createSolanaRuntime({}, {
     config: testConfig({ heliusApiKey: '', heliusWebhookUrl: '', heliusAuthHeader: '' }),
+    rpcClient: {
+      async getSignaturesForAddress() { return []; },
+      async getTransaction() { return null; }
+    },
     debotClient: fakeDebotClient(),
     holderClient: fakeHolderClient(),
     scanToken: async () => ({ actions: [], tokenPatch: {}, scan: { complete: true } })
@@ -326,9 +330,10 @@ test('Solana monitor remains available but clearly degraded without Helius confi
   const monitorResponse = await fetch(`${root}/api/solana/monitor`);
   const monitor = await monitorResponse.json();
   assert.equal(monitorResponse.status, 200);
-  assert.equal(monitor.status, 'degraded');
-  assert.equal(monitor.health.realtimeReady, false);
-  assert.ok(monitor.health.reasons.includes('helius_api_key_missing'));
+  assert.equal(monitor.status, 'waiting_for_wallets');
+  assert.equal(monitor.health.realtimeReady, true);
+  assert.equal(monitor.health.mode, 'public_rpc_polling');
+  assert.equal(monitor.health.publicRpcFallback, true);
 
   const webhookResponse = await fetch(`${root}/api/solana/monitor/webhook`, {
     method: 'POST',
