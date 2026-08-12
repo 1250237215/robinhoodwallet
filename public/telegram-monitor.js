@@ -64,6 +64,8 @@ const telegramState = {
   }
 };
 
+const telegramDebotLinks = new Map();
+
 function telegramNormalizeId(value) {
   return value === null || value === undefined || value === '' ? '' : String(value);
 }
@@ -78,6 +80,44 @@ function telegramFormatTime(value) {
     second: '2-digit',
     hour12: false
   });
+}
+
+function appendTelegramDebotButtons(bubble, urls) {
+  const valid = [...new Set((Array.isArray(urls) ? urls : []).filter((url) => (
+    /^https:\/\/debot\.ai\/token\/(?:robinhood|bsc|base|solana)\/289942_/i.test(String(url || ''))
+  )))];
+  if (!valid.length) return;
+  const actions = document.createElement('div');
+  actions.className = 'chat-message-actions';
+  valid.forEach((url, index) => {
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.className = 'chat-debot-buy-link';
+    const icon = document.createElement('i');
+    icon.dataset.lucide = 'shopping-cart';
+    icon.setAttribute('aria-hidden', 'true');
+    link.append(icon, document.createTextNode(valid.length > 1 ? `DeBot 购买 ${index + 1}` : 'DeBot 购买'));
+    actions.appendChild(link);
+  });
+  bubble.appendChild(actions);
+  window.lucide?.createIcons?.({ nodes: [actions] });
+}
+
+async function enrichTelegramDebotLinks(message, bubble) {
+  const text = String(message.text || '');
+  if (!/(?:0x[0-9a-f]{40}|\b[1-9A-HJ-NP-Za-km-z]{32,44}\b)/i.test(text)) return;
+  const key = telegramNormalizeId(message.stream_id || message.streamId || message.id) || text;
+  let pending = telegramDebotLinks.get(key);
+  if (!pending) {
+    pending = fetchTelegramJson('/debot-links', { method: 'POST', body: { text } })
+      .catch(() => ({ debot_urls: [] }));
+    telegramDebotLinks.set(key, pending);
+  }
+  const payload = await pending;
+  if (!bubble.isConnected || bubble.querySelector('.chat-message-actions')) return;
+  appendTelegramDebotButtons(bubble, payload.debot_urls);
 }
 
 function telegramDayLabel(value) {
@@ -620,6 +660,7 @@ function createTelegramMessage(message, sameSender, availableIds) {
   time.dateTime = message.date || '';
   time.textContent = telegramFormatTime(message.date);
   bubble.appendChild(time);
+  void enrichTelegramDebotLinks(message, bubble);
   row.appendChild(bubble);
   return row;
 }

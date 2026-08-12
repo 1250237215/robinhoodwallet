@@ -5,6 +5,8 @@ const EVM_PATTERN = /\b0x[0-9a-fA-F]{40}\b/g;
 const SOLANA_PATTERN = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
 const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 const MAX_TRACKED_MESSAGES = 2_000;
+const LINK_CACHE_TTL_MS = 10 * 60 * 1_000;
+const LINK_CACHE_LIMIT = 1_000;
 
 function isSolanaAddress(value) {
   let number = 0n;
@@ -95,6 +97,7 @@ export class FeishuCaWatch {
     this.seenMessageIds = [];
     this.latestDelivery = null;
     this.queue = Promise.resolve();
+    this.linkCache = new Map();
     this.load();
   }
 
@@ -131,6 +134,23 @@ export class FeishuCaWatch {
       delivery_configured: this.internalToken.length >= 32 && Boolean(this.internalUrl),
       latest_delivery: this.latestDelivery
     };
+  }
+
+  async resolveLinks(value) {
+    const contractAddresses = extractContractAddresses(value);
+    if (!contractAddresses.length) return { contractAddresses: [], contractChains: [], debotUrls: [] };
+    const key = contractAddresses.join('|');
+    const cached = this.linkCache.get(key);
+    if (cached && cached.expiresAt > this.now()) return cached.value;
+    const { contractChains, debotUrls } = await resolveContractChains(
+      contractAddresses,
+      this.rpcProfiles,
+      this.fetchImpl
+    );
+    const result = { contractAddresses, contractChains, debotUrls };
+    this.linkCache.set(key, { expiresAt: this.now() + LINK_CACHE_TTL_MS, value: result });
+    while (this.linkCache.size > LINK_CACHE_LIMIT) this.linkCache.delete(this.linkCache.keys().next().value);
+    return result;
   }
 
   update({ enabled, person_ids: personIds }) {

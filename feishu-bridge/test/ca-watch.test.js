@@ -12,6 +12,22 @@ test('extracts EVM and canonical Solana contract addresses in message order', ()
   assert.deepEqual(extractContractAddresses(`${solana}\n${evm}\n${evm}`), [solana, evm]);
 });
 
+test('resolves message CA links independently from Bark watch selection', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-links-'));
+  const watch = new FeishuCaWatch({
+    dataFile: path.join(directory, 'watch.json'),
+    rpcProfiles: [],
+    fetchImpl: async () => { throw new Error('Solana does not require RPC'); }
+  });
+  const address = '63zfjPfH4uaX3TQZoD35WqUrqiuCQQWndMTxQHsJpump';
+  assert.deepEqual(await watch.resolveLinks(`new CA ${address}`), {
+    contractAddresses: [address],
+    contractChains: ['solana'],
+    debotUrls: [`https://debot.ai/token/solana/289942_${address}`]
+  });
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
 test('selected people trigger one CA Bark only for messages after bootstrap', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-watch-'));
   const requests = [];

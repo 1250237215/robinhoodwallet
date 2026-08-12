@@ -871,6 +871,31 @@ def extract_contract_addresses(text, limit=CA_ALERT_ADDRESS_LIMIT):
     return [value for _, value in matches[: max(1, int(limit))]]
 
 
+DEBOT_LINK_CACHE_TTL_SECONDS = 600
+DEBOT_LINK_CACHE_LIMIT = 1000
+_debot_link_cache = OrderedDict()
+_debot_link_cache_lock = threading.RLock()
+
+
+async def cached_debot_token_urls(addresses):
+    key = tuple(str(address) for address in addresses or [])
+    if not key:
+        return [], []
+    now = time.monotonic()
+    with _debot_link_cache_lock:
+        cached = _debot_link_cache.get(key)
+        if cached and cached[0] > now:
+            _debot_link_cache.move_to_end(key)
+            return list(cached[1]), list(cached[2])
+    urls, chains = await resolve_debot_token_urls(key)
+    with _debot_link_cache_lock:
+        _debot_link_cache[key] = (now + DEBOT_LINK_CACHE_TTL_SECONDS, tuple(urls), tuple(chains))
+        _debot_link_cache.move_to_end(key)
+        while len(_debot_link_cache) > DEBOT_LINK_CACHE_LIMIT:
+            _debot_link_cache.popitem(last=False)
+    return urls, chains
+
+
 def _evm_contract_exists(address, rpc_url, timeout, opener=urlopen):
     """Return True/False for a valid RPC result and None when RPC is unavailable."""
     body = json.dumps({
@@ -1699,8 +1724,27 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_write_request(self):
         parsed = urlparse(self.path)
-        if parsed.path not in {"/api/selection", "/api/ca-watch"}:
+        if parsed.path not in {"/api/selection", "/api/ca-watch", "/api/debot-links"}:
             self._send_error(404, "Not found")
+            return
+
+        if parsed.path == "/api/debot-links":
+            if self.command != "POST":
+                self._send_error(405, "Method not allowed")
+                return
+            try:
+                body = self._read_json_body()
+                addresses = extract_contract_addresses(str(body.get("text") or ""))
+                debot_urls, contract_chains = asyncio.run(
+                    cached_debot_token_urls(addresses)
+                ) if addresses else ([], [])
+                self._send_json({
+                    "contract_addresses": addresses,
+                    "contract_chains": contract_chains,
+                    "debot_urls": debot_urls,
+                })
+            except (ValueError, RuntimeError) as error:
+                self._send_error(400, str(error))
             return
 
 

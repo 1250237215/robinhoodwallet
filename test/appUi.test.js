@@ -1242,6 +1242,18 @@ test('the pinned LazyCat Telegram panel precedes the shared monitoring workspace
   assert.match(indexHtml, /<script src="telegram-social\.js" type="module"><\/script>/);
 });
 
+test('Telegram and Feishu CA messages add verified DeBot buy actions without a Feishu source link', () => {
+  assert.match(telegramMonitorJs, /fetchTelegramJson\('\/debot-links', \{ method: 'POST', body: \{ text \} \}\)/);
+  assert.match(telegramMonitorJs, /className = 'chat-debot-buy-link'/);
+  assert.match(telegramMonitorJs, /DeBot 购买/);
+  assert.match(feishuMonitorJs, /fetchJson\('\/debot-links', \{ method: 'POST', body: JSON\.stringify\(\{ text \}\) \}\)/);
+  assert.match(feishuMonitorJs, /className = 'chat-debot-buy-link'/);
+  assert.match(feishuMonitorJs, /DeBot 购买/);
+  assert.doesNotMatch(feishuMonitorJs, /打开飞书原消息|feishu-message-link/);
+  assert.match(stylesCss, /\.chat-message-actions \{/);
+  assert.match(stylesCss, /\.chat-debot-buy-link \{/);
+});
+
 test('Telegram and Feishu real-time chats share a responsive two-column workspace', () => {
   const chatGridIndex = indexHtml.indexOf('<div class="chat-monitor-grid">');
   const telegramIndex = indexHtml.indexOf('id="telegram-monitor-panel"');

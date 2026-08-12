@@ -39,6 +39,8 @@ const state = {
   rulesBusy: false
 };
 
+const feishuDebotLinks = new Map();
+
 function icon(name) {
   const value = document.createElement('i');
   value.dataset.lucide = name;
@@ -93,6 +95,41 @@ function dayLabel(value) {
 
 function mediaUrl(messageId, resourceKey) {
   return `${FEISHU_API_ROOT}/media/${encodeURIComponent(messageId)}/${encodeURIComponent(resourceKey)}`;
+}
+
+function appendDebotButtons(bubble, urls) {
+  const valid = [...new Set((Array.isArray(urls) ? urls : []).filter((url) => (
+    /^https:\/\/debot\.ai\/token\/(?:robinhood|bsc|base|solana)\/289942_/i.test(String(url || ''))
+  )))];
+  if (!valid.length) return;
+  const actions = document.createElement('div');
+  actions.className = 'chat-message-actions';
+  valid.forEach((url, index) => {
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.className = 'chat-debot-buy-link';
+    link.append(icon('shopping-cart'), document.createTextNode(valid.length > 1 ? `DeBot 购买 ${index + 1}` : 'DeBot 购买'));
+    actions.appendChild(link);
+  });
+  bubble.appendChild(actions);
+}
+
+async function enrichFeishuDebotLinks(message, bubble) {
+  const text = String(message.content || '');
+  if (!/(?:0x[0-9a-f]{40}|\b[1-9A-HJ-NP-Za-km-z]{32,44}\b)/i.test(text)) return;
+  const key = String(message.id || text);
+  let pending = feishuDebotLinks.get(key);
+  if (!pending) {
+    pending = fetchJson('/debot-links', { method: 'POST', body: JSON.stringify({ text }) })
+      .catch(() => ({ debotUrls: [] }));
+    feishuDebotLinks.set(key, pending);
+  }
+  const payload = await pending;
+  if (!bubble.isConnected || bubble.querySelector('.chat-message-actions')) return;
+  appendDebotButtons(bubble, payload.debotUrls);
+  refreshIcons();
 }
 
 function updateLatestButton() {
@@ -176,24 +213,14 @@ function messageRow(message) {
       image.decoding = 'async';
       image.addEventListener('error', () => {
         image.classList.add('is-unavailable');
-        image.alt = '图片加载失败，点击右下角打开飞书原消息';
+        image.alt = '飞书图片加载失败';
       }, { once: true });
       gallery.appendChild(image);
     }
     if (gallery.childElementCount) bubble.appendChild(gallery);
   }
   bubble.append(footer);
-  if (message.url) {
-    const link = document.createElement('a');
-    link.className = 'feishu-message-link';
-    link.href = message.url;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    link.title = '打开飞书原消息';
-    link.setAttribute('aria-label', '打开飞书原消息');
-    link.appendChild(icon('square-arrow-out-up-right'));
-    bubble.appendChild(link);
-  }
+  void enrichFeishuDebotLinks(message, bubble);
   row.append(avatarColumn, bubble);
   return row;
 }

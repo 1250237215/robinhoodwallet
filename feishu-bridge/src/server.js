@@ -172,6 +172,12 @@ export function createMonitorServer(monitor, { caWatch = null, mediaClient = nul
         }
         return sendJson(response, 405, { ok: false, error: 'method_not_allowed' });
       }
+      if (url.pathname === '/api/debot-links') {
+        if (!caWatch?.resolveLinks) return sendJson(response, 503, { ok: false, error: 'ca_resolver_unavailable' });
+        if (request.method !== 'POST') return sendJson(response, 405, { ok: false, error: 'method_not_allowed' });
+        const body = await readJson(request);
+        return sendJson(response, 200, await caWatch.resolveLinks(String(body.text || '')));
+      }
       if (url.pathname === '/favicon.ico') {
         response.writeHead(204, headers());
         response.end();

@@ -3119,7 +3119,7 @@ select:hover {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 3px;
-  padding-right: 20px;
+  padding-right: 0;
   color: #78909d;
   font-size: 8px;
 }
@@ -3152,20 +3152,38 @@ select:hover {
   font-size: 9px;
 }
 
-.feishu-message-link {
-  position: absolute;
-  right: 7px;
-  bottom: 5px;
-  display: inline-grid;
-  place-items: center;
-  width: 16px;
-  height: 16px;
-  color: #4f7fa2;
+.chat-message-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(78, 104, 92, 0.14);
 }
 
-.feishu-message-link svg {
-  width: 11px;
-  height: 11px;
+.chat-debot-buy-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 25px;
+  padding: 4px 8px;
+  border: 1px solid rgba(51, 112, 82, 0.25);
+  border-radius: 4px;
+  background: #edf7f0;
+  color: #236344;
+  font-size: 10px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.chat-debot-buy-link:hover {
+  border-color: rgba(35, 99, 68, 0.5);
+  background: #e2f2e7;
+}
+
+.chat-debot-buy-link svg {
+  width: 12px;
+  height: 12px;
 }
 
 .feishu-monitor-panel .telegram-avatar[data-accent="coral"] { background: #dc665c; }

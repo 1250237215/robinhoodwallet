@@ -76,6 +76,13 @@ test('CA watch rules are readable, writable, and reject invalid methods', async 
       enabled = value.enabled === true;
       selectedPersonIds = value.person_ids;
       return this.snapshot();
+    },
+    async resolveLinks(text) {
+      return {
+        contractAddresses: [text],
+        contractChains: ['solana'],
+        debotUrls: [`https://debot.ai/token/solana/289942_${text}`]
+      };
     }
   };
   const { baseUrl } = await startServer(t, { caWatch });
@@ -93,6 +100,14 @@ test('CA watch rules are readable, writable, and reject invalid methods', async 
 
   const rejected = await fetch(`${baseUrl}/api/ca-watch`, { method: 'POST' });
   assert.equal(rejected.status, 405);
+
+  const links = await fetch(`${baseUrl}/api/debot-links`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: 'So11111111111111111111111111111111111111112' })
+  });
+  assert.equal(links.status, 200);
+  assert.equal((await links.json()).contractChains[0], 'solana');
 });
 
 test('media endpoint serves only resources declared by a current Feishu message', async (t) => {
