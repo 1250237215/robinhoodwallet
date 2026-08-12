@@ -495,6 +495,20 @@ test('wallet editor persists metadata and supports soft exclusion and restoratio
   assert.match(appJs, /renderWalletDetail\(updatedWallet, payload\)/);
 });
 
+test('live-flow wallet editing opens immediately and hydrates without stale request races', () => {
+  const source = appSourceBetween('async function openMonitorWalletEditor(button)', 'function renderMonitorPage()');
+  assert.match(source, /const loadSequence = \+\+state\.walletEditorLoadSequence/);
+  assert.match(source, /openWalletEditor\(\{ \.\.\.\(cachedWallet \|\| \{\}\), address \}, \{ chainId \}\)/);
+  assert.match(source, /setWalletEditorLoading\(true\)[\s\S]*await fetchMonitorSessionJson/);
+  assert.match(source, /loadSequence !== state\.walletEditorLoadSequence/);
+  assert.match(source, /elements\.walletEditorAddress\.value !== address/);
+  assert.match(source, /populateWalletEditor\(\{ \.\.\.wallet, address \}, \{ chainId \}\)[\s\S]*setWalletEditorLoading\(false\)/);
+  assert.match(appJs, /function setWalletEditorLoading\(loading\)[\s\S]*button\[type="submit"\][\s\S]*control\.disabled = loading/);
+  assert.match(appJs, /if \(state\.walletEditorLoadingState\) return/);
+  assert.match(indexHtml, /id="wallet-editor-loading"[^>]*role="status"[^>]*aria-live="polite"[^>]*hidden/);
+  assert.match(stylesCss, /\.wallet-editor-loading \{[\s\S]*min-height: 32px/);
+});
+
 test('wallet editor persists four event rules and alert choices imply monitoring', () => {
   const matrix = indexHtml.match(/<fieldset class="wallet-rule-matrix" id="wallet-monitor-rules">[\s\S]*?<\/fieldset>/)?.[0] || '';
   for (const [eventType, label] of [
@@ -2583,10 +2597,11 @@ test('real-time feed exposes only the full chain-scoped wallet editor action', (
   assert.match(openSource, /const chainId = monitorChainId\(button\?\.dataset\.monitorWalletChain\)/);
   assert.match(openSource, /const address = normalizeAddressForChain\(button\?\.dataset\.monitorWalletEdit, chainId\)/);
   assert.match(openSource, /fetchMonitorSessionJson\(context, `\/wallets\/\$\{encodeURIComponent\(address\)\}`\)/);
-  assert.match(openSource, /openWalletEditor\(\{ \.\.\.wallet, address \}, \{ chainId \}\)/);
+  assert.match(openSource, /openWalletEditor\(\{ \.\.\.\(cachedWallet \|\| \{\}\), address \}, \{ chainId \}\)/);
+  assert.match(openSource, /populateWalletEditor\(\{ \.\.\.wallet, address \}, \{ chainId \}\)/);
   assert.match(appJs, /elements\.monitorEventFeed\.addEventListener\('click',[\s\S]*closest\('\[data-monitor-wallet-edit\]'\)[\s\S]*openMonitorWalletEditor\(button\)/);
 
-  const editorSource = appSourceBetween('function openWalletEditor(wallet', 'async function saveWalletEditor(event)');
+  const editorSource = appSourceBetween('function populateWalletEditor(wallet', 'async function saveWalletEditor(event)');
   for (const field of [
     'walletEditorAddress',
     'walletEditorAlias',

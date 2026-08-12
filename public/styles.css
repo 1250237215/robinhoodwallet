@@ -2157,6 +2157,31 @@ select:hover {
   overflow-wrap: anywhere;
 }
 
+.wallet-editor-loading {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 9px;
+  border: 1px solid #b9d8c6;
+  border-radius: 4px;
+  background: #edf8f1;
+  color: #24573a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.wallet-editor-loading[hidden] {
+  display: none;
+}
+
+.wallet-editor[data-loading="true"] .editor-field,
+.wallet-editor[data-loading="true"] .wallet-rule-matrix,
+.wallet-editor[data-loading="true"] .wallet-editor-actions {
+  opacity: 0.58;
+}
+
 .editor-field,
 .editor-field-grid {
   min-width: 0;

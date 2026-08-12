@@ -379,6 +379,7 @@ const elements = {
   walletEditorExclude: document.querySelector('#wallet-editor-exclude'),
   walletEditorTitle: document.querySelector('#wallet-editor-title'),
   walletEditorAddress: document.querySelector('#wallet-editor-address'),
+  walletEditorLoading: document.querySelector('#wallet-editor-loading'),
   walletEditorAlias: document.querySelector('#wallet-editor-alias'),
   walletEditorTags: document.querySelector('#wallet-editor-tags'),
   walletEditorStatus: document.querySelector('#wallet-editor-status'),
@@ -537,6 +538,8 @@ const state = {
   monitorBarkFeatures: [],
   monitorBarkFeatureBusy: new Set(),
   walletEditorChainId: 'robinhood',
+  walletEditorLoadSequence: 0,
+  walletEditorLoadingState: false,
   monitorFeedChainIds: new Set(),
   monitorSessions: new Map(),
   socialStarted: false,
@@ -3515,17 +3518,31 @@ async function openMonitorWalletEditor(button) {
   const context = captureMonitorSessionContext(session);
   const address = normalizeAddressForChain(button?.dataset.monitorWalletEdit, chainId);
   if (!address) return;
+  const loadSequence = ++state.walletEditorLoadSequence;
+  const cachedWallet = chainId === activeChainId ? walletForAddress(address) : null;
+  openWalletEditor({ ...(cachedWallet || {}), address }, { chainId });
+  setWalletEditorLoading(true);
   button.disabled = true;
   try {
     const payload = await fetchMonitorSessionJson(context, `/wallets/${encodeURIComponent(address)}`);
-    if (!monitorSessionRequestIsCurrent(context)) return;
+    if (!monitorSessionRequestIsCurrent(context)
+      || loadSequence !== state.walletEditorLoadSequence
+      || !elements.walletEditor.open
+      || elements.walletEditorAddress.value !== address
+      || state.walletEditorChainId !== chainId) return;
     const record = unwrapRecord(payload);
     const wallet = record.wallet && typeof record.wallet === 'object' ? record.wallet : record;
     updateMonitorWalletAnnotation(address, wallet, chainId);
     if (chainId === activeChainId) state.detailCache.set(address, payload);
-    openWalletEditor({ ...wallet, address }, { chainId });
+    populateWalletEditor({ ...wallet, address }, { chainId });
+    setWalletEditorLoading(false);
   } catch (error) {
-    if (monitorSessionRequestIsCurrent(context)) showToast(`读取钱包资料失败：${error.message}`, 'error');
+    if (monitorSessionRequestIsCurrent(context)
+      && loadSequence === state.walletEditorLoadSequence
+      && elements.walletEditor.open) {
+      setWalletEditorLoading(false);
+      showToast(`读取钱包资料失败：${error.message}`, 'error');
+    }
   } finally {
     if (monitorSessionRequestIsCurrent(context)) button.disabled = false;
   }
@@ -7515,7 +7532,17 @@ async function addManualWalletBatch(event) {
   }
 }
 
-function openWalletEditor(wallet, { chainId = activeChainId } = {}) {
+function setWalletEditorLoading(loading) {
+  state.walletEditorLoadingState = loading;
+  elements.walletEditor.dataset.loading = String(loading);
+  elements.walletEditorLoading.hidden = !loading;
+  for (const control of elements.walletEditorForm.querySelectorAll('input:not([type="hidden"]), select, textarea, button[type="submit"]')) {
+    control.disabled = loading;
+  }
+  elements.walletEditorExclude.disabled = loading;
+}
+
+function populateWalletEditor(wallet, { chainId = activeChainId } = {}) {
   const normalizedChainId = monitorChainId(chainId);
   const address = normalizeAddressForChain(wallet?.address, normalizedChainId);
   if (!address) return;
@@ -7530,12 +7557,18 @@ function openWalletEditor(wallet, { chainId = activeChainId } = {}) {
   renderWalletMonitorRules(firstValue(wallet, ['monitorRules', 'monitor_rules'], {}));
   elements.walletEditorNote.value = wallet.note || '';
   elements.walletEditorExclude.hidden = wallet.status === 'excluded';
-  elements.walletEditor.showModal();
+}
+
+function openWalletEditor(wallet, { chainId = activeChainId } = {}) {
+  populateWalletEditor(wallet, { chainId });
+  setWalletEditorLoading(false);
+  if (!elements.walletEditor.open) elements.walletEditor.showModal();
   refreshIcons(elements.walletEditor);
 }
 
 async function saveWalletEditor(event) {
   event.preventDefault();
+  if (state.walletEditorLoadingState) return;
   const chainId = monitorChainId(state.walletEditorChainId);
   const session = monitorSession(chainId);
   const context = captureMonitorSessionContext(session);
@@ -7880,6 +7913,10 @@ elements.manualForm.addEventListener('submit', addManualWinner);
 elements.walletEditorForm.addEventListener('submit', saveWalletEditor);
 elements.walletMonitorRules.addEventListener('change', enforceWalletMonitorRuleDependency);
 elements.walletEditorClose.addEventListener('click', () => elements.walletEditor.close());
+elements.walletEditor.addEventListener('close', () => {
+  state.walletEditorLoadSequence += 1;
+  setWalletEditorLoading(false);
+});
 elements.walletEditorExclude.addEventListener('click', () => void excludeEditedWallet());
 elements.monitorSettingsForm.addEventListener('submit', saveMonitorSettings);
 elements.monitorSettingsForm.addEventListener('input', (event) => {

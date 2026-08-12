@@ -7,7 +7,7 @@
     <title>1874catch</title>
     <link rel="icon" href="assets/ikun-chick.png" type="image/png" />
     <link rel="apple-touch-icon" href="assets/ikun-chick.png" />
-    <link rel="stylesheet" href="styles.css?v=20260812-icon-tooltips" />
+    <link rel="stylesheet" href="styles.css?v=20260813-fast-wallet-editor" />
   </head>
   <body>
     <main class="app-shell">
@@ -889,6 +889,10 @@
           </button>
         </div>
         <input id="wallet-editor-address" name="address" type="hidden" />
+        <p class="wallet-editor-loading" id="wallet-editor-loading" role="status" aria-live="polite" hidden>
+          <span class="loading-spinner" aria-hidden="true"></span>
+          正在读取钱包资料
+        </p>
         <label class="editor-field">
           <span>别名</span>
           <input id="wallet-editor-alias" name="alias" type="text" maxlength="120" autocomplete="off" />
@@ -976,7 +980,7 @@
     </dialog>
 
     <script src="vendor/lucide.js"></script>
-    <script src="app.js?v=20260812-icon-tooltips" type="module"></script>
+    <script src="app.js?v=20260813-fast-wallet-editor" type="module"></script>
     <script src="telegram-monitor.js" type="module"></script>
     <script src="telegram-social.js" type="module"></script>
     <script src="feishu-monitor.js" type="module"></script>
