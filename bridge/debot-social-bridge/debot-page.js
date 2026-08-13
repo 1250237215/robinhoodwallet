@@ -1,7 +1,7 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const BRIDGE_VERSION = '1.10.3';
+  const BRIDGE_VERSION = '1.10.4';
   const BRIDGE_SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
@@ -2665,8 +2665,32 @@
     if (arrayStart >= 0) {
       try {
         const packet = JSON.parse(frame.slice(arrayStart));
-        const eventName = Array.isArray(packet) ? String(packet[0] || '').toLowerCase() : '';
-        if (['wallet-track', 'wallet-position-track'].includes(eventName)) {
+        const walletRoots = [];
+        const findWalletRoots = (value, depth = 0) => {
+          if (depth > 6 || value === null || value === undefined || walletRoots.length >= 20) return;
+          if (typeof value === 'string') {
+            const text = value.trim();
+            if (/^[\[{]/.test(text)) {
+              try { findWalletRoots(JSON.parse(text), depth + 1); } catch { /* ignore */ }
+            }
+            return;
+          }
+          if (Array.isArray(value)) {
+            for (let index = 0; index < value.length; index += 1) {
+              const item = value[index];
+              if (typeof item === 'string' && ['wallet-track', 'wallet-position-track'].includes(item.toLowerCase())) {
+                walletRoots.push(value.slice(index + 1));
+              }
+              findWalletRoots(item, depth + 1);
+            }
+            return;
+          }
+          if (typeof value === 'object') {
+            for (const item of Object.values(value)) findWalletRoots(item, depth + 1);
+          }
+        };
+        findWalletRoots(packet);
+        if (walletRoots.length) {
           incrementDiagnosticCounter(bridgeDiagnostics.wallet, 'frames');
           const walletRows = (value, depth = 0, rows = []) => {
             if (depth > 5 || rows.length >= 100 || value === null || value === undefined) return rows;
@@ -2689,7 +2713,7 @@
             }
             return rows;
           };
-          const rows = walletRows(packet[1]);
+          const rows = walletRoots.flatMap((root) => root.flatMap((item) => walletRows(item)));
           incrementDiagnosticCounter(bridgeDiagnostics.wallet, 'rows', rows.length);
           const events = [];
           for (const row of rows.slice(0, 100)) {

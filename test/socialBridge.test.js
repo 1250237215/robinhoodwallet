@@ -289,7 +289,7 @@ function timelineFailure(errorType) {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.10.3');
+  assert.equal(manifest.version, '1.10.4');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms', 'scripting']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -988,7 +988,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.requestId === 'page-personal-probe'
       && message.payload.ok === true)));
   const personalHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.equal(personalHeartbeat.payload.version, '1.10.3');
+  assert.equal(personalHeartbeat.payload.version, '1.10.4');
   assert.deepEqual(Array.from(personalHeartbeat.payload.capabilities), [
     'posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1', 'debot-token-holders-v1'
   ]);
@@ -1945,7 +1945,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const recoveredHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
   assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
   assert.equal(Object.hasOwn(recoveredHeartbeat.payload, 'error'), false);
-  assert.equal(recoveredHeartbeat.payload.version, '1.10.3');
+  assert.equal(recoveredHeartbeat.payload.version, '1.10.4');
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.accountCount >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.rawRows >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.normalizedRows >= 0, true);
