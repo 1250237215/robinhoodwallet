@@ -790,7 +790,7 @@ test('loading, scanning, stale, partial, error and empty states are explicit', (
 });
 
 test('Lucide powers icon controls and scan controls are accessible', () => {
-  assert.match(indexHtml, /<script src="vendor\/lucide\.js"><\/script>/);
+  assert.match(indexHtml, /<script src="vendor\/lucide\.js" defer><\/script>/);
   assert.match(indexHtml, /data-lucide="refresh-cw"/);
   assert.match(indexHtml, /data-lucide="radar"/);
   assert.match(indexHtml, /aria-label="刷新实时监控"/);
