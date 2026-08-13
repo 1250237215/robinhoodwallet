@@ -629,6 +629,18 @@ export function createSocialApiHandler({
         return true;
       }
 
+      if (url.pathname === '/api/social/bridge/wallet-events') {
+        method(req, ['POST']);
+        requireBridgeBearer(req, token);
+        const body = await readJson(req, 256 * 1024);
+        const events = Array.isArray(body.events) ? body.events : [];
+        if (!events.length || events.length > 100) {
+          throw new SocialHttpError(400, 'events must contain 1 to 100 entries', 'INVALID_WALLET_EVENT_BATCH');
+        }
+        sendJson(res, 200, await service.ingestDeBotWalletEvents(events));
+        return true;
+      }
+
       const deletePostMatch = url.pathname.match(/^\/api\/social\/bridge\/posts\/([^/]+)\/([^/]+)\/delete$/);
       if (deletePostMatch) {
         method(req, ['POST']);

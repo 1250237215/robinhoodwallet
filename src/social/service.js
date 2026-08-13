@@ -226,7 +226,8 @@ export function createSocialService({
   xProfileMonitor = null,
   xReplyEnricher = null,
   socialTranslator = null,
-  notifySocialContract = null
+  notifySocialContract = null,
+  ingestDeBotWalletEvents = null
 }) {
   if (!config) throw new TypeError('Social config is required');
   const activeStore = store || createSocialStore(config.dataFile, { now });
@@ -766,6 +767,14 @@ export function createSocialService({
       publishAfter(latestBefore);
       return result ? { ok: true, ...result, counts: activeStore.getCounts() } : null;
     },
+    syncDeBotWallet({ address, note = '', active = true } = {}) {
+      return active
+        ? activeStore.upsertDeBotWalletSync(address, note)
+        : activeStore.removeDeBotWalletSync(address);
+    },
+    listDeBotWalletSync(options = {}) {
+      return activeStore.listDeBotWalletSync(options);
+    },
     ingestPosts(posts, {
       skipReplyEnrichment = false,
       skipTranslation = false,
@@ -842,6 +851,12 @@ export function createSocialService({
       const command = activeStore.acknowledgeCommand(id, result);
       publishAfter(latestBefore);
       return command ? { ok: true, command, counts: activeStore.getCounts() } : null;
+    },
+    async ingestDeBotWalletEvents(events) {
+      if (typeof ingestDeBotWalletEvents !== 'function') {
+        throw new DeBotBridgeError('BSC wallet-event verifier is unavailable', 'DEBOT_WALLET_VERIFIER_UNAVAILABLE', 503);
+      }
+      return ingestDeBotWalletEvents(events);
     },
     requestDeBot(type, payload, { signal = null, timeoutMs, cacheTtlMs } = {}) {
       if (closed) {

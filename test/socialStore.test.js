@@ -1072,6 +1072,31 @@ test('watchlist intents create authenticated bridge commands and acknowledgement
   assert.equal(store.listWatchlist({ includeRemoved: true }).some((entry) => entry.id === alice.id), true);
 });
 
+test('DeBot wallet intents deduplicate remarks and serialize deletion by address', (t) => {
+  const { store, setNow } = fixture(t);
+  const address = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const added = store.upsertDeBotWalletSync(address, 'Main wallet');
+  assert.equal(added.command.type, 'wallet.watch.upsert');
+  assert.equal(store.upsertDeBotWalletSync(address, 'Main wallet').changed, false);
+
+  setNow(Date.parse('2026-07-17T12:00:01Z'));
+  const renamed = store.upsertDeBotWalletSync(address, 'Renamed');
+  assert.equal(renamed.command.payload.note, 'Renamed');
+  const pending = store.claimCommands({ limit: 10 });
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].type, 'wallet.watch.upsert');
+  assert.equal(pending[0].payload.address, address);
+  store.acknowledgeCommand(pending[0].id, { success: true, remoteId: address });
+  assert.equal(store.listDeBotWalletSync()[0].syncStatus, 'synced');
+
+  const removed = store.removeDeBotWalletSync(address);
+  assert.equal(removed.command.type, 'wallet.watch.delete');
+  const deletion = store.claimCommands({ limit: 10 })[0];
+  store.acknowledgeCommand(deletion.id, { success: true, verifiedAbsent: true });
+  assert.equal(store.listDeBotWalletSync()[0].desiredState, 'removed');
+  assert.equal(store.listDeBotWalletSync()[0].syncStatus, 'synced');
+});
+
 test('watchlist additions persist initial preferences and keep their insertion order', (t) => {
   const { store, setNow } = fixture(t);
   const added = store.addWatchAccounts([

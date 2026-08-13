@@ -30,7 +30,8 @@ function createService({
   holderCandidateLimit = 100,
   holderFetchLimit = 150,
   holderProfitConcurrency = 6,
-  now
+  now,
+  onWalletChanged
 } = {}) {
   const store = createRobinhoodStore(':memory:');
   const service = createRobinhoodService({
@@ -40,6 +41,7 @@ function createService({
     poolClient: { fetchPools: async () => [] },
     scanToken,
     scanConcurrency,
+    onWalletChanged,
     now: now || (() => Date.parse('2026-07-10T12:00:00.000Z')),
     config: {
       defaultWinnerMultiple: 10,
@@ -61,6 +63,21 @@ function createService({
   });
   return { service, store };
 }
+
+test('wallet mutations notify the durable DeBot synchronization callback', () => {
+  const changed = [];
+  const { service, store } = createService({ onWalletChanged: (wallet) => changed.push(wallet) });
+  service.updateWallet(walletA, { status: 'active', note: 'first' });
+  service.updateWallet(walletA, { note: 'second' });
+  service.deleteWallet(walletA);
+  assert.deepEqual(changed.map((wallet) => [wallet.address, wallet.note, wallet.status]), [
+    [walletA, 'first', 'active'],
+    [walletA, 'second', 'active'],
+    [walletA, 'second', 'excluded']
+  ]);
+  service.close();
+  store.close();
+});
 
 function action({ tokenAddress = tokenA, wallet = walletA, txHash = '0xabc', logIndex = 0 } = {}) {
   return {

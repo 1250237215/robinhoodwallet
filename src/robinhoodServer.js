@@ -932,6 +932,7 @@ export function createRobinhoodStandaloneServer({
   extraApiHandler = null,
   telegramBarkToken = '',
   feishuBarkToken = '',
+  internalWalletEventHandler = null,
   servePublic = true
 }) {
   const normalizedApiPrefix = `/${String(apiPrefix || '/api/robinhood').replace(/^\/+|\/+$/g, '')}`;
@@ -943,6 +944,18 @@ export function createRobinhoodStandaloneServer({
       const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
       if (await handleInternalTelegramBark(req, res, url, monitor, telegramBarkToken)) return;
       if (await handleInternalFeishuBark(req, res, url, monitor, feishuBarkToken)) return;
+      if (url.pathname === '/internal/debot-wallet-events') {
+        if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(String(req.socket.remoteAddress || ''))) {
+          throw new HttpError(401, 'Unauthorized', 'UNAUTHORIZED');
+        }
+        method(req, ['POST']);
+        if (typeof internalWalletEventHandler !== 'function') {
+          throw new HttpError(503, 'Wallet event verifier unavailable', 'WALLET_EVENT_VERIFIER_UNAVAILABLE');
+        }
+        const body = await readJson(req, 256 * 1024);
+        sendJson(res, 200, await internalWalletEventHandler(Array.isArray(body.events) ? body.events : []));
+        return;
+      }
       if (typeof extraApiHandler === 'function' && await extraApiHandler(req, res, url)) return;
       if (socialApiHandler && await socialApiHandler(req, res, url)) return;
       if (url.pathname === normalizedApiPrefix || url.pathname.startsWith(`${normalizedApiPrefix}/`)) {
@@ -1015,8 +1028,30 @@ export async function startRobinhoodStandaloneServer(
   const socialService = createSocialService({
     config: socialConfig,
     fetchImpl,
-    notifySocialContract: (payload) => monitor?.notifySocialContract?.(payload)
+    notifySocialContract: (payload) => monitor?.notifySocialContract?.(payload),
+    ingestDeBotWalletEvents: async (events) => {
+      const response = await fetchImpl('http://127.0.0.1:18122/internal/debot-wallet-events', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ events })
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body?.error || `BSC verifier HTTP ${response.status}`);
+      return body;
+    }
   });
+  const syncConfirmedWalletToDeBot = (wallet) => {
+    const address = String(wallet?.address || '').trim().toLowerCase();
+    if (!/^0x[0-9a-f]{40}$/.test(address)) return null;
+    const note = wallet?.aliasSource === 'manual' && String(wallet.alias || '').trim()
+      ? String(wallet.alias).trim()
+      : String(wallet?.note || '').trim();
+    return socialService.syncDeBotWallet({
+      address,
+      note,
+      active: wallet?.status !== 'excluded'
+    });
+  };
   const debotBridgeTimeoutMs = Math.min(
     110_000,
     Math.max(5_000, Number(env.ROBINHOOD_DEBOT_BRIDGE_TIMEOUT_MS) || 90_000)
@@ -1087,8 +1122,22 @@ export async function startRobinhoodStandaloneServer(
       config,
       debotBlockCooldownMs: Math.max(0, Number(env.ROBINHOOD_DEBOT_BLOCK_COOLDOWN_MS) || 15_000)
     }),
-    scanConcurrency: Number(env.ROBINHOOD_SCAN_CONCURRENCY || 1)
+    scanConcurrency: Number(env.ROBINHOOD_SCAN_CONCURRENCY || 1),
+    onWalletChanged: syncConfirmedWalletToDeBot
   });
+  const reconcileConfirmedWalletsWithDeBot = () => {
+    const annotations = store.listWalletAnnotations?.() || [];
+    const localByAddress = new Map(annotations.map((wallet) => [String(wallet.address).toLowerCase(), wallet]));
+    for (const wallet of annotations) syncConfirmedWalletToDeBot(wallet);
+    for (const synced of socialService.listDeBotWalletSync({ includeRemoved: false })) {
+      if (!localByAddress.has(synced.address)) {
+        socialService.syncDeBotWallet({ address: synced.address, active: false });
+      }
+    }
+  };
+  reconcileConfirmedWalletsWithDeBot();
+  const walletSyncTimer = setInterval(reconcileConfirmedWalletsWithDeBot, 60_000);
+  walletSyncTimer.unref?.();
   const barkNotifier = createRobinhoodBarkNotifier({
     store,
     timeoutMs: Math.min(15_000, config.requestTimeoutMs)
@@ -1131,6 +1180,7 @@ export async function startRobinhoodStandaloneServer(
     feishuBarkToken: env.FEISHU_BARK_INTERNAL_TOKEN || '',
     publicDir: env.ROBINHOOD_PUBLIC_DIR || path.resolve('public')
   });
+  server.once('close', () => clearInterval(walletSyncTimer));
   const host = env.HOST || '127.0.0.1';
   const port = Number(env.PORT || 18118);
   await new Promise((resolve, reject) => {
@@ -1151,6 +1201,7 @@ export async function startRobinhoodStandaloneServer(
     holderClient: activeHolderClient,
     riskClient: activeTokenRiskClient,
     socialService,
+    walletSyncTimer,
     host,
     port
   };

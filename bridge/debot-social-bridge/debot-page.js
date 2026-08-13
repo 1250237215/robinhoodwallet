@@ -1,7 +1,7 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const BRIDGE_VERSION = '1.9.0';
+  const BRIDGE_VERSION = '1.10.0';
   const BRIDGE_SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
@@ -2285,6 +2285,82 @@
 
   async function executeCommand(command) {
     const payload = command?.payload || {};
+    if (['wallet.watch.upsert', 'wallet.watch.delete'].includes(command.type)) {
+      const address = String(payload.address || '').trim().toLowerCase();
+      if (!/^0x[0-9a-f]{40}$/.test(address)) throw new Error('A valid EVM wallet address is required');
+      const fetchTrackedWallets = async () => {
+        const result = [];
+        for (let page = 1; page <= 20; page += 1) {
+          const query = new URLSearchParams({
+            chain: 'bsc',
+            page: String(page),
+            page_size: '100',
+            filter: '{}'
+          });
+          const response = await api(`wallet/track/list?${query}`);
+          const rows = Array.isArray(response)
+            ? response
+            : Array.isArray(response?.list)
+              ? response.list
+              : Array.isArray(response?.rows)
+                ? response.rows
+                : [];
+          result.push(...rows);
+          if (rows.length < 100) break;
+        }
+        return result;
+      };
+      const walletAddress = (item) => String(
+        item?.wallet || item?.wallet_address || item?.address || item?.walletAddress || ''
+      ).trim().toLowerCase();
+      if (command.type === 'wallet.watch.upsert') {
+        const before = await fetchTrackedWallets();
+        if (!before.some((item) => walletAddress(item) === address)) {
+          await api('wallet/track/add', {
+            method: 'POST',
+            body: JSON.stringify({
+              group_ids: [0],
+              wallet_remarks: [{ wallet: address, remark: String(payload.note || '').slice(0, 500), emoji: '' }]
+            })
+          });
+        }
+        await api('wallet/remark', {
+          method: 'POST',
+          body: JSON.stringify({
+            wallet_remarks: [{
+              wallet: address,
+              remark: String(payload.note || '').slice(0, 500),
+              color: '',
+              emoji: ''
+            }]
+          })
+        });
+        const after = await fetchTrackedWallets();
+        if (!after.some((item) => walletAddress(item) === address)) {
+          throw new Error('DeBot wallet monitor did not contain the added address');
+        }
+        return { remoteId: address };
+      }
+      const before = await fetchTrackedWallets();
+      const matches = before.filter((item) => walletAddress(item) === address);
+      if (matches.length) {
+        const groupIds = [...new Set(matches.flatMap((item) => [
+          item?.group_id,
+          ...(Array.isArray(item?.group_ids) ? item.group_ids : [])
+        ]).map(Number).filter(Number.isSafeInteger))];
+        for (const groupId of groupIds.length ? groupIds : [0]) {
+          await api('wallet/track/delete', {
+            method: 'POST',
+            body: JSON.stringify({ group_id: groupId, wallets: [address] })
+          });
+        }
+      }
+      const after = await fetchTrackedWallets();
+      if (after.some((item) => walletAddress(item) === address)) {
+        throw new Error('DeBot wallet monitor still contains the removed address');
+      }
+      return { remoteId: address, verifiedAbsent: true };
+    }
     const handle = String(payload.handle || payload.accountKey || '').replace(/^@/, '');
     const platform = payload.platform === 'binance' ? 1 : 0;
     const platformName = platform === 1 ? 'binance' : 'twitter';
@@ -2487,6 +2563,45 @@
       rejectSocketFrame('unreadable');
       return;
     }
+    const arrayStart = frame.indexOf('[');
+    if (arrayStart >= 0) {
+      try {
+        const packet = JSON.parse(frame.slice(arrayStart));
+        const eventName = Array.isArray(packet) ? String(packet[0] || '').toLowerCase() : '';
+        if (['wallet-track', 'wallet-position-track'].includes(eventName)) {
+          const root = packet[1] && typeof packet[1] === 'object' ? packet[1] : {};
+          const rows = Array.isArray(root) ? root : Array.isArray(root.data) ? root.data : [root.data || root];
+          const events = [];
+          for (const row of rows.slice(0, 100)) {
+            const data = row?.data && typeof row.data === 'object' ? row.data : row;
+            const chainValue = String(data?.chain || data?.chain_name || data?.network || '').toLowerCase();
+            const chain = ['bsc', 'bnb', 'bnbchain', '56'].includes(chainValue) ? 'bsc' : '';
+            const walletAddress = String(data?.wallet || data?.wallet_address || data?.address || '').toLowerCase();
+            const tokenAddress = String(
+              data?.token?.address || data?.token_address || data?.token || data?.contract_address || ''
+            ).toLowerCase();
+            const txHash = String(data?.tx_hash || data?.transaction_hash || data?.txHash || '').toLowerCase();
+            const operation = String(data?.op || data?.operation || data?.position_action || '').toLowerCase();
+            if (chain !== 'bsc' || !/^0x[0-9a-f]{40}$/.test(walletAddress)
+              || !/^0x[0-9a-f]{40}$/.test(tokenAddress) || !/^0x[0-9a-f]{64}$/.test(txHash)
+              || !/(?:buy|open|increase)/.test(operation)) continue;
+            events.push({
+              chain,
+              walletAddress,
+              tokenAddress,
+              txHash,
+              operation: 'buy',
+              source: 'debot-wallet-track',
+              discoveredAt: Date.now()
+            });
+          }
+          if (events.length) emit('wallet-events', { events });
+          return;
+        }
+      } catch {
+        // Non-wallet frames continue through the existing social parser.
+      }
+    }
     const parsed = parseSocketPacket(frame);
     if (!parsed.channel) {
       rejectSocketFrame(parsed.error || 'invalidPacket');
@@ -2600,6 +2715,7 @@
       incrementDiagnosticCounter(bridgeDiagnostics.ws, 'subscribeAttempts');
       bridgeDiagnostics.ws.lastSubscribeAt = Date.now();
       socket.send('42["subscribe","social-user-twitter"]');
+      socket.send('42["subscribe-wallet-track"]');
       portalSubscribedSockets.add(socket);
     } catch {
       incrementDiagnosticCounter(bridgeDiagnostics.ws, 'subscribeFailures');

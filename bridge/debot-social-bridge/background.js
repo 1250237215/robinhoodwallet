@@ -1,5 +1,6 @@
 import { createPostOutbox } from './post-outbox.js';
 import { createAnalysisResultOutbox } from './analysis-result-outbox.js';
+import { createWalletEventOutbox } from './wallet-event-outbox.js';
 import { postUploadRetryDelay } from './post-retry-policy.js';
 import {
   hostPermissionForServerBase,
@@ -46,6 +47,7 @@ const storageReady = Promise.all([
 ]);
 const postOutbox = createPostOutbox({ storage: chrome.storage.local });
 const analysisResultOutbox = createAnalysisResultOutbox({ storage: chrome.storage.local });
+const walletEventOutbox = createWalletEventOutbox({ storage: chrome.storage.local });
 let settingsWriteQueue = Promise.resolve();
 let postFlushInFlight = null;
 let postFlushRequested = false;
@@ -56,6 +58,9 @@ let analysisResultFlushRequested = false;
 let bridgeMaintenanceInFlight = null;
 let snapshotRevision = 0;
 let watchlistUploadQueue = Promise.resolve();
+let walletEventFlushInFlight = null;
+let walletEventRetryTimer = null;
+let walletEventRetryAttempt = 0;
 
 function text(value, maximum = 100_000) {
   return String(value ?? '').slice(0, maximum);
@@ -919,6 +924,42 @@ async function queuePosts(value) {
   };
 }
 
+function flushWalletEventOutbox() {
+  if (walletEventFlushInFlight) return walletEventFlushInFlight;
+  walletEventFlushInFlight = (async () => {
+    await storageReady;
+    const records = await walletEventOutbox.readBatch(100);
+    if (!records.length) return { ok: true, sent: 0 };
+    const acknowledgement = await socialRequest('/bridge/wallet-events', {
+      method: 'POST',
+      body: { events: records.map((record) => record.event) },
+      timeoutMs: 15_000
+    });
+    if (acknowledgement?.ok !== true) throw new Error('Radar did not acknowledge wallet events');
+    await walletEventOutbox.acknowledge(records.map((record) => record.key));
+    walletEventRetryAttempt = 0;
+    return { ok: true, sent: records.length };
+  })().catch((error) => {
+    if (walletEventRetryTimer === null) {
+      const delay = [2_000, 4_000, 8_000, 30_000][Math.min(walletEventRetryAttempt, 3)];
+      walletEventRetryAttempt += 1;
+      walletEventRetryTimer = setTimeout(() => {
+        walletEventRetryTimer = null;
+        void flushWalletEventOutbox();
+      }, delay);
+    }
+    return { ok: false, error: redactSensitiveText(error instanceof Error ? error.message : String(error)) };
+  }).finally(() => { walletEventFlushInFlight = null; });
+  return walletEventFlushInFlight;
+}
+
+async function queueWalletEvents(value) {
+  await storageReady;
+  const result = await walletEventOutbox.enqueue(value);
+  void flushWalletEventOutbox();
+  return result;
+}
+
 async function uploadAnalysisResult(record) {
   const payload = record.payload;
   try {
@@ -1007,6 +1048,7 @@ async function handleBridgePayload(message) {
   if (message.type === 'posts') {
     return queuePosts(message.payload?.posts);
   }
+  if (message.type === 'wallet-events') return queueWalletEvents(message.payload?.events);
   if (message.type === 'watchlist') {
     const accounts = Array.isArray(message.payload?.accounts)
       ? message.payload.accounts.map(safeWatchAccount).filter((account) => account.handle)
@@ -1228,6 +1270,7 @@ function runBridgeMaintenance() {
   bridgeMaintenanceInFlight = Promise.allSettled([
     flushPostOutbox(),
     flushAnalysisResultOutbox(),
+    flushWalletEventOutbox(),
     maintainDeBotConnection(),
     syncRadarContentScript()
   ]).finally(() => {
@@ -1243,10 +1286,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!(await isManagedDeBotSender(sender))) {
         if (message.type === 'poll-commands') return { ok: true, commands: [], managed: false };
         if (message.type === 'poll-analysis-jobs') return { ok: true, jobs: [], managed: false };
-        if (['posts', 'analysis-result'].includes(message.type)) return { durable: false, managed: false };
+        if (['posts', 'analysis-result', 'wallet-events'].includes(message.type)) return { durable: false, managed: false };
         return { accepted: false, managed: false };
       }
-      if (['heartbeat', 'posts', 'watchlist'].includes(message.type)) {
+      if (['heartbeat', 'posts', 'watchlist', 'wallet-events'].includes(message.type)) {
         return handleBridgePayload(message);
       }
       if (message.type === 'poll-commands') {

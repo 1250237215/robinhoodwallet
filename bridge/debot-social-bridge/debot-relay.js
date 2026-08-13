@@ -191,6 +191,10 @@ window.addEventListener('message', (event) => {
     forwardPosts(message.payload);
     return;
   }
+  if (message.type === 'wallet-events') {
+    void sendToBackground('wallet-events', message.payload).catch(() => {});
+    return;
+  }
   if (message.type === 'heartbeat') {
     void forwardHeartbeat(message.payload);
     return;

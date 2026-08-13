@@ -426,6 +426,22 @@ export async function startBscStandaloneServer(
     monitor,
     apiPrefix: BSC_API_PREFIX,
     addressCodec: BSC_ADDRESS_CODEC,
+    internalWalletEventHandler: async (events) => {
+      const results = [];
+      for (const event of events.slice(0, 100)) {
+        try {
+          results.push(await monitor.ingestExternalWalletEvent(event));
+        } catch (error) {
+          results.push({ accepted: false, reason: error instanceof Error ? error.message : String(error), events: [] });
+        }
+      }
+      return {
+        ok: true,
+        accepted: results.filter((result) => result.accepted).length,
+        events: results.flatMap((result) => result.events || []),
+        results
+      };
+    },
     servePublic: false
   });
 

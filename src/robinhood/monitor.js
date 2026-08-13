@@ -832,6 +832,46 @@ export class RobinhoodWalletMonitor {
     });
   }
 
+  async ingestExternalWalletEvent(raw, { signal } = {}) {
+    if (this.chainProfile.id !== 'bsc' || String(raw?.chain || '').toLowerCase() !== 'bsc') {
+      return { accepted: false, reason: 'wrong_chain', events: [] };
+    }
+    const walletAddress = normalizeAddress(raw?.walletAddress);
+    const reportedToken = normalizeAddress(raw?.tokenAddress);
+    const txHash = String(raw?.txHash || '').trim().toLowerCase();
+    if (!ADDRESS_PATTERN.test(walletAddress) || !ADDRESS_PATTERN.test(reportedToken) || !HASH_PATTERN.test(txHash)) {
+      return { accepted: false, reason: 'invalid_event', events: [] };
+    }
+    const annotation = this.store.getWalletAnnotation?.(walletAddress);
+    if (!annotation || annotation.status === 'excluded' || !hasEnabledRule(annotation, 'buy')) {
+      return { accepted: false, reason: 'unmonitored_wallet', events: [] };
+    }
+    const [transaction, receipt] = await Promise.all([
+      this.rpcClient.getTransactionByHash(txHash, { signal }),
+      this.rpcClient.getTransactionReceipt(txHash, { signal })
+    ]);
+    if (!receiptSucceeded(receipt) || normalizeAddress(transaction?.from) !== walletAddress
+      || !receiptHasSwap(receipt, this.swapTopics)) {
+      return { accepted: false, reason: 'unverified_swap', events: [] };
+    }
+    const candidates = (Array.isArray(receipt.logs) ? receipt.logs : [])
+      .map((log) => this.#transferCandidateFromLog(log, 'incoming'))
+      .filter((candidate) => candidate?.walletAddress === walletAddress
+        && candidate.tokenAddress === reportedToken
+        && !this.quoteTokenAddresses.has(candidate.tokenAddress));
+    if (!candidates.length) return { accepted: false, reason: 'token_not_received', events: [] };
+    const wallets = new Map([[walletAddress, annotation]]);
+    const prepared = candidates.map((candidate) => ({
+      ...candidate,
+      eventType: 'buy',
+      assetType: 'erc20',
+      counterpartyAddress: normalizeAddress(transaction?.to),
+      platform: ''
+    }));
+    const persisted = await this.#persistCandidates(prepared, wallets, signal, { lane: 'external' });
+    return { accepted: true, events: persisted.events };
+  }
+
   #earliestBuyersByToken(events) {
     if (!this.store.listMonitorTokenEarliestBuyers) return new Map();
     const tokenAddresses = [...new Set(events

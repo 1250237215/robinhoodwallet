@@ -511,7 +511,8 @@ export class RobinhoodService {
     addressValidator = null,
     transactionNormalizer = null,
     debotAddressRoot = null,
-    walletSummaryBuilder = null
+    walletSummaryBuilder = null,
+    onWalletChanged = null
   }) {
     const resolvedChainId = String(chainId || config.chainId || store?.chainId || DEFAULT_CHAIN_ID)
       .trim()
@@ -544,6 +545,7 @@ export class RobinhoodService {
         : `https://debot.ai/address/${resolvedChainId}`)
     ).replace(/\/$/, '');
     this.walletSummaryBuilder = resolvedWalletSummaryBuilder;
+    this.onWalletChanged = typeof onWalletChanged === 'function' ? onWalletChanged : null;
     this.lastSuccessMetadataKey = `${this.chainId}:last_success_at`;
     this.debotClient = debotClient || null;
     this.store = store;
@@ -1121,12 +1123,14 @@ export class RobinhoodService {
       updatedAt: now
     });
     this.store.clearWalletCandidateExclusion?.(normalized);
-    return this.getWallet(normalized) || {
+    const result = this.getWallet(normalized) || {
       ok: true,
       wallet: mergeWalletAnnotation(null, this.store.getWalletAnnotation(normalized), normalized),
       tokens: [],
       updatedAt: nowIso(this.now)
     };
+    this.onWalletChanged?.(result.wallet || this.store.getWalletAnnotation(normalized));
+    return result;
   }
 
   batchUpdateWallets(lines) {

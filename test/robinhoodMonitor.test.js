@@ -62,6 +62,46 @@ test('formats even the smallest token amount without a minimum-value filter', ()
   assert.equal(formatTokenAmount(42n, 0), '42');
 });
 
+test('DeBot BSC wallet events persist only after receipt, sender, swap, and token verification', async () => {
+  const store = createRobinhoodStore(':memory:');
+  store.upsertWalletAnnotation({ address: walletA, status: 'active', createdAt: 1, updatedAt: 1 });
+  const receipt = {
+    status: '0x1',
+    logs: [
+      { topics: [V2_SWAP_TOPIC] },
+      transferLog({ wallet: walletA, amount: 500n, block: 101, index: 7 })
+    ]
+  };
+  const rpcClient = {
+    async getTransactionByHash() { return { from: walletA, to: walletB }; },
+    async getTransactionReceipt() { return receipt; },
+    async getBlockByNumber() { return { number: '0x65', timestamp: '0x64' }; },
+    async call({ data }) {
+      if (data === '0x313ce567') return '0x12';
+      if (data === '0x95d89b41') return abiString('TEST');
+      return abiString('Test Token');
+    }
+  };
+  const monitor = new RobinhoodWalletMonitor({
+    store,
+    rpcClient: { ...rpcClient, async getBlockNumber() { return 101; }, async getLogs() { return []; } },
+    chainProfile: { id: 'bsc', nativeSymbol: 'BNB', nativeName: 'BNB', nativeDecimals: 18 }
+  });
+  const valid = await monitor.ingestExternalWalletEvent({
+    chain: 'bsc', walletAddress: walletA, tokenAddress: token, txHash
+  });
+  assert.equal(valid.accepted, true);
+  assert.equal(store.listMonitorEvents({ limit: 10 }).length, 1);
+  assert.equal((await monitor.ingestExternalWalletEvent({
+    chain: 'robinhood', walletAddress: walletA, tokenAddress: token, txHash
+  })).accepted, false);
+  assert.equal((await monitor.ingestExternalWalletEvent({
+    chain: 'bsc', walletAddress: walletB, tokenAddress: token, txHash
+  })).accepted, false);
+  monitor.close();
+  store.close();
+});
+
 test('suppresses stock-reference buys without hiding ordinary large-cap meme buys', () => {
   assert.equal(isSuppressedLargeCapStockBuy({ eventType: 'buy', tokenSymbol: 'SPCXB', tokenName: 'SpaceX' }), true);
   assert.equal(isSuppressedLargeCapStockBuy({

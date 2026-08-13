@@ -360,6 +360,19 @@ function commandFromRow(row) {
   };
 }
 
+function deBotWalletSyncFromRow(row) {
+  if (!row) return null;
+  return {
+    address: row.address,
+    note: row.note,
+    desiredState: row.desired_state,
+    syncStatus: row.sync_status,
+    lastSyncedAt: row.last_synced_at,
+    lastError: row.last_error,
+    updatedAt: row.updated_at
+  };
+}
+
 function debotJobFromRow(row) {
   if (!row) return null;
   return {
@@ -1037,6 +1050,16 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
     CREATE INDEX IF NOT EXISTS social_commands_pending_idx
       ON social_commands(status, id);
 
+    CREATE TABLE IF NOT EXISTS debot_wallet_sync (
+      address TEXT PRIMARY KEY,
+      note TEXT NOT NULL DEFAULT '',
+      desired_state TEXT NOT NULL DEFAULT 'active',
+      sync_status TEXT NOT NULL DEFAULT 'pending',
+      last_synced_at INTEGER,
+      last_error TEXT NOT NULL DEFAULT '',
+      updated_at INTEGER NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS social_changes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       event_type TEXT NOT NULL,
@@ -1434,6 +1457,42 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       INSERT INTO social_commands(command_type, watchlist_id, payload_json, status, created_at)
       VALUES (?, ?, ?, 'pending', ?)
     `).run(type, row.id, json(payload), timestamp);
+    return commandFromRow(db.prepare('SELECT * FROM social_commands WHERE id = ?').get(Number(result.lastInsertRowid)));
+  }
+
+  function queueDeBotWalletCommand(row, type, timestamp) {
+    const opposite = type === 'wallet.watch.upsert' ? 'wallet.watch.delete' : 'wallet.watch.upsert';
+    const address = String(row.address || '').toLowerCase();
+    db.prepare(`
+      UPDATE social_commands
+      SET status = 'cancelled', completed_at = ?, last_error = 'Superseded by newer local wallet intent'
+      WHERE watchlist_id IS NULL AND command_type = ? AND status IN ('pending', 'claimed')
+        AND lower(json_extract(payload_json, '$.address')) = ?
+    `).run(timestamp, opposite, address);
+    const payload = {
+      chain: 'bsc',
+      address,
+      note: String(row.note || ''),
+      desiredState: String(row.desired_state || 'active')
+    };
+    const serialized = json(payload);
+    const existing = db.prepare(`
+      SELECT * FROM social_commands
+      WHERE watchlist_id IS NULL AND command_type = ? AND payload_json = ?
+        AND status IN ('pending', 'claimed')
+      ORDER BY id DESC LIMIT 1
+    `).get(type, serialized);
+    if (existing) return commandFromRow(existing);
+    db.prepare(`
+      UPDATE social_commands
+      SET status = 'cancelled', completed_at = ?, last_error = 'Superseded by newer wallet details'
+      WHERE watchlist_id IS NULL AND command_type = ? AND status IN ('pending', 'claimed')
+        AND lower(json_extract(payload_json, '$.address')) = ?
+    `).run(timestamp, type, address);
+    const result = db.prepare(`
+      INSERT INTO social_commands(command_type, watchlist_id, payload_json, status, created_at)
+      VALUES (?, NULL, ?, 'pending', ?)
+    `).run(type, serialized, timestamp);
     return commandFromRow(db.prepare('SELECT * FROM social_commands WHERE id = ?').get(Number(result.lastInsertRowid)));
   }
 
@@ -1836,6 +1895,61 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         ORDER BY desired_state, created_at, id
       `).all(...params).map(watchlistFromRow);
     },
+    upsertDeBotWalletSync(address, note = '') {
+      const normalized = String(address || '').trim().toLowerCase();
+      if (!/^0x[0-9a-f]{40}$/.test(normalized)) throw new TypeError('Invalid DeBot wallet address');
+      const normalizedNote = String(note || '').trim().slice(0, 500);
+      const timestamp = now();
+      return transaction(db, () => {
+        const existing = db.prepare('SELECT * FROM debot_wallet_sync WHERE address = ?').get(normalized);
+        if (existing && existing.desired_state === 'active' && existing.note === normalizedNote
+          && ['pending', 'synced'].includes(existing.sync_status)) {
+          return { entry: deBotWalletSyncFromRow(existing), command: null, changed: false };
+        }
+        db.prepare(`
+          INSERT INTO debot_wallet_sync(address, note, desired_state, sync_status, last_error, updated_at)
+          VALUES (?, ?, 'active', 'pending', '', ?)
+          ON CONFLICT(address) DO UPDATE SET note = excluded.note, desired_state = 'active',
+            sync_status = 'pending', last_error = '', updated_at = excluded.updated_at
+        `).run(normalized, normalizedNote, timestamp);
+        const row = db.prepare('SELECT * FROM debot_wallet_sync WHERE address = ?').get(normalized);
+        return {
+          entry: deBotWalletSyncFromRow(row),
+          command: queueDeBotWalletCommand(row, 'wallet.watch.upsert', timestamp),
+          changed: true
+        };
+      });
+    },
+    removeDeBotWalletSync(address) {
+      const normalized = String(address || '').trim().toLowerCase();
+      if (!/^0x[0-9a-f]{40}$/.test(normalized)) throw new TypeError('Invalid DeBot wallet address');
+      const timestamp = now();
+      return transaction(db, () => {
+        const existing = db.prepare('SELECT * FROM debot_wallet_sync WHERE address = ?').get(normalized);
+        if (existing?.desired_state === 'removed' && ['pending', 'synced'].includes(existing.sync_status)) {
+          return { entry: deBotWalletSyncFromRow(existing), command: null, changed: false };
+        }
+        db.prepare(`
+          INSERT INTO debot_wallet_sync(address, note, desired_state, sync_status, last_error, updated_at)
+          VALUES (?, '', 'removed', 'pending', '', ?)
+          ON CONFLICT(address) DO UPDATE SET desired_state = 'removed', sync_status = 'pending',
+            last_error = '', updated_at = excluded.updated_at
+        `).run(normalized, timestamp);
+        const row = db.prepare('SELECT * FROM debot_wallet_sync WHERE address = ?').get(normalized);
+        return {
+          entry: deBotWalletSyncFromRow(row),
+          command: queueDeBotWalletCommand(row, 'wallet.watch.delete', timestamp),
+          changed: true
+        };
+      });
+    },
+    listDeBotWalletSync({ includeRemoved = true } = {}) {
+      return db.prepare(`
+        SELECT * FROM debot_wallet_sync
+        ${includeRemoved ? '' : "WHERE desired_state = 'active'"}
+        ORDER BY updated_at, address
+      `).all().map(deBotWalletSyncFromRow);
+    },
     claimCommands({ limit = 50, leaseMs = 30_000 } = {}) {
       const timestamp = now();
       return transaction(db, () => {
@@ -1850,7 +1964,13 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
             AND NOT EXISTS (
               SELECT 1
               FROM social_commands AS earlier
-              WHERE earlier.watchlist_id = candidate.watchlist_id
+              WHERE (
+                  (earlier.watchlist_id = candidate.watchlist_id)
+                  OR (
+                    earlier.watchlist_id IS NULL AND candidate.watchlist_id IS NULL
+                    AND lower(json_extract(earlier.payload_json, '$.address')) = lower(json_extract(candidate.payload_json, '$.address'))
+                  )
+                )
                 AND earlier.id < candidate.id
                 AND earlier.status = 'claimed'
             )
@@ -1918,6 +2038,25 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
             );
             const entry = watchlistFromRow(db.prepare('SELECT * FROM social_watchlist WHERE id = ?').get(row.watchlist_id));
             recordChange('watchlist.updated', 'watchlist', row.watchlist_id, entry, timestamp);
+          }
+        } else if (['wallet.watch.upsert', 'wallet.watch.delete'].includes(row.command_type)) {
+          const payload = parseJson(row.payload_json, {});
+          const address = String(payload.address || '').toLowerCase();
+          const wallet = db.prepare('SELECT * FROM debot_wallet_sync WHERE address = ?').get(address);
+          const expectedState = row.command_type === 'wallet.watch.upsert' ? 'active' : 'removed';
+          const walletConfirmed = confirmedSuccess
+            && (row.command_type !== 'wallet.watch.delete' || verifiedAbsent === true);
+          if (wallet && wallet.desired_state === expectedState) {
+            db.prepare(`
+              UPDATE debot_wallet_sync SET sync_status = ?, last_synced_at = ?, last_error = ?, updated_at = ?
+              WHERE address = ?
+            `).run(
+              walletConfirmed ? 'synced' : 'failed',
+              walletConfirmed ? timestamp : wallet.last_synced_at,
+              walletConfirmed ? '' : String(resolvedError || 'Bridge rejected the wallet command').slice(0, 2_000),
+              timestamp,
+              address
+            );
           }
         }
         return commandFromRow(db.prepare('SELECT * FROM social_commands WHERE id = ?').get(numericId));
