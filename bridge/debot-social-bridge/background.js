@@ -952,6 +952,12 @@ function flushWalletEventOutbox() {
       timeoutMs: 15_000
     });
     if (acknowledgement?.ok !== true) throw new Error('Radar did not acknowledge wallet events');
+    const results = Array.isArray(acknowledgement.results) ? acknowledgement.results : [];
+    if (results.length !== records.length) throw new Error('Radar returned an incomplete wallet-event acknowledgement');
+    const retryable = results.some((result) => result?.accepted !== true
+      && !['wrong_chain', 'invalid_event', 'unmonitored_wallet', 'monitor_disabled', 'suppressed_asset']
+        .includes(String(result?.reason || '')));
+    if (retryable) throw new Error('Radar wallet-event verification is temporarily unavailable');
     await walletEventOutbox.acknowledge(records.map((record) => record.key));
     walletEventRetryAttempt = 0;
     return { ok: true, sent: records.length };

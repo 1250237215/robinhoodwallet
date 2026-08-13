@@ -1093,6 +1093,16 @@ export async function startRobinhoodStandaloneServer(
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body?.error || `BSC verifier HTTP ${response.status}`);
+      const rejectedReasons = (Array.isArray(body?.results) ? body.results : [])
+        .filter((result) => result?.accepted !== true)
+        .reduce((counts, result) => {
+          const reason = String(result?.reason || 'unknown').slice(0, 80);
+          counts[reason] = (counts[reason] || 0) + 1;
+          return counts;
+        }, {});
+      if (Object.keys(rejectedReasons).length) {
+        console.warn('[debot-wallet-events] rejected', JSON.stringify(rejectedReasons));
+      }
       return body;
     }
   });
