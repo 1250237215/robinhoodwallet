@@ -110,6 +110,38 @@ test('internal Telegram Bark endpoint requires its bearer token and validates pa
   }
 });
 
+test('internal DeBot wallet-event endpoint accepts loopback POST batches', async () => {
+  const received = [];
+  const server = createRobinhoodStandaloneServer({
+    service: {},
+    internalWalletEventHandler: async (events) => {
+      received.push(events);
+      return { ok: true, accepted: events.length, events: [], results: [] };
+    },
+    servePublic: false
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    const response = await fetch(`${baseUrl}/internal/debot-wallet-events`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ events: [{ chain: 'bsc' }] })
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      ok: true,
+      accepted: 1,
+      events: [],
+      results: []
+    });
+    assert.equal(received.length, 1);
+    assert.equal(received[0].length, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('internal Feishu Bark endpoint requires its bearer token and accepts Feishu links', async () => {
   const received = [];
   const tokenValue = 'f'.repeat(48);

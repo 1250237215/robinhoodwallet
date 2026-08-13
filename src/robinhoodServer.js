@@ -948,7 +948,7 @@ export function createRobinhoodStandaloneServer({
         if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(String(req.socket.remoteAddress || ''))) {
           throw new HttpError(401, 'Unauthorized', 'UNAUTHORIZED');
         }
-        method(req, ['POST']);
+        if (req.method !== 'POST') methodNotAllowed(['POST']);
         if (typeof internalWalletEventHandler !== 'function') {
           throw new HttpError(503, 'Wallet event verifier unavailable', 'WALLET_EVENT_VERIFIER_UNAVAILABLE');
         }
