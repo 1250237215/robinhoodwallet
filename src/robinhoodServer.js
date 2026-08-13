@@ -1042,11 +1042,10 @@ export async function startRobinhoodStandaloneServer(
       const address = String(wallet?.address || '').trim().toLowerCase();
       if (!/^0x[0-9a-f]{40}$/.test(address) || seen.has(address)) continue;
       seen.add(address);
+      // A complete DeBot snapshot is authoritative for membership. A stale
+      // local removal tombstone must not hide a wallet that still exists in
+      // DeBot; local exclusion only controls whether the site alerts on it.
       const syncEntry = syncByAddress.get(address);
-      if (syncEntry?.desiredState === 'removed') {
-        skippedRemoved += 1;
-        continue;
-      }
       const note = String(wallet?.note || '').trim().slice(0, 500);
       socialService.recordRemoteDeBotWallet(address, note);
       const existing = localByAddress.get(address);
@@ -1112,10 +1111,13 @@ export async function startRobinhoodStandaloneServer(
     const note = wallet?.aliasSource === 'manual' && String(wallet.alias || '').trim()
       ? String(wallet.alias).trim()
       : String(wallet?.note || '').trim();
+    // Keep the DeBot address library equal to the complete shared EVM
+    // library. Monitoring rules and exclusions remain local to 1874catch;
+    // removing an address from DeBot here would make the two libraries drift.
     return socialService.syncDeBotWallet({
       address,
       note,
-      active: wallet?.status !== 'excluded'
+      active: true
     });
   };
   const debotBridgeTimeoutMs = Math.min(
