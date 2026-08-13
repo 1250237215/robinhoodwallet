@@ -1999,7 +1999,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         ORDER BY updated_at, address
       `).all().map(deBotWalletSyncFromRow);
     },
-    claimCommands({ limit = 50, leaseMs = 30_000 } = {}) {
+    claimCommands({ limit = 50, leaseMs = 30_000, includeWalletUpserts = true } = {}) {
       const timestamp = now();
       return transaction(db, () => {
         db.prepare(`
@@ -2010,6 +2010,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
           SELECT candidate.*
           FROM social_commands AS candidate
           WHERE candidate.status = 'pending'
+            AND (? OR candidate.command_type <> 'wallet.watch.upsert')
             AND NOT EXISTS (
               SELECT 1
               FROM social_commands AS earlier
@@ -2025,7 +2026,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
             )
           ORDER BY candidate.id
           LIMIT ?
-        `).all(Math.min(200, Math.max(1, Number(limit) || 50)));
+        `).all(includeWalletUpserts ? 1 : 0, Math.min(200, Math.max(1, Number(limit) || 50)));
         const claim = db.prepare(`
           UPDATE social_commands SET status = 'claimed', claimed_at = ?, attempts = attempts + 1
           WHERE id = ? AND status = 'pending'

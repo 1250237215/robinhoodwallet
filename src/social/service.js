@@ -851,11 +851,17 @@ export function createSocialService({
       return { ok: true, ...result, counts: activeStore.getCounts() };
     },
     claimCommands(options = {}) {
+      const bridge = activeStore.getBridgeState();
+      const bridgeVersion = String(bridge.version || '');
+      const [major = 0, minor = 0, patch = 0] = bridgeVersion.split('.').map(Number);
+      const supportsVerifiedWalletRemarks = major > 1
+        || (major === 1 && (minor > 10 || (minor === 10 && patch >= 5)));
       return {
         ok: true,
         commands: activeStore.claimCommands({
           ...options,
-          leaseMs: config.commandLeaseMs
+          leaseMs: config.commandLeaseMs,
+          includeWalletUpserts: supportsVerifiedWalletRemarks
         }),
         serverTime: now()
       };

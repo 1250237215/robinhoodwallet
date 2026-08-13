@@ -1130,6 +1130,19 @@ test('DeBot snapshot remark mismatches are requeued until the website name is co
   assert.equal(store.claimCommands({ limit: 10 }).length, 0);
 });
 
+test('wallet remark upserts can be held until a verifying bridge is online', (t) => {
+  const { store } = fixture(t);
+  const wallet = '0xdddddddddddddddddddddddddddddddddddddddd';
+  store.upsertDeBotWalletSync(wallet, 'AI 19');
+  store.addWatchAccounts([{ handle: 'alice' }]);
+
+  const safeCommands = store.claimCommands({ limit: 10, includeWalletUpserts: false });
+  assert.deepEqual(safeCommands.map((command) => command.type), ['watchlist.add']);
+  assert.equal(store.getCounts().pendingCommands, 2);
+  const allCommands = store.claimCommands({ limit: 10 });
+  assert.deepEqual(allCommands.map((command) => command.type), ['wallet.watch.upsert']);
+});
+
 test('watchlist additions persist initial preferences and keep their insertion order', (t) => {
   const { store, setNow } = fixture(t);
   const added = store.addWatchAccounts([
