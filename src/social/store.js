@@ -1912,14 +1912,14 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         ORDER BY desired_state, created_at, id
       `).all(...params).map(watchlistFromRow);
     },
-    upsertDeBotWalletSync(address, note = '', { force = false } = {}) {
+    upsertDeBotWalletSync(address, note = '') {
       const normalized = String(address || '').trim().toLowerCase();
       if (!/^0x[0-9a-f]{40}$/.test(normalized)) throw new TypeError('Invalid DeBot wallet address');
       const normalizedNote = String(note || '').trim().slice(0, 500);
       const timestamp = now();
       return transaction(db, () => {
         const existing = db.prepare('SELECT * FROM debot_wallet_sync WHERE address = ?').get(normalized);
-        if (!force && existing && existing.desired_state === 'active' && existing.note === normalizedNote
+        if (existing && existing.desired_state === 'active' && existing.note === normalizedNote
           && ['pending', 'synced'].includes(existing.sync_status)) {
           return { entry: deBotWalletSyncFromRow(existing), command: null, changed: false };
         }

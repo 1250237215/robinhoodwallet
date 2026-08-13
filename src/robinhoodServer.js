@@ -1081,13 +1081,9 @@ export async function startRobinhoodStandaloneServer(
     for (const wallet of localByAddress.values()) {
       const address = String(wallet?.address || '').trim().toLowerCase();
       if (!/^0x[0-9a-f]{40}$/.test(address) || seen.has(address)) continue;
-      socialService.syncDeBotWallet({
-        address,
-        note: String(wallet?.alias || wallet?.note || '').trim().slice(0, 500),
-        active: true,
-        force: true
-      });
-      resyncQueued += 1;
+      const expectedNote = String(wallet?.alias || wallet?.note || '').trim().slice(0, 500);
+      const syncResult = socialService.recordRemoteDeBotWallet(address, '', expectedNote);
+      if (syncResult?.syncStatus === 'pending') resyncQueued += 1;
     }
     return {
       ok: true,

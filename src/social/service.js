@@ -768,9 +768,9 @@ export function createSocialService({
       publishAfter(latestBefore);
       return result ? { ok: true, ...result, counts: activeStore.getCounts() } : null;
     },
-    syncDeBotWallet({ address, note = '', active = true, force = false } = {}) {
+    syncDeBotWallet({ address, note = '', active = true } = {}) {
       return active
-        ? activeStore.upsertDeBotWalletSync(address, note, { force })
+        ? activeStore.upsertDeBotWalletSync(address, note)
         : activeStore.removeDeBotWalletSync(address);
     },
     listDeBotWalletSync(options = {}) {
