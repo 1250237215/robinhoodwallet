@@ -90,6 +90,13 @@ function bridgeDiagnosticsDefaults() {
       unreadable: 0,
       lastEventAt: null
     },
+    wallet: {
+      frames: 0,
+      rows: 0,
+      accepted: 0,
+      rejected: 0,
+      lastEventAt: null
+    },
     poll: {
       startedAt: null,
       finishedAt: null,
@@ -118,6 +125,9 @@ function bridgeDiagnosticsDefaults() {
 function bridgeDiagnosticsFromInput(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const ws = value.ws && typeof value.ws === 'object' && !Array.isArray(value.ws) ? value.ws : {};
+  const wallet = value.wallet && typeof value.wallet === 'object' && !Array.isArray(value.wallet)
+    ? value.wallet
+    : {};
   const poll = value.poll && typeof value.poll === 'object' && !Array.isArray(value.poll) ? value.poll : {};
   const forcePoll = value.forcePoll && typeof value.forcePoll === 'object' && !Array.isArray(value.forcePoll)
     ? value.forcePoll
@@ -140,6 +150,13 @@ function bridgeDiagnosticsFromInput(value) {
       invalidEvent: diagnosticCounter(ws.invalidEvent),
       unreadable: diagnosticCounter(ws.unreadable),
       lastEventAt: diagnosticTimestamp(ws.lastEventAt)
+    },
+    wallet: {
+      frames: diagnosticCounter(wallet.frames),
+      rows: diagnosticCounter(wallet.rows),
+      accepted: diagnosticCounter(wallet.accepted),
+      rejected: diagnosticCounter(wallet.rejected),
+      lastEventAt: diagnosticTimestamp(wallet.lastEventAt)
     },
     poll: {
       startedAt: diagnosticTimestamp(poll.startedAt),

@@ -1493,6 +1493,13 @@ test('versioned and legacy stale snapshots cannot revive a confirmed removal tom
       unreadable: 0,
       lastEventAt: null
     },
+    wallet: {
+      frames: 0,
+      rows: 0,
+      accepted: 0,
+      rejected: 0,
+      lastEventAt: null
+    },
     poll: {
       startedAt: null,
       finishedAt: null,
@@ -1590,6 +1597,13 @@ test('bridge heartbeat diagnostics retain only bounded health counters and categ
       unreadable: 3,
       lastEventAt: initialNow - 50
     },
+    wallet: {
+      frames: 0,
+      rows: 0,
+      accepted: 0,
+      rejected: 0,
+      lastEventAt: null
+    },
     poll: {
       startedAt: initialNow - 1_000,
       finishedAt: initialNow - 850,
@@ -1661,6 +1675,13 @@ test('bridge heartbeat diagnostics retain only bounded health counters and categ
     unmonitoredAuthor: 0,
     invalidEvent: 0,
     unreadable: 0,
+    lastEventAt: null
+  });
+  assert.deepEqual(invalid.diagnostics.wallet, {
+    frames: 0,
+    rows: 0,
+    accepted: 0,
+    rejected: 0,
     lastEventAt: null
   });
   assert.equal(invalid.diagnostics.poll.elapsedMs, null);

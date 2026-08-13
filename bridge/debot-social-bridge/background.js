@@ -242,6 +242,9 @@ function diagnosticErrorType(value) {
 function safeBridgeDiagnostics(value) {
   const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const ws = input.ws && typeof input.ws === 'object' && !Array.isArray(input.ws) ? input.ws : {};
+  const wallet = input.wallet && typeof input.wallet === 'object' && !Array.isArray(input.wallet)
+    ? input.wallet
+    : {};
   const poll = input.poll && typeof input.poll === 'object' && !Array.isArray(input.poll) ? input.poll : {};
   const forcePoll = input.forcePoll && typeof input.forcePoll === 'object' && !Array.isArray(input.forcePoll)
     ? input.forcePoll
@@ -264,6 +267,13 @@ function safeBridgeDiagnostics(value) {
       invalidEvent: diagnosticCounter(ws.invalidEvent),
       unreadable: diagnosticCounter(ws.unreadable),
       lastEventAt: diagnosticTimestamp(ws.lastEventAt)
+    },
+    wallet: {
+      frames: diagnosticCounter(wallet.frames),
+      rows: diagnosticCounter(wallet.rows),
+      accepted: diagnosticCounter(wallet.accepted),
+      rejected: diagnosticCounter(wallet.rejected),
+      lastEventAt: diagnosticTimestamp(wallet.lastEventAt)
     },
     poll: {
       startedAt: diagnosticTimestamp(poll.startedAt),

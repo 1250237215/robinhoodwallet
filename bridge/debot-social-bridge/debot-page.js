@@ -1,7 +1,7 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const BRIDGE_VERSION = '1.10.2';
+  const BRIDGE_VERSION = '1.10.3';
   const BRIDGE_SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
@@ -91,6 +91,13 @@
       unreadable: 0,
       lastEventAt: 0
     },
+    wallet: {
+      frames: 0,
+      rows: 0,
+      accepted: 0,
+      rejected: 0,
+      lastEventAt: 0
+    },
     poll: {
       attempts: 0,
       successes: 0,
@@ -145,7 +152,7 @@
   }
 
   function bridgeDiagnosticsSnapshot() {
-    const { ws, poll, forcePoll } = bridgeDiagnostics;
+    const { ws, wallet, poll, forcePoll } = bridgeDiagnostics;
     return {
       ws: {
         connectionOpens: ws.connectionOpens,
@@ -163,6 +170,13 @@
         invalidEvent: ws.invalidEvent,
         unreadable: ws.unreadable,
         lastEventAt: ws.lastEventAt
+      },
+      wallet: {
+        frames: wallet.frames,
+        rows: wallet.rows,
+        accepted: wallet.accepted,
+        rejected: wallet.rejected,
+        lastEventAt: wallet.lastEventAt
       },
       poll: {
         attempts: poll.attempts,
@@ -2653,11 +2667,33 @@
         const packet = JSON.parse(frame.slice(arrayStart));
         const eventName = Array.isArray(packet) ? String(packet[0] || '').toLowerCase() : '';
         if (['wallet-track', 'wallet-position-track'].includes(eventName)) {
-          const root = packet[1] && typeof packet[1] === 'object' ? packet[1] : {};
-          const rows = Array.isArray(root) ? root : Array.isArray(root.data) ? root.data : [root.data || root];
+          incrementDiagnosticCounter(bridgeDiagnostics.wallet, 'frames');
+          const walletRows = (value, depth = 0, rows = []) => {
+            if (depth > 5 || rows.length >= 100 || value === null || value === undefined) return rows;
+            if (Array.isArray(value)) {
+              for (const item of value) walletRows(item, depth + 1, rows);
+              return rows;
+            }
+            if (typeof value !== 'object') return rows;
+            const candidate = value.data && typeof value.data === 'object' && !Array.isArray(value.data)
+              ? value.data
+              : value;
+            const hasWallet = candidate.wallet || candidate.wallet_address || candidate.address;
+            const hasToken = candidate.token || candidate.token_address || candidate.contract_address;
+            if (hasWallet && hasToken) {
+              rows.push(candidate);
+              return rows;
+            }
+            for (const key of ['data', 'payload', 'result', 'items', 'events', 'rows', 'list']) {
+              if (Object.hasOwn(value, key)) walletRows(value[key], depth + 1, rows);
+            }
+            return rows;
+          };
+          const rows = walletRows(packet[1]);
+          incrementDiagnosticCounter(bridgeDiagnostics.wallet, 'rows', rows.length);
           const events = [];
           for (const row of rows.slice(0, 100)) {
-            const data = row?.data && typeof row.data === 'object' ? row.data : row;
+            const data = row;
             const chainValue = String(data?.chain || data?.chain_name || data?.network || '').toLowerCase();
             const chain = ['bsc', 'bnb', 'bnbchain', '56'].includes(chainValue) ? 'bsc' : '';
             const walletAddress = String(data?.wallet || data?.wallet_address || data?.address || '').toLowerCase();
@@ -2668,7 +2704,10 @@
             const operation = String(data?.op || data?.operation || data?.position_action || '').toLowerCase();
             if (chain !== 'bsc' || !/^0x[0-9a-f]{40}$/.test(walletAddress)
               || !/^0x[0-9a-f]{40}$/.test(tokenAddress) || !/^0x[0-9a-f]{64}$/.test(txHash)
-              || !/(?:buy|open|increase)/.test(operation)) continue;
+              || !/(?:buy|open|increase|add)/.test(operation)) {
+              incrementDiagnosticCounter(bridgeDiagnostics.wallet, 'rejected');
+              continue;
+            }
             events.push({
               chain,
               walletAddress,
@@ -2687,7 +2726,12 @@
               discoveredAt: Date.now()
             });
           }
-          if (events.length) emit('wallet-events', { events });
+          if (events.length) {
+            incrementDiagnosticCounter(bridgeDiagnostics.wallet, 'accepted', events.length);
+            bridgeDiagnostics.wallet.lastEventAt = Date.now();
+            emit('wallet-events', { events });
+            emitHealthyHeartbeat();
+          }
           return;
         }
       } catch {
