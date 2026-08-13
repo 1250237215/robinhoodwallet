@@ -1525,6 +1525,20 @@ test('monitor health exposes compact fast and deep lane diagnostics', () => {
   assert.match(stylesCss, /\.monitor-health-grid \.monitor-health-details \{[\s\S]*flex-wrap: wrap/);
 });
 
+test('real-time chain flow exposes a visible per-chain health status bar', () => {
+  assert.match(indexHtml, /id="monitor-feed-status"[^>]*aria-label="各链实时监控状态"/);
+  assert.match(appJs, /function monitorFeedSessionStatus\(session\)/);
+  assert.match(appJs, /consecutiveErrors/);
+  assert.match(appJs, /fastBacklogBlocks/);
+  assert.match(appJs, /lastSuccessAt/);
+  assert.match(appJs, /function renderMonitorFeedStatus\(\)/);
+  assert.match(appJs, /data-state="\$\{status\.state\}"/);
+  assert.match(appJs, /renderMonitorFeedStatus\(\);/);
+  assert.match(stylesCss, /\.monitor-feed-status-item\[data-state="ready"\]/);
+  assert.match(stylesCss, /\.monitor-feed-status-item\[data-state="warning"\]/);
+  assert.match(stylesCss, /\.monitor-feed-status-item\[data-state="error"\]/);
+});
+
 test('Solana monitor readiness is explicit when Helius is not configured', () => {
   const healthSource = appJs.slice(
     appJs.indexOf('function monitorHealthValues'),
@@ -2266,7 +2280,8 @@ test('chain and social elapsed times advance every second without rerendering ei
     appJs.indexOf('state.monitorTickTimer = setInterval'),
     appJs.indexOf('void startSocialMonitor({ manual })')
   );
-  assert.match(tickSource, /synchronizeMonitorAlerts\(\);\s+updateLiveRelativeTimes\(\);\s+}, 1_000\)/);
+  assert.match(tickSource, /synchronizeMonitorAlerts\(\);\s+updateLiveRelativeTimes\(\);\s+renderMonitorFeedStatus\(\);\s+}, 1_000\)/);
+  assert.doesNotMatch(tickSource, /renderMonitorEvents\(\)|renderSocialFeed\(\)/);
   assert.doesNotMatch(tickSource, /renderMonitorEvents\(|renderSocialFeed\(|renderSocialMonitor\(|innerHTML/);
   const monitorStartSource = appSourceBetween('async function startMonitorPage(', 'async function updateMonitorFeedChainSelection(');
   assert.ok(

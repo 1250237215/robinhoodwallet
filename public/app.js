@@ -463,6 +463,7 @@ const elements = {
   socialEventEditorSaveLabel: document.querySelector('#social-event-editor-save-label'),
   socialFeed: document.querySelector('#social-feed'),
   monitorFeedSummary: document.querySelector('#monitor-feed-summary'),
+  monitorFeedStatus: document.querySelector('#monitor-feed-status'),
   monitorChainFilter: document.querySelector('#monitor-chain-filter'),
   monitorEventFeed: document.querySelector('#monitor-event-feed'),
   monitorRefreshButton: document.querySelector('#monitor-refresh-button'),
@@ -3359,6 +3360,86 @@ function renderMonitorChainFilter() {
   }
 }
 
+function monitorFeedSessionStatus(session) {
+  const health = session?.health && typeof session.health === 'object' ? session.health : {};
+  const status = String(firstValue(health, ['status', 'state'], '') || '').toLowerCase();
+  const consecutiveErrors = finiteNumber(health.consecutiveErrors, health.consecutive_errors) || 0;
+  const lagBlocks = finiteNumber(
+    health.lagBlocks,
+    health.lag_blocks,
+    health.fastBacklogBlocks,
+    health.fast_backlog_blocks,
+    health.lag
+  );
+  const gapBlocks = finiteNumber(health.fastGapBlocks, health.fast_gap_blocks);
+  const backlogBlocks = Math.max(0, lagBlocks || 0, gapBlocks || 0);
+  const lastSuccessAt = firstValue(health, [
+    'lastSuccessAt',
+    'last_success_at',
+    'lastPollAt',
+    'last_poll_at',
+    'providerLastSyncedAt'
+  ], null);
+  const lastError = String(firstValue(health, ['lastError', 'last_error', 'error', 'message'], '') || '');
+  const realtimeReady = typeof health.realtimeReady === 'boolean' ? health.realtimeReady : null;
+
+  if (!session?.started) return { state: 'loading', label: '连接中', detail: '正在读取状态' };
+  if (!session.connected && lastError) return {
+    state: 'error',
+    label: '异常',
+    detail: consecutiveErrors > 0 ? `连续错误 ${formatInteger(consecutiveErrors)}` : '连接失败',
+    title: lastError
+  };
+  if (realtimeReady === false || ['degraded', 'error', 'stopped'].includes(status) || consecutiveErrors > 0) {
+    const details = [];
+    if (consecutiveErrors > 0) details.push(`连续错误 ${formatInteger(consecutiveErrors)}`);
+    if (backlogBlocks > 0) details.push(`积压 ${formatMonitorBlockCount(backlogBlocks)}`);
+    if (lastSuccessAt) details.push(`最后正常 ${formatMonitorAge(lastSuccessAt)}`);
+    return {
+      state: 'error',
+      label: status === 'stopped' ? '已断开' : '异常',
+      detail: details.join(' · ') || '实时监控不可用',
+      title: lastError || details.join(' · ')
+    };
+  }
+  if (!session.connected || session.transport === 'idle') {
+    return { state: 'loading', label: '连接中', detail: '正在建立实时连接' };
+  }
+  if (backlogBlocks > 10 || ['syncing', 'backfilling'].includes(status) || session.transport === 'polling') {
+    const details = [];
+    if (backlogBlocks > 0) details.push(`积压 ${formatMonitorBlockCount(backlogBlocks)}`);
+    details.push(session.transport === 'polling' ? '轮询补偿' : '追赶中');
+    return { state: 'warning', label: '延迟', detail: details.join(' · ') };
+  }
+  const walletCount = finiteNumber(health.monitoredWallets, health.monitored_wallets, health.walletCount);
+  if (status === 'waiting_for_wallets' || walletCount === 0) {
+    return { state: 'idle', label: '待命', detail: '暂无监控地址' };
+  }
+  return {
+    state: 'ready',
+    label: '正常',
+    detail: lastSuccessAt ? `更新 ${formatMonitorAge(lastSuccessAt)}` : '实时连接正常'
+  };
+}
+
+function renderMonitorFeedStatus() {
+  if (!elements.monitorFeedStatus) return;
+  elements.monitorFeedStatus.innerHTML = [...state.monitorFeedChainIds].map((chainId) => {
+    const chain = monitorChain(chainId);
+    const session = monitorSession(chainId, { create: false });
+    const status = monitorFeedSessionStatus(session);
+    const title = status.title || `${chain.label}：${status.label} · ${status.detail}`;
+    return `
+      <span class="monitor-feed-status-item" data-state="${status.state}" title="${escapeHtml(title)}">
+        <span class="monitor-feed-status-dot" aria-hidden="true"></span>
+        <strong>${escapeHtml(chain.label)}</strong>
+        <b>${escapeHtml(status.label)}</b>
+        <span>${escapeHtml(status.detail)}</span>
+      </span>
+    `;
+  }).join('');
+}
+
 function renderMonitorEvents() {
   const events = state.monitorEvents;
   const selectedChains = Object.values(CHAIN_CONFIGS)
@@ -3565,6 +3646,7 @@ function renderMonitorPage() {
   renderMonitorHealth();
   renderMonitorWindowLabels();
   renderMonitorChainFilter();
+  renderMonitorFeedStatus();
   renderMonitorEvents();
   renderSocialMonitor();
   refreshIcons(elements.monitorPage);
@@ -3643,6 +3725,7 @@ function applyMonitorPayload(payload, {
     renderMonitorPage();
   } else {
     renderMonitorChainFilter();
+    renderMonitorFeedStatus();
     renderMonitorEvents();
   }
 }
@@ -3995,6 +4078,7 @@ function applyMonitorStreamEvent(event, session = monitorSession(activeChainId))
     renderMonitorPage();
   } else {
     renderMonitorChainFilter();
+    renderMonitorFeedStatus();
     renderMonitorEvents();
   }
 }
@@ -4008,6 +4092,7 @@ function applyMonitorStreamEventUpdate(event, session = monitorSession(activeCha
   session.transport = 'sse';
   if (session.chainId === activeChainId) synchronizeActiveMonitorSessionState();
   renderMonitorChainFilter();
+  renderMonitorFeedStatus();
   renderMonitorEvents();
 }
 
@@ -4818,6 +4903,7 @@ async function startMonitorPage({ manual = false, preserveSocial = false } = {})
   state.monitorTickTimer = setInterval(() => {
     synchronizeMonitorAlerts();
     updateLiveRelativeTimes();
+    renderMonitorFeedStatus();
   }, 1_000);
   if (!preserveSocial || !state.socialStarted) void startSocialMonitor({ manual });
   elements.monitorRefreshButton.disabled = true;
@@ -4841,6 +4927,7 @@ async function updateMonitorFeedChainSelection(chainId, selected) {
   storeMonitorFeedChainIds();
   synchronizeCombinedMonitorEvents();
   renderMonitorChainFilter();
+  renderMonitorFeedStatus();
   renderMonitorEvents();
   if (state.monitorStarted && state.activeTab === 'monitor') await synchronizeMonitorSessions();
 }
