@@ -960,7 +960,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     .filter((call) => call.url.startsWith('/api/social/twitter/'))
     .every((call) => new URL(call.url, 'https://debot.ai').searchParams.get('tw_types')
       === 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow'), true);
-  assert.deepEqual(intervals.map((interval) => interval.delay), [1_000, 30_000]);
+  assert.deepEqual(intervals.map((interval) => interval.delay), [1_000, 30_000, 60_000]);
   assert.equal(calls.every((call) => call.options.credentials === 'include'), true);
 
   window.dispatchMessage({
@@ -988,7 +988,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.requestId === 'page-personal-probe'
       && message.payload.ok === true)));
   const personalHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.equal(personalHeartbeat.payload.version, '1.10.1');
+  assert.equal(personalHeartbeat.payload.version, '1.10.2');
   assert.deepEqual(Array.from(personalHeartbeat.payload.capabilities), [
     'posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1', 'debot-token-holders-v1'
   ]);
@@ -1945,7 +1945,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const recoveredHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
   assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
   assert.equal(Object.hasOwn(recoveredHeartbeat.payload, 'error'), false);
-  assert.equal(recoveredHeartbeat.payload.version, '1.10.1');
+  assert.equal(recoveredHeartbeat.payload.version, '1.10.2');
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.accountCount >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.rawRows >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.normalizedRows >= 0, true);
