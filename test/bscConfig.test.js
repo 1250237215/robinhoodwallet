@@ -16,7 +16,7 @@ test('defines the BSC mainnet profile and independent data defaults', () => {
   assert.equal(BSC_CHAIN.chainId, 56);
   assert.equal(BSC_CHAIN.hexId, '0x38');
   assert.equal(BSC_CHAIN.debotChain, 'bsc');
-  assert.equal(BSC_CHAIN.rpcUrl, 'https://bsc-rpc.publicnode.com');
+  assert.equal(BSC_CHAIN.rpcUrl, 'https://bsc-dataseed1.bnbchain.org');
   assert.equal(Object.hasOwn(BSC_CHAIN, 'holderRpcUrl'), false);
   assert.equal(BSC_CHAIN.explorerUrl, 'https://bscscan.com');
   assert.equal(BSC_CHAIN.dexScreenerTokensUrl, 'https://api.dexscreener.com/tokens/v1/bsc');
