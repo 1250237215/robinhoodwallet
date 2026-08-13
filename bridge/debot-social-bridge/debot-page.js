@@ -1,7 +1,7 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const BRIDGE_VERSION = '1.10.0';
+  const BRIDGE_VERSION = '1.10.1';
   const BRIDGE_SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
@@ -2288,38 +2288,66 @@
     if (['wallet.watch.upsert', 'wallet.watch.delete'].includes(command.type)) {
       const address = String(payload.address || '').trim().toLowerCase();
       if (!/^0x[0-9a-f]{40}$/.test(address)) throw new Error('A valid EVM wallet address is required');
-      const fetchTrackedWallets = async () => {
-        const result = [];
-        for (let page = 1; page <= 20; page += 1) {
-          const query = new URLSearchParams({
-            chain: 'bsc',
-            page: String(page),
-            page_size: '100',
-            filter: '{}'
-          });
-          const response = await api(`wallet/track/list?${query}`);
-          const rows = Array.isArray(response)
-            ? response
-            : Array.isArray(response?.list)
-              ? response.list
-              : Array.isArray(response?.rows)
-                ? response.rows
-                : [];
-          result.push(...rows);
-          if (rows.length < 100) break;
-        }
-        return result;
-      };
       const walletAddress = (item) => String(
         item?.wallet || item?.wallet_address || item?.address || item?.walletAddress || ''
       ).trim().toLowerCase();
+      const responseWallets = (response) => {
+        if (Array.isArray(response)) return response;
+        for (const key of ['wallets', 'list', 'rows', 'items']) {
+          if (Array.isArray(response?.[key])) return response[key];
+        }
+        return [];
+      };
+      const fetchTrackedWallets = async ({ search = '' } = {}) => {
+        const result = [];
+        let next = '';
+        const seenCursors = new Set();
+        for (let page = 0; page < 50; page += 1) {
+          const query = new URLSearchParams({
+            chain: 'bsc',
+            next,
+            is_solana: '0',
+            ...(search ? { search } : {}),
+            filter: '{}'
+          });
+          const response = await api(`wallet/track/list?${query}`);
+          const rows = responseWallets(response);
+          result.push(...rows);
+          const cursor = String(response?.next || '');
+          if (!cursor || seenCursors.has(cursor)) break;
+          seenCursors.add(cursor);
+          next = cursor;
+        }
+        return result;
+      };
+      const findTrackedWallet = async () => {
+        const matches = await fetchTrackedWallets({ search: address });
+        return matches.find((item) => walletAddress(item) === address) || null;
+      };
+      const fetchWalletGroups = async () => {
+        const response = await api('wallet/group/list');
+        if (Array.isArray(response)) return response;
+        for (const key of ['groups', 'list', 'rows', 'items']) {
+          if (Array.isArray(response?.[key])) return response[key];
+        }
+        return [];
+      };
+      const validGroupId = (value) => {
+        const id = Number(value);
+        return Number.isSafeInteger(id) && id > 0 ? id : null;
+      };
       if (command.type === 'wallet.watch.upsert') {
-        const before = await fetchTrackedWallets();
-        if (!before.some((item) => walletAddress(item) === address)) {
+        const before = await findTrackedWallet();
+        if (!before) {
+          const groups = await fetchWalletGroups();
+          const defaultGroup = groups.find((group) => Number(group?.type) === 2)
+            || groups.find((group) => validGroupId(group?.id ?? group?.group_id));
+          const groupId = validGroupId(defaultGroup?.id ?? defaultGroup?.group_id);
+          if (!groupId) throw new Error('DeBot default wallet group could not be resolved');
           await api('wallet/track/add', {
             method: 'POST',
             body: JSON.stringify({
-              group_ids: [0],
+              group_ids: [groupId],
               wallet_remarks: [{ wallet: address, remark: String(payload.note || '').slice(0, 500), emoji: '' }]
             })
           });
@@ -2335,28 +2363,29 @@
             }]
           })
         });
-        const after = await fetchTrackedWallets();
-        if (!after.some((item) => walletAddress(item) === address)) {
+        const after = await findTrackedWallet();
+        if (!after) {
           throw new Error('DeBot wallet monitor did not contain the added address');
         }
         return { remoteId: address };
       }
-      const before = await fetchTrackedWallets();
-      const matches = before.filter((item) => walletAddress(item) === address);
+      const match = await findTrackedWallet();
+      const matches = match ? [match] : [];
       if (matches.length) {
         const groupIds = [...new Set(matches.flatMap((item) => [
           item?.group_id,
           ...(Array.isArray(item?.group_ids) ? item.group_ids : [])
-        ]).map(Number).filter(Number.isSafeInteger))];
-        for (const groupId of groupIds.length ? groupIds : [0]) {
+        ]).map(validGroupId).filter(Boolean))];
+        if (!groupIds.length) throw new Error('DeBot wallet group could not be resolved for deletion');
+        for (const groupId of groupIds) {
           await api('wallet/track/delete', {
             method: 'POST',
             body: JSON.stringify({ group_id: groupId, wallets: [address] })
           });
         }
       }
-      const after = await fetchTrackedWallets();
-      if (after.some((item) => walletAddress(item) === address)) {
+      const after = await findTrackedWallet();
+      if (after) {
         throw new Error('DeBot wallet monitor still contains the removed address');
       }
       return { remoteId: address, verifiedAbsent: true };

@@ -289,7 +289,7 @@ function timelineFailure(errorType) {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.10.0');
+  assert.equal(manifest.version, '1.10.1');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms', 'scripting']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -319,6 +319,11 @@ test('extension manifest, configuration and scripts are valid and narrowly scope
   assert.match(pageSource, /const WATCHLIST_PAGE_SIZE = 500/);
   assert.match(pageSource, /const WATCHLIST_MAX_PAGES = 10/);
   assert.match(pageSource, /const DELIVERY_TIMEOUT_MS = 2_000/);
+  assert.match(pageSource, /await api\('wallet\/group\/list'\)/);
+  assert.match(pageSource, /Number\(group\?\.type\) === 2/);
+  assert.match(pageSource, /for \(const key of \['wallets', 'list', 'rows', 'items'\]\)/);
+  assert.match(pageSource, /next,/);
+  assert.doesNotMatch(pageSource, /group_ids: \[0\]/);
   assert.match(pageSource, /async function fetchPersonalTimelinePage\(configIds = \[\], cursor = ''\)/);
   assert.match(pageSource, /timeoutMs: PRIMARY_API_TIMEOUT_MS/);
   assert.doesNotMatch(pageSource, /social\/twitter\/(?:hot|all)\/timeline/);
@@ -980,7 +985,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.requestId === 'page-personal-probe'
       && message.payload.ok === true)));
   const personalHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.equal(personalHeartbeat.payload.version, '1.10.0');
+  assert.equal(personalHeartbeat.payload.version, '1.10.1');
   assert.deepEqual(Array.from(personalHeartbeat.payload.capabilities), [
     'posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1', 'debot-token-holders-v1'
   ]);
@@ -1937,7 +1942,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const recoveredHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
   assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
   assert.equal(Object.hasOwn(recoveredHeartbeat.payload, 'error'), false);
-  assert.equal(recoveredHeartbeat.payload.version, '1.10.0');
+  assert.equal(recoveredHeartbeat.payload.version, '1.10.1');
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.accountCount >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.rawRows >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.normalizedRows >= 0, true);
