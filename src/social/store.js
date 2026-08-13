@@ -1912,14 +1912,14 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         ORDER BY desired_state, created_at, id
       `).all(...params).map(watchlistFromRow);
     },
-    upsertDeBotWalletSync(address, note = '') {
+    upsertDeBotWalletSync(address, note = '', { force = false } = {}) {
       const normalized = String(address || '').trim().toLowerCase();
       if (!/^0x[0-9a-f]{40}$/.test(normalized)) throw new TypeError('Invalid DeBot wallet address');
       const normalizedNote = String(note || '').trim().slice(0, 500);
       const timestamp = now();
       return transaction(db, () => {
         const existing = db.prepare('SELECT * FROM debot_wallet_sync WHERE address = ?').get(normalized);
-        if (existing && existing.desired_state === 'active' && existing.note === normalizedNote
+        if (!force && existing && existing.desired_state === 'active' && existing.note === normalizedNote
           && ['pending', 'synced'].includes(existing.sync_status)) {
           return { entry: deBotWalletSyncFromRow(existing), command: null, changed: false };
         }
@@ -1960,29 +1960,36 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         };
       });
     },
-    recordRemoteDeBotWallet(address, note = '') {
+    recordRemoteDeBotWallet(address, note = '', expectedNote = '') {
       const normalized = String(address || '').trim().toLowerCase();
       if (!/^0x[0-9a-f]{40}$/.test(normalized)) throw new TypeError('Invalid DeBot wallet address');
       const normalizedNote = String(note || '').trim().slice(0, 500);
+      const normalizedExpectedNote = String(expectedNote || '').trim().slice(0, 500);
       const timestamp = now();
       return transaction(db, () => {
         const existing = db.prepare('SELECT * FROM debot_wallet_sync WHERE address = ?').get(normalized);
         if (existing?.desired_state === 'removed') return deBotWalletSyncFromRow(existing);
-        // DeBot frequently omits remarks from an otherwise complete wallet
-        // snapshot. An empty remote value must not erase the name already
-        // queued from the website's authoritative address library.
-        const effectiveNote = normalizedNote || String(existing?.note || '').trim();
+        const effectiveNote = normalizedExpectedNote
+          || normalizedNote
+          || String(existing?.note || '').trim().slice(0, 500);
+        const remoteMatches = !normalizedExpectedNote || normalizedNote === normalizedExpectedNote;
         db.prepare(`
           INSERT INTO debot_wallet_sync(
             address, note, desired_state, sync_status, last_error, last_synced_at, updated_at
-          ) VALUES (?, ?, 'active', 'synced', '', ?, ?)
+          ) VALUES (?, ?, 'active', ?, '', ?, ?)
           ON CONFLICT(address) DO UPDATE SET note = excluded.note, desired_state = 'active',
-            sync_status = 'synced', last_error = '', last_synced_at = excluded.last_synced_at,
+            sync_status = excluded.sync_status, last_error = '', last_synced_at = excluded.last_synced_at,
             updated_at = excluded.updated_at
-        `).run(normalized, effectiveNote, timestamp, timestamp);
-        return deBotWalletSyncFromRow(
-          db.prepare('SELECT * FROM debot_wallet_sync WHERE address = ?').get(normalized)
+        `).run(
+          normalized,
+          effectiveNote,
+          remoteMatches ? 'synced' : 'pending',
+          remoteMatches ? timestamp : existing?.last_synced_at || 0,
+          timestamp
         );
+        const row = db.prepare('SELECT * FROM debot_wallet_sync WHERE address = ?').get(normalized);
+        if (!remoteMatches) queueDeBotWalletCommand(row, 'wallet.watch.upsert', timestamp);
+        return deBotWalletSyncFromRow(row);
       });
     },
     listDeBotWalletSync({ includeRemoved = true } = {}) {

@@ -768,16 +768,16 @@ export function createSocialService({
       publishAfter(latestBefore);
       return result ? { ok: true, ...result, counts: activeStore.getCounts() } : null;
     },
-    syncDeBotWallet({ address, note = '', active = true } = {}) {
+    syncDeBotWallet({ address, note = '', active = true, force = false } = {}) {
       return active
-        ? activeStore.upsertDeBotWalletSync(address, note)
+        ? activeStore.upsertDeBotWalletSync(address, note, { force })
         : activeStore.removeDeBotWalletSync(address);
     },
     listDeBotWalletSync(options = {}) {
       return activeStore.listDeBotWalletSync(options);
     },
-    recordRemoteDeBotWallet(address, note = '') {
-      return activeStore.recordRemoteDeBotWallet(address, note);
+    recordRemoteDeBotWallet(address, note = '', expectedNote = '') {
+      return activeStore.recordRemoteDeBotWallet(address, note, expectedNote);
     },
     reconcileDeBotWalletSnapshot(wallets) {
       if (typeof importDeBotWalletSnapshot !== 'function') {

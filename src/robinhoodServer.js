@@ -1029,14 +1029,11 @@ export async function startRobinhoodStandaloneServer(
     const localByAddress = new Map(
       (store.listWalletAnnotations?.() || []).map((wallet) => [String(wallet.address).toLowerCase(), wallet])
     );
-    const syncByAddress = new Map(
-      (socialService?.listDeBotWalletSync?.({ includeRemoved: true }) || [])
-        .map((entry) => [String(entry.address).toLowerCase(), entry])
-    );
     let imported = 0;
     let notesAdded = 0;
     let unchanged = 0;
     let skippedRemoved = 0;
+    let resyncQueued = 0;
     const seen = new Set();
     for (const wallet of Array.isArray(wallets) ? wallets : []) {
       const address = String(wallet?.address || '').trim().toLowerCase();
@@ -1045,10 +1042,11 @@ export async function startRobinhoodStandaloneServer(
       // A complete DeBot snapshot is authoritative for membership. A stale
       // local removal tombstone must not hide a wallet that still exists in
       // DeBot; local exclusion only controls whether the site alerts on it.
-      const syncEntry = syncByAddress.get(address);
-      const note = String(wallet?.note || '').trim().slice(0, 500);
-      socialService.recordRemoteDeBotWallet(address, note);
       const existing = localByAddress.get(address);
+      const note = String(wallet?.note || '').trim().slice(0, 500);
+      const expectedNote = String(existing?.alias || existing?.note || '').trim().slice(0, 500);
+      const syncResult = socialService.recordRemoteDeBotWallet(address, note, expectedNote);
+      if (syncResult?.syncStatus === 'pending') resyncQueued += 1;
       if (!existing) {
         const added = store.upsertWalletAnnotation({
           address,
@@ -1080,7 +1078,26 @@ export async function startRobinhoodStandaloneServer(
         unchanged += 1;
       }
     }
-    return { ok: true, received: seen.size, imported, notesAdded, unchanged, skippedRemoved };
+    for (const wallet of localByAddress.values()) {
+      const address = String(wallet?.address || '').trim().toLowerCase();
+      if (!/^0x[0-9a-f]{40}$/.test(address) || seen.has(address)) continue;
+      socialService.syncDeBotWallet({
+        address,
+        note: String(wallet?.alias || wallet?.note || '').trim().slice(0, 500),
+        active: true,
+        force: true
+      });
+      resyncQueued += 1;
+    }
+    return {
+      ok: true,
+      received: seen.size,
+      imported,
+      notesAdded,
+      unchanged,
+      skippedRemoved,
+      resyncQueued
+    };
   };
   const socialService = createSocialService({
     config: socialConfig,

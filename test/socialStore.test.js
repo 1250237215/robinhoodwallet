@@ -1108,6 +1108,28 @@ test('empty DeBot snapshot remarks do not erase the website name queued for sync
   assert.equal(renamed.note, 'Remote label');
 });
 
+test('DeBot snapshot remark mismatches are requeued until the website name is confirmed', (t) => {
+  const { store } = fixture(t);
+  const address = '0xcccccccccccccccccccccccccccccccccccccccc';
+  store.upsertDeBotWalletSync(address, 'AI 18');
+  const initial = store.claimCommands({ limit: 10 })[0];
+  store.acknowledgeCommand(initial.id, { success: true, remoteId: address });
+
+  const missing = store.recordRemoteDeBotWallet(address, '', 'AI 18');
+  assert.equal(missing.note, 'AI 18');
+  assert.equal(missing.syncStatus, 'pending');
+  const retry = store.claimCommands({ limit: 10 });
+  assert.equal(retry.length, 1);
+  assert.equal(retry[0].type, 'wallet.watch.upsert');
+  assert.equal(retry[0].payload.note, 'AI 18');
+
+  store.acknowledgeCommand(retry[0].id, { success: true, remoteId: address });
+  const confirmed = store.recordRemoteDeBotWallet(address, 'AI 18', 'AI 18');
+  assert.equal(confirmed.note, 'AI 18');
+  assert.equal(confirmed.syncStatus, 'synced');
+  assert.equal(store.claimCommands({ limit: 10 }).length, 0);
+});
+
 test('watchlist additions persist initial preferences and keep their insertion order', (t) => {
   const { store, setNow } = fixture(t);
   const added = store.addWatchAccounts([

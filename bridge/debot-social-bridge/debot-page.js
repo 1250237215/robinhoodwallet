@@ -1,7 +1,7 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const BRIDGE_VERSION = '1.10.4';
+  const BRIDGE_VERSION = '1.10.5';
   const BRIDGE_SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
@@ -2314,6 +2314,21 @@
         }
         return [];
       };
+      const responseRemarks = (response) => {
+        if (Array.isArray(response)) return response;
+        for (const key of ['wallet_remarks', 'remarks', 'wallets', 'list', 'rows', 'items']) {
+          if (Array.isArray(response?.[key])) return response[key];
+        }
+        return [];
+      };
+      const walletRemark = (item) => String(item?.remark || item?.wallet_remark || item?.note || '')
+        .trim()
+        .slice(0, 500);
+      const fetchWalletRemark = async () => {
+        const response = await api('wallet/remark/list');
+        const match = responseRemarks(response).find((item) => walletAddress(item) === address);
+        return match ? walletRemark(match) : '';
+      };
       const fetchTrackedWallets = async ({ search = '' } = {}) => {
         const result = [];
         let next = '';
@@ -2353,6 +2368,7 @@
         return Number.isSafeInteger(id) && id > 0 ? id : null;
       };
       if (command.type === 'wallet.watch.upsert') {
+        const expectedNote = String(payload.note || '').trim().slice(0, 500);
         const before = await findTrackedWallet();
         if (!before) {
           const groups = await fetchWalletGroups();
@@ -2364,7 +2380,7 @@
             method: 'POST',
             body: JSON.stringify({
               group_ids: [groupId],
-              wallet_remarks: [{ wallet: address, remark: String(payload.note || '').slice(0, 500), emoji: '' }]
+              wallet_remarks: [{ wallet: address, remark: expectedNote, emoji: '' }]
             })
           });
         }
@@ -2373,7 +2389,7 @@
           body: JSON.stringify({
             wallet_remarks: [{
               wallet: address,
-              remark: String(payload.note || '').slice(0, 500),
+              remark: expectedNote,
               color: '',
               emoji: ''
             }]
@@ -2382,6 +2398,10 @@
         const after = await findTrackedWallet();
         if (!after) {
           throw new Error('DeBot wallet monitor did not contain the added address');
+        }
+        const savedNote = await fetchWalletRemark();
+        if (savedNote !== expectedNote) {
+          throw new Error('DeBot wallet remark did not match the website name');
         }
         return { remoteId: address };
       }
@@ -2456,7 +2476,7 @@
   }
 
   function trackedWalletNote(item) {
-    return String(item?.remark || item?.alias || item?.wallet_remark || item?.note || '').trim().slice(0, 500);
+    return String(item?.remark || item?.wallet_remark || item?.note || '').trim().slice(0, 500);
   }
 
   function trackedWalletRows(response) {
@@ -2471,6 +2491,14 @@
     if (walletLibraryInFlight) return walletLibraryInFlight;
     const operation = (async () => {
       const wallets = new Map();
+      const remarkResponse = await api('wallet/remark/list');
+      const remarkRows = trackedWalletRows(remarkResponse);
+      const remarksByAddress = new Map();
+      for (const item of remarkRows) {
+        const address = trackedWalletAddress(item);
+        if (!/^0x[0-9a-f]{40}$/.test(address)) continue;
+        remarksByAddress.set(address, trackedWalletNote(item));
+      }
       const seenCursors = new Set();
       let next = '';
       let complete = false;
@@ -2480,7 +2508,7 @@
         for (const item of trackedWalletRows(response)) {
           const address = trackedWalletAddress(item);
           if (!/^0x[0-9a-f]{40}$/.test(address)) continue;
-          const note = trackedWalletNote(item);
+          const note = remarksByAddress.get(address) || '';
           const previous = wallets.get(address);
           if (!previous || (!previous.note && note)) wallets.set(address, { address, note });
         }
