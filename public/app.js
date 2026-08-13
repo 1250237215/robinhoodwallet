@@ -92,7 +92,7 @@ const MONITOR_RECENT_REFRESH_MS = 10_000;
 // Keep the first-load selection useful for the two live EVM feeds. The
 // versioned key also upgrades existing browsers that only remembered the old
 // Robinhood-only default; later manual selections remain persistent.
-const MONITOR_FEED_CHAINS_STORAGE_KEY = '1874catch-monitor-feed-chains-v2';
+const MONITOR_FEED_CHAINS_STORAGE_KEY = '1874catch-monitor-feed-chains-v3';
 const MONITOR_FEED_EVENT_LIMIT = 100;
 const SOCIAL_FEED_RENDER_LIMIT = 80;
 const SOCIAL_API_ROOT = `${APP_BASE}/api/social`;
