@@ -1097,6 +1097,17 @@ test('DeBot wallet intents deduplicate remarks and serialize deletion by address
   assert.equal(store.listDeBotWalletSync()[0].syncStatus, 'synced');
 });
 
+test('empty DeBot snapshot remarks do not erase the website name queued for sync', (t) => {
+  const { store } = fixture(t);
+  const address = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  store.upsertDeBotWalletSync(address, 'AI 12');
+  const remote = store.recordRemoteDeBotWallet(address, '');
+  assert.equal(remote.note, 'AI 12');
+  assert.equal(store.listDeBotWalletSync()[0].note, 'AI 12');
+  const renamed = store.recordRemoteDeBotWallet(address, 'Remote label');
+  assert.equal(renamed.note, 'Remote label');
+});
+
 test('watchlist additions persist initial preferences and keep their insertion order', (t) => {
   const { store, setNow } = fixture(t);
   const added = store.addWatchAccounts([

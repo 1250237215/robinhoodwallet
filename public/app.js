@@ -89,7 +89,10 @@ const BUY_FREQUENCY_REFRESH_MS = 30_000;
 const MANUAL_WINNER_POLL_INTERVAL_MS = 1_500;
 const MONITOR_POLL_INTERVAL_MS = 2_000;
 const MONITOR_RECENT_REFRESH_MS = 10_000;
-const MONITOR_FEED_CHAINS_STORAGE_KEY = '1874catch-monitor-feed-chains';
+// Keep the first-load selection useful for the two live EVM feeds. The
+// versioned key also upgrades existing browsers that only remembered the old
+// Robinhood-only default; later manual selections remain persistent.
+const MONITOR_FEED_CHAINS_STORAGE_KEY = '1874catch-monitor-feed-chains-v2';
 const MONITOR_FEED_EVENT_LIMIT = 100;
 const SOCIAL_FEED_RENDER_LIMIT = 80;
 const SOCIAL_API_ROOT = `${APP_BASE}/api/social`;
@@ -591,7 +594,7 @@ function normalizeMonitorFeedChainIds(values, fallback = activeChainId) {
   const normalized = [...new Set(candidates
     .map((value) => String(value || '').trim().toLowerCase())
     .filter((chainId) => Object.hasOwn(CHAIN_CONFIGS, chainId)))];
-  return normalized.length ? normalized : [monitorChainId(fallback)];
+  return normalized.length ? normalized : [...new Set([monitorChainId(fallback), 'bsc'])];
 }
 
 function readStoredMonitorFeedChainIds() {
@@ -599,7 +602,7 @@ function readStoredMonitorFeedChainIds() {
     const stored = JSON.parse(window.localStorage.getItem(MONITOR_FEED_CHAINS_STORAGE_KEY) || '[]');
     return new Set(normalizeMonitorFeedChainIds(stored));
   } catch {
-    return new Set([activeChainId]);
+    return new Set(normalizeMonitorFeedChainIds([], activeChainId));
   }
 }
 

@@ -1968,6 +1968,10 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
       return transaction(db, () => {
         const existing = db.prepare('SELECT * FROM debot_wallet_sync WHERE address = ?').get(normalized);
         if (existing?.desired_state === 'removed') return deBotWalletSyncFromRow(existing);
+        // DeBot frequently omits remarks from an otherwise complete wallet
+        // snapshot. An empty remote value must not erase the name already
+        // queued from the website's authoritative address library.
+        const effectiveNote = normalizedNote || String(existing?.note || '').trim();
         db.prepare(`
           INSERT INTO debot_wallet_sync(
             address, note, desired_state, sync_status, last_error, last_synced_at, updated_at
@@ -1975,7 +1979,7 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
           ON CONFLICT(address) DO UPDATE SET note = excluded.note, desired_state = 'active',
             sync_status = 'synced', last_error = '', last_synced_at = excluded.last_synced_at,
             updated_at = excluded.updated_at
-        `).run(normalized, normalizedNote, timestamp, timestamp);
+        `).run(normalized, effectiveNote, timestamp, timestamp);
         return deBotWalletSyncFromRow(
           db.prepare('SELECT * FROM debot_wallet_sync WHERE address = ?').get(normalized)
         );

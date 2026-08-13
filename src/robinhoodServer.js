@@ -1066,7 +1066,10 @@ export async function startRobinhoodStandaloneServer(
         skippedRemoved += 1;
         continue;
       }
-      if (note && !String(existing.alias || '').trim() && !String(existing.note || '').trim()) {
+      // The website library is authoritative for names. Only use a remote
+      // DeBot remark to fill an address that is still unnamed locally; never
+      // replace a generated or manually curated 1874catch alias.
+      if (note && !String(existing.alias || '').trim()) {
         store.upsertWalletAnnotation({
           address,
           alias: note,
@@ -1108,9 +1111,10 @@ export async function startRobinhoodStandaloneServer(
   const syncConfirmedWalletToDeBot = (wallet) => {
     const address = String(wallet?.address || '').trim().toLowerCase();
     if (!/^0x[0-9a-f]{40}$/.test(address)) return null;
-    const note = wallet?.aliasSource === 'manual' && String(wallet.alias || '').trim()
-      ? String(wallet.alias).trim()
-      : String(wallet?.note || '').trim();
+    // DeBot's remark is the visible wallet name. Sync both manually entered
+    // and generated site aliases; otherwise DeBot keeps showing a blank
+    // remark even though 1874catch has already named the address.
+    const note = String(wallet?.alias || wallet?.note || '').trim();
     // Keep the DeBot address library equal to the complete shared EVM
     // library. Monitoring rules and exclusions remain local to 1874catch;
     // removing an address from DeBot here would make the two libraries drift.

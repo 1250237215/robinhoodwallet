@@ -1598,7 +1598,8 @@ test('real-time chain flow independently multi-selects and persists all four cha
   ]) {
     assert.match(filter, new RegExp(`data-monitor-chain="${chainId}"[\\s\\S]*?value="${chainId}"[\\s\\S]*?${label}`));
   }
-  assert.match(appJs, /MONITOR_FEED_CHAINS_STORAGE_KEY = '1874catch-monitor-feed-chains'/);
+  assert.match(appJs, /MONITOR_FEED_CHAINS_STORAGE_KEY = '1874catch-monitor-feed-chains-v2'/);
+  assert.match(appJs, /return normalized\.length \? normalized : \[\.\.\.new Set\(\[monitorChainId\(fallback\), 'bsc'\]\)\]/);
   assert.match(appJs, /localStorage\.getItem\(MONITOR_FEED_CHAINS_STORAGE_KEY\)/);
   assert.match(appJs, /localStorage\.setItem\(MONITOR_FEED_CHAINS_STORAGE_KEY, JSON\.stringify\(ordered\)\)/);
   assert.match(appJs, /state\.monitorFeedChainIds = readStoredMonitorFeedChainIds\(\)/);
