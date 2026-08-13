@@ -2591,6 +2591,14 @@
               tokenAddress,
               txHash,
               operation: 'buy',
+              tokenSymbol: String(data?.token_symbol || data?.symbol || data?.token?.symbol || '').slice(0, 80),
+              tokenName: String(data?.token_name || data?.name || data?.token?.name || '').slice(0, 160),
+              rawTokenAmount: String(data?.raw_token_amount || data?.token_amount_raw || '').slice(0, 120),
+              tokenAmount: String(data?.token_amount || data?.amount || '').slice(0, 120),
+              tokenDecimals: Number(data?.decimal ?? data?.decimals ?? data?.token?.decimals ?? 18),
+              blockNumber: Number(data?.block_number || data?.blockNumber || 0),
+              blockTimestamp: Number(data?.unix_time || data?.timestamp || 0),
+              logIndex: Number(data?.log_index || data?.logIndex || 0),
               source: 'debot-wallet-track',
               discoveredAt: Date.now()
             });

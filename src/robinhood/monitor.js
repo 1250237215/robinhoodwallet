@@ -702,6 +702,19 @@ export class RobinhoodWalletMonitor {
     return this.getSnapshot();
   }
 
+  startExternal() {
+    if (this.closed || this.started) return this.getSnapshot();
+    this.started = true;
+    this.health.monitoredWallets = (this.store.listWalletAnnotations?.() || [])
+      .filter((wallet) => wallet.status !== 'excluded').length;
+    this.health.lastSuccessAt = new Date(this.now()).toISOString();
+    this.health.lastError = '';
+    this.health.consecutiveErrors = 0;
+    this.health.lagBlocks = 0;
+    this.health.fastBacklogBlocks = 0;
+    return this.getSnapshot();
+  }
+
   close() {
     this.closed = true;
     this.started = false;
@@ -846,30 +859,54 @@ export class RobinhoodWalletMonitor {
     if (!annotation || annotation.status === 'excluded' || !hasEnabledRule(annotation, 'buy')) {
       return { accepted: false, reason: 'unmonitored_wallet', events: [] };
     }
-    const [transaction, receipt] = await Promise.all([
-      this.rpcClient.getTransactionByHash(txHash, { signal }),
-      this.rpcClient.getTransactionReceipt(txHash, { signal })
-    ]);
-    if (!receiptSucceeded(receipt) || normalizeAddress(transaction?.from) !== walletAddress
-      || !receiptHasSwap(receipt, this.swapTopics)) {
-      return { accepted: false, reason: 'unverified_swap', events: [] };
+    if (!this.settings.enabled || this.quoteTokenAddresses.has(reportedToken)) {
+      return { accepted: false, reason: 'monitor_disabled', events: [] };
     }
-    const candidates = (Array.isArray(receipt.logs) ? receipt.logs : [])
-      .map((log) => this.#transferCandidateFromLog(log, 'incoming'))
-      .filter((candidate) => candidate?.walletAddress === walletAddress
-        && candidate.tokenAddress === reportedToken
-        && !this.quoteTokenAddresses.has(candidate.tokenAddress));
-    if (!candidates.length) return { accepted: false, reason: 'token_not_received', events: [] };
-    const wallets = new Map([[walletAddress, annotation]]);
-    const prepared = candidates.map((candidate) => ({
-      ...candidate,
+    throwIfAborted(signal);
+    const decimals = Math.max(0, Math.min(255, parseInteger(raw?.tokenDecimals, 18)));
+    const rawAmount = String(raw?.rawTokenAmount || '0').trim();
+    const tokenAmount = String(raw?.tokenAmount || '').trim()
+      || (/^[0-9]+$/.test(rawAmount) ? formatTokenAmount(rawAmount, decimals) : '0');
+    const timestamp = parseInteger(raw?.blockTimestamp, unixSeconds(this.now));
+    const rule = ruleFor(annotation, 'buy');
+    const persisted = {
       eventType: 'buy',
       assetType: 'erc20',
-      counterpartyAddress: normalizeAddress(transaction?.to),
-      platform: ''
-    }));
-    const persisted = await this.#persistCandidates(prepared, wallets, signal, { lane: 'external' });
-    return { accepted: true, events: persisted.events };
+      walletAddress,
+      walletAlias: annotation.alias || '',
+      counterpartyAddress: normalizeAddress(raw?.counterpartyAddress),
+      platform: 'debot-wallet-track',
+      tokenAddress: reportedToken,
+      tokenSymbol: normalizeText(raw?.tokenSymbol, reportedToken, 80),
+      tokenName: normalizeText(raw?.tokenName, raw?.tokenSymbol || reportedToken, 160),
+      tokenAmount,
+      rawTokenAmount: /^[0-9]+$/.test(rawAmount) ? rawAmount : '0',
+      tokenDecimals: decimals,
+      txHash,
+      logIndex: Math.max(0, parseInteger(raw?.logIndex, 0)),
+      blockNumber: Math.max(0, parseInteger(raw?.blockNumber, 0)),
+      blockTimestamp: timestamp,
+      detectedAt: unixSeconds(this.now),
+      soundAlert: rule.sound,
+      barkAlert: rule.bark,
+      marketCapUsd: Number.isFinite(Number(raw?.marketCapUsd)) ? Number(raw.marketCapUsd) : null,
+      tokenCreationTimestamp: parseInteger(raw?.tokenCreationTimestamp),
+      marketDataAt: unixSeconds(this.now)
+    };
+    if (isSuppressedLargeCapStockBuy(persisted)) return { accepted: false, reason: 'suppressed_asset', events: [] };
+    const inserted = this.store.insertMonitorEvent(persisted);
+    if (!inserted.inserted) return { accepted: true, duplicate: true, events: [] };
+    const event = publicEvent(inserted.event, this.chainProfile, annotation);
+    this.health.eventsDetected += 1;
+    this.health.fastEventsDetected += 1;
+    this.health.lastSuccessAt = new Date(this.now()).toISOString();
+    this.health.monitoredWallets = (this.store.listWalletAnnotations?.() || [])
+      .filter((wallet) => wallet.status !== 'excluded').length;
+    this.#notifyWalletEvent(event);
+    this.#publishEvents([event]);
+    this.#reconcileBarkAlerts(true);
+    this.#emit('snapshot', this.getSnapshot());
+    return { accepted: true, events: [event] };
   }
 
   #earliestBuyersByToken(events) {

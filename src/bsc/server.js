@@ -457,7 +457,7 @@ export async function startBscStandaloneServer(
     throw error;
   }
   await service.start();
-  monitor.start();
+  monitor.startExternal();
   const address = server.address();
   return {
     server,

@@ -15,6 +15,14 @@ function normalize(value) {
     tokenAddress,
     txHash,
     operation: 'buy',
+    tokenSymbol: String(event.tokenSymbol || '').slice(0, 80),
+    tokenName: String(event.tokenName || '').slice(0, 160),
+    rawTokenAmount: String(event.rawTokenAmount || '').slice(0, 120),
+    tokenAmount: String(event.tokenAmount || '').slice(0, 120),
+    tokenDecimals: Math.max(0, Math.min(255, Number(event.tokenDecimals) || 18)),
+    blockNumber: Math.max(0, Number(event.blockNumber) || 0),
+    blockTimestamp: Math.max(0, Number(event.blockTimestamp) || 0),
+    logIndex: Math.max(0, Number(event.logIndex) || 0),
     source: 'debot-wallet-track',
     discoveredAt: Math.max(0, Number(event.discoveredAt) || Date.now())
   };
