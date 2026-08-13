@@ -38,7 +38,9 @@ export const BSC_CHAIN = Object.freeze({
   chainId: 56,
   hexId: '0x38',
   debotChain: 'bsc',
-  rpcUrl: 'https://bsc-mainnet.public.blastapi.io',
+  // PublicNode is used as the no-key default because the previous public
+  // endpoint is frequently rate-limited during the live wallet scan.
+  rpcUrl: 'https://bsc-rpc.publicnode.com',
   explorerUrl: 'https://bscscan.com',
   dexScreenerPairsUrl: 'https://api.dexscreener.com/token-pairs/v1/bsc',
   dexScreenerTokensUrl: 'https://api.dexscreener.com/tokens/v1/bsc',
