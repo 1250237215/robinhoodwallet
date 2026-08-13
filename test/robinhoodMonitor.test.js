@@ -62,7 +62,7 @@ test('formats even the smallest token amount without a minimum-value filter', ()
   assert.equal(formatTokenAmount(42n, 0), '42');
 });
 
-test('DeBot BSC wallet events persist without calling RPC and still enforce the local wallet library', async () => {
+test('DeBot BSC wallet events persist without RPC and materialize a missing remote wallet', async () => {
   const store = createRobinhoodStore(':memory:');
   store.upsertWalletAnnotation({ address: walletA, status: 'active', createdAt: 1, updatedAt: 1 });
   const rpcClient = {
@@ -86,6 +86,12 @@ test('DeBot BSC wallet events persist without calling RPC and still enforce the 
   })).accepted, false);
   assert.equal((await monitor.ingestExternalWalletEvent({
     chain: 'bsc', walletAddress: walletB, tokenAddress: token, txHash
+  })).accepted, true);
+  assert.equal(store.getWalletAnnotation(walletB).status, 'active');
+  const excludedWallet = '0x7777777777777777777777777777777777777777';
+  store.upsertWalletAnnotation({ address: excludedWallet, status: 'excluded' });
+  assert.equal((await monitor.ingestExternalWalletEvent({
+    chain: 'bsc', walletAddress: excludedWallet, tokenAddress: token, txHash
   })).accepted, false);
   monitor.close();
   store.close();

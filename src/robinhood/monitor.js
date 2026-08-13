@@ -855,7 +855,22 @@ export class RobinhoodWalletMonitor {
     if (!ADDRESS_PATTERN.test(walletAddress) || !ADDRESS_PATTERN.test(reportedToken) || !HASH_PATTERN.test(txHash)) {
       return { accepted: false, reason: 'invalid_event', events: [] };
     }
-    const annotation = this.store.getWalletAnnotation?.(walletAddress);
+    let annotation = this.store.getWalletAnnotation?.(walletAddress);
+    // DeBot is an authoritative source for the external wallet monitor. The
+    // wallet snapshot and an individual wallet-track event can cross in
+    // flight, especially when the BSC service and the social service are
+    // separate processes sharing SQLite. Materialize a missing address before
+    // validating the event so a real-time buy is not discarded in that race.
+    if (!annotation && typeof this.store.upsertWalletAnnotation === 'function') {
+      annotation = this.store.upsertWalletAnnotation({
+        address: walletAddress,
+        alias: '',
+        aliasSource: 'none',
+        note: '',
+        status: 'active',
+        monitorTier: 'watch'
+      });
+    }
     if (!annotation || annotation.status === 'excluded' || !hasEnabledRule(annotation, 'buy')) {
       return { accepted: false, reason: 'unmonitored_wallet', events: [] };
     }
