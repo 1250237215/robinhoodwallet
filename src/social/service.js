@@ -227,7 +227,8 @@ export function createSocialService({
   xReplyEnricher = null,
   socialTranslator = null,
   notifySocialContract = null,
-  ingestDeBotWalletEvents = null
+  ingestDeBotWalletEvents = null,
+  importDeBotWalletSnapshot = null
 }) {
   if (!config) throw new TypeError('Social config is required');
   const activeStore = store || createSocialStore(config.dataFile, { now });
@@ -774,6 +775,19 @@ export function createSocialService({
     },
     listDeBotWalletSync(options = {}) {
       return activeStore.listDeBotWalletSync(options);
+    },
+    recordRemoteDeBotWallet(address, note = '') {
+      return activeStore.recordRemoteDeBotWallet(address, note);
+    },
+    reconcileDeBotWalletSnapshot(wallets) {
+      if (typeof importDeBotWalletSnapshot !== 'function') {
+        throw new DeBotBridgeError(
+          'DeBot wallet-library importer is unavailable',
+          'DEBOT_WALLET_IMPORTER_UNAVAILABLE',
+          503
+        );
+      }
+      return importDeBotWalletSnapshot(wallets);
     },
     ingestPosts(posts, {
       skipReplyEnrichment = false,

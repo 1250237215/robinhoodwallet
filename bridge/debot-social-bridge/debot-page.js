@@ -1,7 +1,7 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const BRIDGE_VERSION = '1.10.1';
+  const BRIDGE_VERSION = '1.10.2';
   const BRIDGE_SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
@@ -16,6 +16,7 @@
   const TIMELINE_CATCHUP_MAX_PAGES = 100;
   const TIMELINE_CATCHUP_MAX_POSTS = TIMELINE_PAGE_SIZE * TIMELINE_CATCHUP_MAX_PAGES;
   const WATCHLIST_POLL_INTERVAL_MS = 30_000;
+  const WALLET_LIBRARY_POLL_INTERVAL_MS = 60_000;
   const API_TIMEOUT_MS = 20_000;
   const DELIVERY_TIMEOUT_MS = 2_000;
   const DELIVERY_RETRY_BASE_MS = 2_000;
@@ -56,6 +57,7 @@
   const analysisQueue = [];
   const analysisKeys = new Set();
   let watchlistInFlight = null;
+  let walletLibraryInFlight = null;
   let watchlistFetchGeneration = 0;
   let primaryFollowUpRequested = false;
   let timelineCatchUpRequired = true;
@@ -2434,6 +2436,59 @@
     throw new Error(`Unsupported command: ${command.type}`);
   }
 
+  function trackedWalletAddress(item) {
+    return String(item?.wallet || item?.wallet_address || item?.address || item?.walletAddress || '')
+      .trim().toLowerCase();
+  }
+
+  function trackedWalletNote(item) {
+    return String(item?.remark || item?.alias || item?.wallet_remark || item?.note || '').trim().slice(0, 500);
+  }
+
+  function trackedWalletRows(response) {
+    if (Array.isArray(response)) return response;
+    for (const key of ['wallets', 'list', 'rows', 'items']) {
+      if (Array.isArray(response?.[key])) return response[key];
+    }
+    return [];
+  }
+
+  async function refreshWalletLibrary() {
+    if (walletLibraryInFlight) return walletLibraryInFlight;
+    const operation = (async () => {
+      const wallets = new Map();
+      const seenCursors = new Set();
+      let next = '';
+      let complete = false;
+      for (let page = 0; page < 100; page += 1) {
+        const query = new URLSearchParams({ chain: 'bsc', next, is_solana: '0', filter: '{}' });
+        const response = await api(`wallet/track/list?${query}`);
+        for (const item of trackedWalletRows(response)) {
+          const address = trackedWalletAddress(item);
+          if (!/^0x[0-9a-f]{40}$/.test(address)) continue;
+          const note = trackedWalletNote(item);
+          const previous = wallets.get(address);
+          if (!previous || (!previous.note && note)) wallets.set(address, { address, note });
+        }
+        const cursor = String(response?.next || '');
+        if (!cursor) {
+          complete = true;
+          break;
+        }
+        if (seenCursors.has(cursor)) break;
+        seenCursors.add(cursor);
+        next = cursor;
+      }
+      if (!complete) throw new Error('DeBot wallet snapshot pagination was incomplete');
+      emit('wallet-library', { complete: true, wallets: [...wallets.values()] });
+      return wallets.size;
+    })().finally(() => {
+      walletLibraryInFlight = null;
+    });
+    walletLibraryInFlight = operation;
+    return operation;
+  }
+
   function socketChannelKey(value) {
     return String(value || '')
       .trim()
@@ -2852,6 +2907,8 @@
 
   void fallbackPoll();
   void refreshWatchlistIfNeeded();
+  void refreshWalletLibrary().catch(() => {});
   setInterval(() => requestPrimaryFollowUp(), PRIMARY_POLL_INTERVAL_MS);
   setInterval(() => void refreshWatchlistIfNeeded(), WATCHLIST_POLL_INTERVAL_MS);
+  setInterval(() => void refreshWalletLibrary().catch(() => {}), WALLET_LIBRARY_POLL_INTERVAL_MS);
 })();

@@ -195,6 +195,10 @@ window.addEventListener('message', (event) => {
     void sendToBackground('wallet-events', message.payload).catch(() => {});
     return;
   }
+  if (message.type === 'wallet-library') {
+    void sendToBackground('wallet-library', message.payload).catch(() => {});
+    return;
+  }
   if (message.type === 'heartbeat') {
     void forwardHeartbeat(message.payload);
     return;

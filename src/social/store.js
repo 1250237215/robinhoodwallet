@@ -1943,6 +1943,27 @@ export function createSocialStore(filename, { now = () => Date.now() } = {}) {
         };
       });
     },
+    recordRemoteDeBotWallet(address, note = '') {
+      const normalized = String(address || '').trim().toLowerCase();
+      if (!/^0x[0-9a-f]{40}$/.test(normalized)) throw new TypeError('Invalid DeBot wallet address');
+      const normalizedNote = String(note || '').trim().slice(0, 500);
+      const timestamp = now();
+      return transaction(db, () => {
+        const existing = db.prepare('SELECT * FROM debot_wallet_sync WHERE address = ?').get(normalized);
+        if (existing?.desired_state === 'removed') return deBotWalletSyncFromRow(existing);
+        db.prepare(`
+          INSERT INTO debot_wallet_sync(
+            address, note, desired_state, sync_status, last_error, last_synced_at, updated_at
+          ) VALUES (?, ?, 'active', 'synced', '', ?, ?)
+          ON CONFLICT(address) DO UPDATE SET note = excluded.note, desired_state = 'active',
+            sync_status = 'synced', last_error = '', last_synced_at = excluded.last_synced_at,
+            updated_at = excluded.updated_at
+        `).run(normalized, normalizedNote, timestamp, timestamp);
+        return deBotWalletSyncFromRow(
+          db.prepare('SELECT * FROM debot_wallet_sync WHERE address = ?').get(normalized)
+        );
+      });
+    },
     listDeBotWalletSync({ includeRemoved = true } = {}) {
       return db.prepare(`
         SELECT * FROM debot_wallet_sync

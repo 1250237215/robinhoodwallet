@@ -289,7 +289,7 @@ function timelineFailure(errorType) {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.10.1');
+  assert.equal(manifest.version, '1.10.2');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms', 'scripting']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -317,12 +317,15 @@ test('extension manifest, configuration and scripts are valid and narrowly scope
   assert.match(pageSource, /const TIMELINE_CATCHUP_PAGES_PER_POLL = 3/);
   assert.match(pageSource, /const TIMELINE_CATCHUP_MAX_PAGES = 100/);
   assert.match(pageSource, /const WATCHLIST_PAGE_SIZE = 500/);
+  assert.match(pageSource, /const WALLET_LIBRARY_POLL_INTERVAL_MS = 60_000/);
   assert.match(pageSource, /const WATCHLIST_MAX_PAGES = 10/);
   assert.match(pageSource, /const DELIVERY_TIMEOUT_MS = 2_000/);
   assert.match(pageSource, /await api\('wallet\/group\/list'\)/);
   assert.match(pageSource, /Number\(group\?\.type\) === 2/);
   assert.match(pageSource, /for \(const key of \['wallets', 'list', 'rows', 'items'\]\)/);
   assert.match(pageSource, /next,/);
+  assert.match(pageSource, /emit\('wallet-library', \{ complete: true, wallets:/);
+  assert.match(backgroundSource, /socialRequest\('\/bridge\/wallets\/snapshot'/);
   assert.doesNotMatch(pageSource, /group_ids: \[0\]/);
   assert.match(pageSource, /async function fetchPersonalTimelinePage\(configIds = \[\], cursor = ''\)/);
   assert.match(pageSource, /timeoutMs: PRIMARY_API_TIMEOUT_MS/);

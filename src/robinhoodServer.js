@@ -1025,10 +1025,66 @@ export async function startRobinhoodStandaloneServer(
   });
   const socialConfig = createSocialConfig(env, { fallbackDirectory: path.dirname(config.dataFile) });
   let monitor = null;
+  const importDeBotWalletSnapshot = (wallets) => {
+    const localByAddress = new Map(
+      (store.listWalletAnnotations?.() || []).map((wallet) => [String(wallet.address).toLowerCase(), wallet])
+    );
+    const syncByAddress = new Map(
+      (socialService?.listDeBotWalletSync?.({ includeRemoved: true }) || [])
+        .map((entry) => [String(entry.address).toLowerCase(), entry])
+    );
+    let imported = 0;
+    let notesAdded = 0;
+    let unchanged = 0;
+    let skippedRemoved = 0;
+    const seen = new Set();
+    for (const wallet of Array.isArray(wallets) ? wallets : []) {
+      const address = String(wallet?.address || '').trim().toLowerCase();
+      if (!/^0x[0-9a-f]{40}$/.test(address) || seen.has(address)) continue;
+      seen.add(address);
+      const syncEntry = syncByAddress.get(address);
+      if (syncEntry?.desiredState === 'removed') {
+        skippedRemoved += 1;
+        continue;
+      }
+      const note = String(wallet?.note || '').trim().slice(0, 500);
+      socialService.recordRemoteDeBotWallet(address, note);
+      const existing = localByAddress.get(address);
+      if (!existing) {
+        const added = store.upsertWalletAnnotation({
+          address,
+          alias: note,
+          aliasSource: note ? 'manual' : 'none',
+          note: '',
+          status: 'active',
+          monitorTier: 'watch'
+        });
+        localByAddress.set(address, added);
+        imported += 1;
+        continue;
+      }
+      if (existing.status === 'excluded') {
+        skippedRemoved += 1;
+        continue;
+      }
+      if (note && !String(existing.alias || '').trim() && !String(existing.note || '').trim()) {
+        store.upsertWalletAnnotation({
+          address,
+          alias: note,
+          aliasSource: 'manual'
+        });
+        notesAdded += 1;
+      } else {
+        unchanged += 1;
+      }
+    }
+    return { ok: true, received: seen.size, imported, notesAdded, unchanged, skippedRemoved };
+  };
   const socialService = createSocialService({
     config: socialConfig,
     fetchImpl,
     notifySocialContract: (payload) => monitor?.notifySocialContract?.(payload),
+    importDeBotWalletSnapshot,
     ingestDeBotWalletEvents: async (events) => {
       const response = await fetchImpl('http://127.0.0.1:18122/internal/debot-wallet-events', {
         method: 'POST',
@@ -1127,13 +1183,7 @@ export async function startRobinhoodStandaloneServer(
   });
   const reconcileConfirmedWalletsWithDeBot = () => {
     const annotations = store.listWalletAnnotations?.() || [];
-    const localByAddress = new Map(annotations.map((wallet) => [String(wallet.address).toLowerCase(), wallet]));
     for (const wallet of annotations) syncConfirmedWalletToDeBot(wallet);
-    for (const synced of socialService.listDeBotWalletSync({ includeRemoved: false })) {
-      if (!localByAddress.has(synced.address)) {
-        socialService.syncDeBotWallet({ address: synced.address, active: false });
-      }
-    }
   };
   reconcileConfirmedWalletsWithDeBot();
   const walletSyncTimer = setInterval(reconcileConfirmedWalletsWithDeBot, 60_000);

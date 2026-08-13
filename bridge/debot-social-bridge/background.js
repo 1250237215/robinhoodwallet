@@ -199,6 +199,12 @@ function safeWatchAccount(value) {
   };
 }
 
+function safeWalletLibraryEntry(value) {
+  const address = String(value?.address || '').trim().toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(address)) return null;
+  return { address, note: String(value?.note || '').trim().slice(0, 500) };
+}
+
 function safeHeartbeat(value) {
   const heartbeat = value && typeof value === 'object' ? value : {};
   return {
@@ -1049,6 +1055,15 @@ async function handleBridgePayload(message) {
     return queuePosts(message.payload?.posts);
   }
   if (message.type === 'wallet-events') return queueWalletEvents(message.payload?.events);
+  if (message.type === 'wallet-library') {
+    const wallets = Array.isArray(message.payload?.wallets)
+      ? message.payload.wallets.map(safeWalletLibraryEntry).filter(Boolean)
+      : [];
+    return socialRequest('/bridge/wallets/snapshot', {
+      method: 'POST',
+      body: { complete: message.payload?.complete === true, wallets: wallets.slice(0, 5_000) }
+    });
+  }
   if (message.type === 'watchlist') {
     const accounts = Array.isArray(message.payload?.accounts)
       ? message.payload.accounts.map(safeWatchAccount).filter((account) => account.handle)
@@ -1286,10 +1301,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!(await isManagedDeBotSender(sender))) {
         if (message.type === 'poll-commands') return { ok: true, commands: [], managed: false };
         if (message.type === 'poll-analysis-jobs') return { ok: true, jobs: [], managed: false };
-        if (['posts', 'analysis-result', 'wallet-events'].includes(message.type)) return { durable: false, managed: false };
+        if (['posts', 'analysis-result', 'wallet-events', 'wallet-library'].includes(message.type)) return { durable: false, managed: false };
         return { accepted: false, managed: false };
       }
-      if (['heartbeat', 'posts', 'watchlist', 'wallet-events'].includes(message.type)) {
+      if (['heartbeat', 'posts', 'watchlist', 'wallet-events', 'wallet-library'].includes(message.type)) {
         return handleBridgePayload(message);
       }
       if (message.type === 'poll-commands') {

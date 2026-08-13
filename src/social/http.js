@@ -673,6 +673,21 @@ export function createSocialApiHandler({
         return true;
       }
 
+      if (url.pathname === '/api/social/bridge/wallets/snapshot') {
+        method(req, ['POST']);
+        requireDevice(req, token);
+        const body = await readJson(req, 512 * 1024);
+        if (body.complete !== true || !Array.isArray(body.wallets) || body.wallets.length > 5_000) {
+          throw new SocialHttpError(
+            400,
+            'A complete wallet snapshot with at most 5000 wallets is required',
+            'INVALID_WALLET_SNAPSHOT'
+          );
+        }
+        sendJson(res, 200, await service.reconcileDeBotWalletSnapshot(body.wallets));
+        return true;
+      }
+
       if (url.pathname === '/api/social/bridge/commands') {
         method(req, ['GET']);
         requireDevice(req, token);
