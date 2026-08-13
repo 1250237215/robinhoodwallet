@@ -407,7 +407,8 @@ function isRpcPressureError(error) {
 
 function canFallbackFromTopicOr(error) {
   const message = errorMessage(error);
-  return Number(error?.code) === -32602 || /invalid.{0,30}topics?|topics?.{0,30}(?:array|limit|unsupported)/i.test(message);
+  return Number(error?.code) === -32602 ||
+    /invalid.{0,30}topics?|topics?.{0,30}(?:array|limit|unsupported)|(?:logs?|result).{0,30}limit exceeded/i.test(message);
 }
 
 function throwIfAborted(signal) {
