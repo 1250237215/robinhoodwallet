@@ -5560,94 +5560,6 @@ button.telegram-reply {
   flex: 1 1 auto;
 }
 
-.monitor-feed-status {
-  min-width: 0;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 5px;
-  margin-top: 7px;
-}
-
-.monitor-feed-status-item {
-  min-width: 0;
-  min-height: 24px;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 6px;
-  border: 1px solid #d6ded9;
-  border-radius: 4px;
-  background: #f7f9f8;
-  color: #526159;
-  font-size: 9px;
-  line-height: 1.2;
-}
-
-.monitor-feed-status-item strong,
-.monitor-feed-status-item b {
-  color: inherit;
-  font-size: 10px;
-}
-
-.monitor-feed-status-item > span:last-child {
-  min-width: 0;
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.monitor-feed-status-dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 7px;
-  border-radius: 50%;
-  background: #8a9890;
-  box-shadow: 0 0 0 2px rgba(138, 152, 144, 0.12);
-}
-
-.monitor-feed-status-item[data-state="ready"] {
-  border-color: #b8d8c4;
-  background: #f0f8f3;
-  color: #24613d;
-}
-
-.monitor-feed-status-item[data-state="ready"] .monitor-feed-status-dot {
-  background: #2f9b59;
-  box-shadow: 0 0 0 2px rgba(47, 155, 89, 0.14);
-}
-
-.monitor-feed-status-item[data-state="warning"] {
-  border-color: #e2cd98;
-  background: #fff9eb;
-  color: #775b17;
-}
-
-.monitor-feed-status-item[data-state="warning"] .monitor-feed-status-dot {
-  background: #d19b20;
-  box-shadow: 0 0 0 2px rgba(209, 155, 32, 0.15);
-}
-
-.monitor-feed-status-item[data-state="error"] {
-  border-color: #e4b2b2;
-  background: #fff3f3;
-  color: #9a3030;
-}
-
-.monitor-feed-status-item[data-state="error"] .monitor-feed-status-dot {
-  background: #d44b4b;
-  box-shadow: 0 0 0 2px rgba(212, 75, 75, 0.14);
-}
-
-.monitor-feed-status-item[data-state="loading"] .monitor-feed-status-dot {
-  animation: monitor-status-pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes monitor-status-pulse {
-  50% { opacity: 0.35; }
-}
-
 .monitor-chain-filter {
   min-width: 0;
   display: flex;
@@ -6736,14 +6648,6 @@ button.telegram-reply {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     order: 3;
-  }
-
-  .monitor-feed-status {
-    grid-column: 1 / -1;
-  }
-
-  .monitor-feed-status-item {
-    flex: 1 1 180px;
   }
 
   .monitor-chain-filter label {
