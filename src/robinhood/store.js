@@ -172,6 +172,8 @@ const BARK_LIBRARY_AUDIT_TABLE = `${BARK_LIBRARY_SCHEMA}.bark_test_audit`;
 const BARK_LIBRARY_METADATA_TABLE = `${BARK_LIBRARY_SCHEMA}.metadata`;
 const SHARED_BARK_SOUND_KEY = 'bark:sound';
 const SHARED_BARK_VOLUME_KEY = 'bark:volume';
+const SHARED_BARK_THRESHOLD_KEY = 'bark:cluster-threshold';
+const SHARED_BARK_WINDOW_SECONDS_KEY = 'bark:cluster-window-seconds';
 const BARK_LIBRARY_SOURCE_PREFIX = 'legacy_bark_source:';
 const BARK_LIBRARY_TOMBSTONE_PREFIX = 'bark_deleted_endpoint:';
 const BARK_LIBRARY_SOURCE_PRIORITY = Object.freeze({
@@ -182,9 +184,14 @@ const BARK_LIBRARY_SOURCE_PRIORITY = Object.freeze({
 });
 
 function sharedBarkMetadataKey(key) {
-  const match = String(key || '').trim().match(/(?:^|:)monitor:bark-(sound|volume)$/i);
-  if (!match) return null;
-  return match[1].toLowerCase() === 'sound' ? SHARED_BARK_SOUND_KEY : SHARED_BARK_VOLUME_KEY;
+  const normalized = String(key || '').trim();
+  const barkSetting = normalized.match(/(?:^|:)monitor:bark-(sound|volume)$/i)?.[1]?.toLowerCase();
+  if (barkSetting === 'sound') return SHARED_BARK_SOUND_KEY;
+  if (barkSetting === 'volume') return SHARED_BARK_VOLUME_KEY;
+  const clusterSetting = normalized.match(/(?:^|:)monitor:(threshold|window-seconds)$/i)?.[1]?.toLowerCase();
+  if (clusterSetting === 'threshold') return SHARED_BARK_THRESHOLD_KEY;
+  if (clusterSetting === 'window-seconds') return SHARED_BARK_WINDOW_SECONDS_KEY;
+  return null;
 }
 
 function barkEndpointFingerprint(value) {
@@ -539,6 +546,50 @@ function migrateLegacyBarkConfiguration(db, source) {
   }
 }
 
+function migrateLegacyBarkAlertSettings(db, source) {
+  const normalizedSource = String(source || '').trim().toLowerCase();
+  const sourcePriority = Number(BARK_LIBRARY_SOURCE_PRIORITY[normalizedSource] || 0);
+  const migrationKey = `legacy_bark_alert_settings:${normalizedSource}:v1`;
+  const selectMetadata = db.prepare(`SELECT value FROM ${BARK_LIBRARY_METADATA_TABLE} WHERE key = ?`);
+  if (selectMetadata.get(migrationKey)) return;
+  const upsertMetadata = db.prepare(`
+    INSERT OR REPLACE INTO ${BARK_LIBRARY_METADATA_TABLE}(key, value) VALUES (?, ?)
+  `);
+
+  function legacySetting(suffix, minimum, maximum) {
+    const keys = normalizedSource === 'solana'
+      ? [`solana:monitor:${suffix}`, `robinhood:monitor:${suffix}`]
+      : [`${normalizedSource}:monitor:${suffix}`, `robinhood:monitor:${suffix}`];
+    for (const key of [...new Set(keys)]) {
+      const raw = db.prepare('SELECT value FROM main.metadata WHERE key = ?').get(key)?.value;
+      const value = Number(raw);
+      if (Number.isInteger(value) && value >= minimum && value <= maximum) return String(value);
+    }
+    return null;
+  }
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const [canonicalKey, value] of [
+      [SHARED_BARK_THRESHOLD_KEY, legacySetting('threshold', 1, 1_000)],
+      [SHARED_BARK_WINDOW_SECONDS_KEY, legacySetting('window-seconds', 5, 3_600)]
+    ]) {
+      if (value === null) continue;
+      const sourceKey = `${BARK_LIBRARY_SOURCE_PREFIX}${canonicalKey}`;
+      const existingPriority = Number(selectMetadata.get(sourceKey)?.value || -1);
+      if (!selectMetadata.get(canonicalKey) || sourcePriority > existingPriority) {
+        upsertMetadata.run(canonicalKey, value);
+        upsertMetadata.run(sourceKey, String(sourcePriority));
+      }
+    }
+    upsertMetadata.run(migrationKey, new Date().toISOString());
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
 export function createRobinhoodStore(filename, {
   chainId = 'robinhood',
   chainLabel = 'Robinhood',
@@ -829,6 +880,7 @@ export function createRobinhoodStore(filename, {
     configureFileDatabase(db, BARK_LIBRARY_SCHEMA);
     ensureSharedBarkLibrary(db);
     migrateLegacyBarkConfiguration(db, normalizedChainId);
+    migrateLegacyBarkAlertSettings(db, normalizedChainId);
     barkTargetTable = BARK_LIBRARY_TABLE;
     barkAuditTable = BARK_LIBRARY_AUDIT_TABLE;
     barkMetadataTable = BARK_LIBRARY_METADATA_TABLE;

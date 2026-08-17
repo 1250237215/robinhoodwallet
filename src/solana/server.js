@@ -651,6 +651,20 @@ export class SolanaRuntimeMonitor {
   }
 
   #syncBarkSettings() {
+    this.settings.threshold = integerSetting(
+      this.store,
+      SETTINGS_KEYS.threshold,
+      this.settings.threshold,
+      1,
+      1_000
+    );
+    this.settings.windowSeconds = integerSetting(
+      this.store,
+      SETTINGS_KEYS.windowSeconds,
+      this.settings.windowSeconds,
+      5,
+      3_600
+    );
     this.settings.barkSound = stringSetting(
       this.store,
       SETTINGS_KEYS.barkSound,

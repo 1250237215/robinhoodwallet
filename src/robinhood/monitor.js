@@ -1611,6 +1611,14 @@ export class RobinhoodWalletMonitor {
   }
 
   #syncBarkSettings() {
+    this.settings.threshold = Math.max(
+      1,
+      Math.min(1_000, parseInteger(this.store.getMeta(MONITOR_THRESHOLD_KEY), this.settings.threshold))
+    );
+    this.settings.windowSeconds = Math.max(
+      5,
+      Math.min(3_600, parseInteger(this.store.getMeta(MONITOR_WINDOW_SECONDS_KEY), this.settings.windowSeconds))
+    );
     const sound = this.store.getMeta(MONITOR_BARK_SOUND_KEY);
     this.settings.barkSound = BARK_SOUNDS.has(sound) ? sound : 'alarm';
     this.settings.barkVolume = Math.max(

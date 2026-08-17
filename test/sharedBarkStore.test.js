@@ -50,6 +50,8 @@ function seedLegacyBark(filename, chainId, {
   updatedAt,
   sound,
   volume,
+  threshold = null,
+  windowSeconds = null,
   metadataPrefix = chainId
 }) {
   const store = openStore(filename, chainId);
@@ -62,6 +64,8 @@ function seedLegacyBark(filename, chainId, {
   });
   store.setMeta(`${metadataPrefix}:monitor:bark-sound`, sound);
   store.setMeta(`${metadataPrefix}:monitor:bark-volume`, String(volume));
+  if (threshold !== null) store.setMeta(`${metadataPrefix}:monitor:threshold`, String(threshold));
+  if (windowSeconds !== null) store.setMeta(`${metadataPrefix}:monitor:window-seconds`, String(windowSeconds));
   store.close();
 }
 
@@ -167,10 +171,15 @@ test('shares Bark targets and settings immediately across all chain stores', (t)
 
   robinhood.setMeta('robinhood:monitor:bark-sound', 'typewriters');
   robinhood.setMeta('robinhood:monitor:bark-volume', '7');
+  robinhood.setMeta('robinhood:monitor:threshold', '8');
+  robinhood.setMeta('robinhood:monitor:window-seconds', '75');
   assert.equal(base.getMeta('robinhood:monitor:bark-sound'), 'typewriters');
   assert.equal(bsc.getMeta('robinhood:monitor:bark-volume'), '7');
   assert.equal(solana.getMeta('solana:monitor:bark-sound'), 'typewriters');
   assert.equal(solana.getMeta('solana:monitor:bark-volume'), '7');
+  assert.equal(base.getMeta('base:monitor:threshold'), '8');
+  assert.equal(bsc.getMeta('bsc:monitor:window-seconds'), '75');
+  assert.equal(solana.getMeta('solana:monitor:threshold'), '8');
 
   base.setMonitorBarkFeatureState('fomo_ca', false);
   assert.equal(robinhood.listMonitorBarkFeatureStates().fomo_ca, false);
@@ -281,7 +290,9 @@ test('legacy migration resolves duplicates and id collisions deterministically i
     label: 'Robinhood wins equal timestamp',
     updatedAt: 300,
     sound: 'typewriters',
-    volume: 7
+    volume: 7,
+    threshold: 8,
+    windowSeconds: 60
   });
   seedLegacyBark(files.base, 'base', {
     endpoint: 'https://api.day.app/base_device_key',
@@ -289,6 +300,8 @@ test('legacy migration resolves duplicates and id collisions deterministically i
     updatedAt: 100,
     sound: 'chime',
     volume: 4,
+    threshold: 5,
+    windowSeconds: 60,
     metadataPrefix: 'robinhood'
   });
   seedLegacyBark(files.bsc, 'bsc', {
@@ -298,6 +311,8 @@ test('legacy migration resolves duplicates and id collisions deterministically i
     updatedAt: 300,
     sound: 'glass',
     volume: 5,
+    threshold: 5,
+    windowSeconds: 60,
     metadataPrefix: 'robinhood'
   });
   seedLegacyBark(files.solana, 'solana', {
@@ -305,7 +320,9 @@ test('legacy migration resolves duplicates and id collisions deterministically i
     label: 'Solana target with colliding legacy id',
     updatedAt: 200,
     sound: 'bell',
-    volume: 3
+    volume: 3,
+    threshold: 6,
+    windowSeconds: 120
   });
 
   const stores = [
@@ -327,6 +344,8 @@ test('legacy migration resolves duplicates and id collisions deterministically i
   for (const store of stores) {
     assert.equal(store.getMeta('robinhood:monitor:bark-sound'), 'typewriters');
     assert.equal(store.getMeta('solana:monitor:bark-volume'), '7');
+    assert.equal(store.getMeta('base:monitor:threshold'), '8');
+    assert.equal(store.getMeta('solana:monitor:window-seconds'), '60');
   }
 });
 
@@ -410,7 +429,7 @@ test('rejects Bark database paths that alias a chain or wallet database', (t) =>
   );
 });
 
-test('running monitors refresh shared Bark sound and volume without a restart', (t) => {
+test('running monitors refresh shared Bark alert settings without a restart', (t) => {
   const files = testFiles(t);
   const robinhoodStore = openStore(files.robinhood, 'robinhood', files.bark);
   const solanaStore = openStore(files.solana, 'solana', files.bark);
@@ -456,13 +475,17 @@ test('running monitors refresh shared Bark sound and volume without a restart', 
     solanaMonitor.close();
   });
 
-  robinhoodMonitor.updateSettings({ barkSound: 'chime', barkVolume: 9 });
+  robinhoodMonitor.updateSettings({ threshold: 8, windowSeconds: 75, barkSound: 'chime', barkVolume: 9 });
+  assert.equal(solanaMonitor.getSnapshot({ eventLimit: 0 }).settings.threshold, 8);
+  assert.equal(solanaMonitor.getSnapshot({ eventLimit: 0 }).settings.windowSeconds, 75);
   assert.equal(solanaMonitor.getSnapshot({ eventLimit: 0 }).settings.barkSound, 'chime');
   assert.equal(solanaMonitor.getSnapshot({ eventLimit: 0 }).settings.barkVolume, 9);
   solanaMonitor.testBarkTarget(11);
   assert.deepEqual(barkTestCalls.at(-1), { id: 11, sound: 'chime', volume: 9 });
 
-  solanaMonitor.updateSettings({ barkSound: 'glass', barkVolume: 4 });
+  solanaMonitor.updateSettings({ threshold: 9, windowSeconds: 90, barkSound: 'glass', barkVolume: 4 });
+  assert.equal(robinhoodMonitor.getSnapshot({ eventLimit: 0 }).settings.threshold, 9);
+  assert.equal(robinhoodMonitor.getSnapshot({ eventLimit: 0 }).settings.windowSeconds, 90);
   assert.equal(robinhoodMonitor.getSnapshot({ eventLimit: 0 }).settings.barkSound, 'glass');
   assert.equal(robinhoodMonitor.getSnapshot({ eventLimit: 0 }).settings.barkVolume, 4);
   robinhoodMonitor.testBarkTarget(12);
