@@ -289,7 +289,7 @@ function timelineFailure(errorType) {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.10.5');
+  assert.equal(manifest.version, '1.10.6');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms', 'scripting']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -591,7 +591,10 @@ test('extension options migrate a local token once without exposing or overwriti
     current: configured,
     loadLocalConfig: async () => {
       loadCalls += 1;
-      throw new Error('must not load');
+      return {
+        serverBase: configured.serverBase,
+        bridgeToken: 'test-only-local-token'
+      };
     },
     sendMessage: async () => {
       sendCalls += 1;
@@ -599,8 +602,26 @@ test('extension options migrate a local token once without exposing or overwriti
     }
   });
   assert.equal(unchanged, configured);
-  assert.equal(loadCalls, 0);
+  assert.equal(loadCalls, 1);
   assert.equal(sendCalls, 0);
+
+  let hostMigration = null;
+  const changedHost = await migrateLocalSettings({
+    current: configured,
+    loadLocalConfig: async () => ({
+      serverBase: 'https://new-radar.example/robinhood-radar/api/social',
+      bridgeToken: 'test-only-local-token'
+    }),
+    onPermissionRequired(value) {
+      hostMigration = value;
+    },
+    sendMessage: async () => {
+      throw new Error('host migration requires an explicit save');
+    }
+  });
+  assert.equal(changedHost.serverBase, 'https://new-radar.example/robinhood-radar/api/social');
+  assert.equal(changedHost.bridgeToken, 'configured');
+  assert.equal(hostMigration.bridgeToken, 'test-only-local-token');
 
   const secret = 'test-only-local-token';
   const migrated = await migrateLocalSettings({

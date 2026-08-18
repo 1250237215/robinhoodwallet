@@ -257,6 +257,7 @@ test('remote installer backs up, checks, deploys, and validates all seven databa
   assert.match(installer, /monitor\.chain !== expectedChain/);
   assert.match(installer, /SOLANA_MONITOR_READY_TIMEOUT_SECONDS:-120/);
   assert.match(installer, /DEPLOY_MONITOR_READY_TIMEOUT_SECONDS:-30/);
+  assert.match(installer, /DEPLOY_PUBLIC_READY_TIMEOUT_SECONDS:-120/);
   assert.match(installer, /monitor_ready_deadline=\$\(\(SECONDS \+ chain_monitor_ready_timeout_seconds\)\)/);
   assert.match(installer, /while \(\( SECONDS < monitor_ready_deadline \)\)/);
   assert.match(installer, /--connect-timeout "\$monitor_connect_timeout_seconds"/);
@@ -268,6 +269,8 @@ test('remote installer backs up, checks, deploys, and validates all seven databa
   assert.match(installer, /caddy validate --config/);
   assert.match(installer, /systemctl reload caddy\.service/);
   assert.match(installer, /RADAR_PUBLIC_BASE_URL/);
+  assert.match(installer, /systemctl start robinhood-radar\.service[\s\S]*api\/robinhood\/monitor[\s\S]*\[\[ "\$service" == "robinhood-radar" \]\] && continue/);
+  assert.match(installer, /fetch_public_endpoint[\s\S]*public_ready_timeout_seconds[\s\S]*sleep 2/);
   assert.match(installer, /ALLOW_SOLANA_DEGRADED/);
   assert.match(installer, /Solana real-time provider is not ready/);
   assert.doesNotMatch(installer, /DROP TABLE IF EXISTS wallet_token_performance/);
@@ -284,7 +287,7 @@ test('remote installer gives Solana a conservative readiness window and rejects 
     'bash',
     [
       '-c',
-      'source "$1"; printf "%s %s %s %s\\n" "$health_connect_timeout_seconds" "$health_request_timeout_seconds" "$monitor_ready_timeout_seconds" "$solana_monitor_ready_timeout_seconds"',
+      'source "$1"; printf "%s %s %s %s %s\\n" "$health_connect_timeout_seconds" "$health_request_timeout_seconds" "$monitor_ready_timeout_seconds" "$solana_monitor_ready_timeout_seconds" "$public_ready_timeout_seconds"',
       'installer-test',
       installerPath
     ],
@@ -296,12 +299,13 @@ test('remote installer gives Solana a conservative readiness window and rejects 
         DEPLOY_HEALTH_CONNECT_TIMEOUT_SECONDS: '',
         DEPLOY_HEALTH_REQUEST_TIMEOUT_SECONDS: '',
         DEPLOY_MONITOR_READY_TIMEOUT_SECONDS: '',
-        SOLANA_MONITOR_READY_TIMEOUT_SECONDS: ''
+        SOLANA_MONITOR_READY_TIMEOUT_SECONDS: '',
+        DEPLOY_PUBLIC_READY_TIMEOUT_SECONDS: ''
       }
     }
   );
   assert.equal(defaultSettings.status, 0, defaultSettings.stderr);
-  const [connectTimeout, requestTimeout, monitorTimeout, solanaTimeout] = defaultSettings.stdout
+  const [connectTimeout, requestTimeout, monitorTimeout, solanaTimeout, publicTimeout] = defaultSettings.stdout
     .trim()
     .split(/\s+/)
     .map(Number);
@@ -309,12 +313,14 @@ test('remote installer gives Solana a conservative readiness window and rejects 
   assert.equal(requestTimeout, 5);
   assert.equal(monitorTimeout, 30);
   assert.ok(solanaTimeout >= 90, `Solana readiness window was only ${solanaTimeout}s`);
+  assert.equal(publicTimeout, 120);
 
   for (const [name, value] of [
     ['DEPLOY_HEALTH_CONNECT_TIMEOUT_SECONDS', '0'],
     ['DEPLOY_HEALTH_REQUEST_TIMEOUT_SECONDS', 'slow'],
     ['DEPLOY_MONITOR_READY_TIMEOUT_SECONDS', '-1'],
-    ['SOLANA_MONITOR_READY_TIMEOUT_SECONDS', '1.5']
+    ['SOLANA_MONITOR_READY_TIMEOUT_SECONDS', '1.5'],
+    ['DEPLOY_PUBLIC_READY_TIMEOUT_SECONDS', '0']
   ]) {
     const invalid = spawnSync('bash', ['-c', 'source "$1"', 'installer-test', installerPath], {
       encoding: 'utf8',

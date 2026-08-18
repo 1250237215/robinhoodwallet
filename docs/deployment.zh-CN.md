@@ -490,6 +490,9 @@ RADAR_PUBLIC_BASE_URL=https://radar.example.com/robinhood-radar \
 `DEPLOY_HEALTH_REQUEST_TIMEOUT_SECONDS`调整。Robinhood、Base、BSC 的 monitor 默认
 等待 `30`秒，可通过 `DEPLOY_MONITOR_READY_TIMEOUT_SECONDS`调整。上述值都必须是
 正整数秒；不要用延长窗口掩盖无效的 Helius Key、错误的 Webhook URL 或网络故障。
+首次签发 HTTPS 证书时，公网健康检查会自动重试最多 `120`秒，可通过
+`DEPLOY_PUBLIC_READY_TIMEOUT_SECONDS`调整。安装器还会先等待 Robinhood 初始化共享
+Bark 数据库，再启动其他链，避免全新主机上的首次并行初始化冲突。
 
 暂时没有 Helius 的明确降级安装：
 
@@ -506,7 +509,7 @@ RADAR_PUBLIC_BASE_URL=https://radar.example.com/robinhood-radar \
 2. 对七个 SQLite 数据库执行 WAL checkpoint、事务一致备份和
    `PRAGMA quick_check`。
 3. 备份现有 bundle、网页、systemd unit、版本标记和可选 Caddy 配置。
-4. 安装新文件并启动四项服务。
+4. 安装新文件，先启动 Robinhood 并完成共享 Bark 初始化，再启动其余服务。
 5. 检查四个 dashboard、四个实时 monitor、Social API 和七个数据库，并确认四个
    monitor 返回完全相同的 Bark 设备、提示音和响度。
 6. 失败时自动恢复上一个程序、数据库、网页、服务状态和本次修改的 Caddy。

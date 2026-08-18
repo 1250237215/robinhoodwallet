@@ -14,6 +14,7 @@ readonly health_connect_timeout_seconds="${DEPLOY_HEALTH_CONNECT_TIMEOUT_SECONDS
 readonly health_request_timeout_seconds="${DEPLOY_HEALTH_REQUEST_TIMEOUT_SECONDS:-5}"
 readonly monitor_ready_timeout_seconds="${DEPLOY_MONITOR_READY_TIMEOUT_SECONDS:-30}"
 readonly solana_monitor_ready_timeout_seconds="${SOLANA_MONITOR_READY_TIMEOUT_SECONDS:-120}"
+readonly public_ready_timeout_seconds="${DEPLOY_PUBLIC_READY_TIMEOUT_SECONDS:-120}"
 readonly services=("robinhood-radar" "base-radar" "bsc-radar" "solana-radar" "feishu-monitor")
 readonly chains=("robinhood" "base" "bsc" "solana")
 readonly telegram_service="telegram-viewer"
@@ -35,7 +36,8 @@ for timeout_setting in \
   "DEPLOY_HEALTH_CONNECT_TIMEOUT_SECONDS:$health_connect_timeout_seconds" \
   "DEPLOY_HEALTH_REQUEST_TIMEOUT_SECONDS:$health_request_timeout_seconds" \
   "DEPLOY_MONITOR_READY_TIMEOUT_SECONDS:$monitor_ready_timeout_seconds" \
-  "SOLANA_MONITOR_READY_TIMEOUT_SECONDS:$solana_monitor_ready_timeout_seconds"; do
+  "SOLANA_MONITOR_READY_TIMEOUT_SECONDS:$solana_monitor_ready_timeout_seconds" \
+  "DEPLOY_PUBLIC_READY_TIMEOUT_SECONDS:$public_ready_timeout_seconds"; do
   timeout_name="${timeout_setting%%:*}"
   timeout_value="${timeout_setting#*:}"
   [[ "$timeout_value" =~ ^[1-9][0-9]*$ ]] || {
@@ -537,7 +539,32 @@ mv "$app_dir/public" "$app_dir/public.previous"
 mv "$app_dir/public.new" "$app_dir/public"
 
 systemctl daemon-reload
+systemctl start robinhood-radar.service
+
+# Robinhood owns the shared Bark schema. On a fresh host, wait until its API is
+# listening before starting the other chain processes against the same file.
+robinhood_startup_file="$(mktemp)"
+robinhood_startup_ready=0
+for attempt in $(seq 1 30); do
+  if curl --fail --silent --show-error \
+    --connect-timeout "$health_connect_timeout_seconds" \
+    --max-time "$health_request_timeout_seconds" \
+    "http://127.0.0.1:18118/api/robinhood/monitor" \
+    > "$robinhood_startup_file"; then
+    robinhood_startup_ready=1
+    break
+  fi
+  (( attempt < 30 )) || break
+  sleep 1
+done
+rm -f "$robinhood_startup_file"
+if [[ "$robinhood_startup_ready" != "1" ]]; then
+  echo "Robinhood did not initialize the shared Bark store." >&2
+  exit 1
+fi
+
 for service in "${services[@]}"; do
+  [[ "$service" == "robinhood-radar" ]] && continue
   systemctl start "$service.service"
 done
 
@@ -808,11 +835,35 @@ if [[ -n "${RADAR_PUBLIC_BASE_URL:-}" ]]; then
     }
     public_curl_options+=(--user "$RADAR_PUBLIC_USERNAME:$RADAR_PUBLIC_PASSWORD")
   fi
+
+  fetch_public_endpoint() {
+    local url="$1"
+    local destination="$2"
+    local error_file
+    local ready_deadline
+    error_file="$(mktemp)"
+    ready_deadline=$((SECONDS + public_ready_timeout_seconds))
+
+    while (( SECONDS < ready_deadline )); do
+      if curl "${public_curl_options[@]}" "$url" > "$destination" 2> "$error_file"; then
+        rm -f "$error_file"
+        return 0
+      fi
+      (( SECONDS < ready_deadline )) || break
+      sleep 2
+    done
+
+    echo "Public endpoint did not become ready within ${public_ready_timeout_seconds}s: $url" >&2
+    cat "$error_file" >&2
+    rm -f "$error_file"
+    return 1
+  }
+
   for chain in "${chains[@]}"; do
     public_file="$(mktemp)"
-    curl "${public_curl_options[@]}" \
+    fetch_public_endpoint \
       "${RADAR_PUBLIC_BASE_URL%/}/api/$chain/dashboard?tab=all" \
-      > "$public_file"
+      "$public_file"
     node --input-type=module -e '
       import fs from "node:fs";
       const expectedChain = process.argv[2];
@@ -823,9 +874,9 @@ if [[ -n "${RADAR_PUBLIC_BASE_URL:-}" ]]; then
   done
 
   public_social_file="$(mktemp)"
-  curl "${public_curl_options[@]}" \
+  fetch_public_endpoint \
     "${RADAR_PUBLIC_BASE_URL%/}/api/social?postLimit=1" \
-    > "$public_social_file"
+    "$public_social_file"
   node --input-type=module -e '
     import fs from "node:fs";
     const payload = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));

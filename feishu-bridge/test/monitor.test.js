@@ -124,6 +124,21 @@ test('normalizes Feishu raw millisecond timestamps without a twelve-hour drift',
   assert.match(message.message_app_link, /position=123/);
 });
 
+test('normalizes standalone Feishu image messages into downloadable media markers', () => {
+  const message = normalizeRawMessage({
+    message_id: 'om_image',
+    create_time: '1786326730082',
+    body: { content: JSON.stringify({ image_key: 'img_v3_0214m_example' }) },
+    msg_type: 'image'
+  });
+  assert.equal(message.content, '[Image: img_v3_0214m_example]');
+
+  const person = { id: 'one', name: 'One', source: 'test', matches: () => true, clean: String };
+  const [normalized] = extractMessages([person], [message]).get('one');
+  assert.equal(normalized.content, '');
+  assert.deepEqual(normalized.media, [{ type: 'image', resourceKey: 'img_v3_0214m_example' }]);
+});
+
 test('PeopleMonitor prevents overlapping refreshes', async () => {
   let resolvePage;
   let calls = 0;

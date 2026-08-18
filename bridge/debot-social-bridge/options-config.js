@@ -5,8 +5,6 @@ export async function migrateLocalSettings({
   canMigrate = async () => true,
   onPermissionRequired = () => {}
 }) {
-  if (current?.bridgeToken) return current;
-
   let localConfig;
   try {
     localConfig = await loadLocalConfig();
@@ -18,6 +16,11 @@ export async function migrateLocalSettings({
   if (!bridgeToken) return current;
 
   const serverBase = String(localConfig?.serverBase || '').trim();
+  if (current?.bridgeToken) {
+    if (!serverBase || serverBase === String(current.serverBase || '').trim()) return current;
+    onPermissionRequired({ serverBase, bridgeToken });
+    return { ...current, serverBase };
+  }
   if (!(await canMigrate(serverBase))) {
     onPermissionRequired({ serverBase, bridgeToken });
     return { ...current, ...(serverBase ? { serverBase } : {}) };

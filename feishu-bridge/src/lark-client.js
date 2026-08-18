@@ -16,7 +16,7 @@ export class LarkCliError extends Error {
 function contentText(value) {
   if (Array.isArray(value)) return value.map(contentText).filter(Boolean).join('');
   if (!value || typeof value !== 'object') return String(value || '');
-  if (value.tag === 'img' && value.image_key) return `[Image: ${value.image_key}]`;
+  if (value.image_key) return `[Image: ${value.image_key}]`;
   if (value.tag === 'at') return `@${value.user_name || value.user_id || ''}`;
   if (value.tag === 'text' || value.tag === 'a') return String(value.text || value.href || '');
   return contentText(value.text || value.content || value.content_v2 || '');
