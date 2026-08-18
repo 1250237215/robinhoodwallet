@@ -3848,6 +3848,14 @@ async function runBarkAction(button) {
   try {
     let payload;
     if (action === 'test') {
+      const barkSound = elements.monitorBarkSoundSelect.value;
+      const barkVolume = clampBarkVolume(elements.monitorBarkVolume.value, state.monitorBarkVolume);
+      const settingsPayload = await fetchChainJson(context, '/monitor/settings', {
+        method: 'PATCH',
+        body: JSON.stringify({ barkSound, barkVolume })
+      });
+      if (!chainRequestIsCurrent(context)) return;
+      applyMonitorPayload(settingsPayload, { initial: true });
       payload = await fetchChainJson(context, `/monitor/bark/${id}/test`, { method: 'POST' });
       if (!chainRequestIsCurrent(context)) return;
       showToast(`测试推送已发送至 ${target.label}`);
@@ -3897,6 +3905,14 @@ async function testEnabledBarkTargetsFromMobile() {
   for (const target of targets) state.monitorBarkBusy.add(target.id);
   renderMonitorBarkTargets();
   try {
+    const barkSound = elements.monitorBarkSoundSelect.value;
+    const barkVolume = clampBarkVolume(elements.monitorBarkVolume.value, state.monitorBarkVolume);
+    const settingsPayload = await fetchChainJson(context, '/monitor/settings', {
+      method: 'PATCH',
+      body: JSON.stringify({ barkSound, barkVolume })
+    });
+    if (!chainRequestIsCurrent(context)) return;
+    applyMonitorPayload(settingsPayload, { initial: true });
     const results = await Promise.allSettled(targets.map((target) => fetchChainJson(
       context,
       `/monitor/bark/${target.id}/test`,

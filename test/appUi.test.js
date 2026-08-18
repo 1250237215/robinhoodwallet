@@ -2682,6 +2682,14 @@ test('Bark alert sound and critical volume are independent from browser sound', 
   assert.match(indexHtml, /id="monitor-bark-sound-select"[\s\S]*?<option value="alarm">警报<\/option>[\s\S]*?<option value="chime">风铃<\/option>/);
   assert.match(indexHtml, /id="monitor-bark-volume"[^>]*type="range"[^>]*min="0"[^>]*max="10"/);
   assert.match(appJs, /JSON\.stringify\(\{ barkSound, barkVolume \}\)/);
+  assert.match(
+    appSourceBetween('async function runBarkAction(button)', 'async function testEnabledBarkTargetsFromMobile()'),
+    /fetchChainJson\(context, '\/monitor\/settings',[\s\S]*JSON\.stringify\(\{ barkSound, barkVolume \}\)[\s\S]*\/monitor\/bark\/\$\{id\}\/test/
+  );
+  assert.match(
+    appSourceBetween('async function testEnabledBarkTargetsFromMobile()', 'async function toggleBarkFeature(input)'),
+    /fetchChainJson\(context, '\/monitor\/settings',[\s\S]*JSON\.stringify\(\{ barkSound, barkVolume \}\)[\s\S]*\/monitor\/bark\/\$\{target\.id\}\/test/
+  );
   assert.match(appJs, /state\.monitorBarkSound = String\(settings\.barkSound/);
   assert.match(appJs, /Math\.min\(10, Math\.max\(0, Math\.round\(number\)\)\)/);
 });
