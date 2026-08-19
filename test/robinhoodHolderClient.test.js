@@ -158,6 +158,72 @@ test('does not retry a non-retryable Blockscout client error', async () => {
   assert.equal(tokenAttempts, 1);
 });
 
+test('uses the signed-in DeBot Holder profile before Blockscout for Robinhood', async () => {
+  const calls = [];
+  const client = new RobinhoodHolderClient({
+    baseUrl: 'https://blockscout.test/api/v2',
+    debotClient: {
+      async fetchTokenHolderProfile(address, options) {
+        calls.push(['debot', address, options.limit]);
+        return {
+          chain: 'robinhood',
+          token,
+          total: 2,
+          list: [
+            { address: walletA, position: '100', balance: '25' },
+            { address: walletB, position: '50', balance: '10' }
+          ]
+        };
+      }
+    },
+    fetchImpl: async () => {
+      calls.push(['blockscout']);
+      throw new Error('Blockscout must not be contacted when DeBot succeeds');
+    }
+  });
+
+  const result = await client.fetchTopHolders(token, { limit: 150 });
+
+  assert.deepEqual(calls, [['debot', token, 100]]);
+  assert.equal(result.source, 'debot_token_holder_profile');
+  assert.deepEqual(result.holders.map((holder) => holder.address), [walletA, walletB]);
+  assert.equal(result.holders[0].holdingTokenAmount, 100);
+  assert.equal(result.holders[0].holdingValueUsd, 25);
+  assert.equal(result.complete, true);
+});
+
+test('falls back to Blockscout when the DeBot Holder profile is unavailable', async () => {
+  const calls = [];
+  const client = new RobinhoodHolderClient({
+    baseUrl: 'https://blockscout.test/api/v2',
+    debotClient: {
+      async fetchTokenHolderProfile() {
+        calls.push('debot');
+        throw new Error('bridge unavailable');
+      }
+    },
+    fetchImpl: async (input) => {
+      const url = new URL(input);
+      calls.push(url.pathname);
+      if (!url.pathname.endsWith('/holders')) {
+        return Response.json({
+          decimals: '18',
+          exchange_rate: '1',
+          total_supply: (1_000n * 10n ** 18n).toString()
+        });
+      }
+      return Response.json({ items: [rawHolder(walletA, 100)], next_page_params: null });
+    }
+  });
+
+  const result = await client.fetchTopHolders(token, { limit: 1 });
+
+  assert.equal(calls[0], 'debot');
+  assert.equal(calls.some((path) => path.endsWith('/holders')), true);
+  assert.equal(result.source, 'blockscout');
+  assert.deepEqual(result.holders.map((holder) => holder.address), [walletA]);
+});
+
 test('fetches resumable token and wallet ERC-20 transfer pages', async () => {
   const requests = [];
   const transfer = {

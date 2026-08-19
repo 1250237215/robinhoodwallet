@@ -289,7 +289,7 @@ function timelineFailure(errorType) {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.10.6');
+  assert.equal(manifest.version, '1.10.7');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms', 'scripting']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -1011,7 +1011,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.requestId === 'page-personal-probe'
       && message.payload.ok === true)));
   const personalHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.equal(personalHeartbeat.payload.version, '1.10.5');
+  assert.equal(personalHeartbeat.payload.version, '1.10.7');
   assert.deepEqual(Array.from(personalHeartbeat.payload.capabilities), [
     'posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1', 'debot-token-holders-v1'
   ]);
@@ -1968,7 +1968,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const recoveredHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
   assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
   assert.equal(Object.hasOwn(recoveredHeartbeat.payload, 'error'), false);
-  assert.equal(recoveredHeartbeat.payload.version, '1.10.5');
+  assert.equal(recoveredHeartbeat.payload.version, '1.10.7');
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.accountCount >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.rawRows >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.normalizedRows >= 0, true);
@@ -3214,11 +3214,12 @@ test('DeBot page bridge executes bounded BSC token, wallet and Holder jobs', asy
       return jsonResponse({ chain: 'bsc', token, wallet, realized_profit: '88.5', profit_rate: '2.5' });
     }
     if (requestUrl.startsWith('/api/token/profiler/tokenHolderList?')) {
+      const requestChain = new URL(requestUrl, 'https://debot.ai').searchParams.get('chain') || 'bsc';
       const raw = holderMode === 'chain-mismatch'
         ? { chain: 'robinhood', token, list: holderRows }
         : holderMode === 'token-mismatch'
           ? { chain: 'bsc', token: otherToken, list: holderRows }
-          : { chain: 'bsc', token, total: 250, list: holderRows };
+          : { chain: requestChain, token, total: 250, list: holderRows };
       return jsonResponse(raw);
     }
     throw new Error(`Unexpected DeBot endpoint: ${requestUrl}`);
@@ -3311,8 +3312,9 @@ test('DeBot page bridge executes bounded BSC token, wallet and Holder jobs', asy
   assert.equal(resultFor(405).payload.success, false);
   assert.equal(resultFor(405).payload.errorType, 'DEBOT');
 
+  holderMode = 'ok';
   const analysisCallsBeforeInvalidJobs = calls.filter((call) => !call.url.startsWith('/api/social/')).length;
-  dispatch(406, 'debot.token_holders.v1', { chain: 'robinhood', token });
+  dispatch(406, 'debot.token_holders.v1', { chain: 'robinhood', token, pageSize: 50 });
   dispatch(407, 'debot.token_holders.v1', { chain: 'bsc', token, pageSize: 101 });
   dispatch(408, 'debot.token_holders.v1', { chain: 'bsc', token, unexpected: true });
   await eventually(() => {
@@ -3320,10 +3322,12 @@ test('DeBot page bridge executes bounded BSC token, wallet and Holder jobs', asy
     assert.ok(resultFor(407));
     assert.ok(resultFor(408));
   });
-  assert.equal([406, 407, 408].every((id) => resultFor(id).payload.errorType === 'INVALID_JOB'), true);
+  assert.equal(resultFor(406).payload.success, true);
+  assert.equal(resultFor(407).payload.errorType, 'INVALID_JOB');
+  assert.equal(resultFor(408).payload.errorType, 'INVALID_JOB');
   assert.equal(
     calls.filter((call) => !call.url.startsWith('/api/social/')).length,
-    analysisCallsBeforeInvalidJobs
+    analysisCallsBeforeInvalidJobs + 1
   );
 });
 

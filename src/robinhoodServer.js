@@ -1168,7 +1168,8 @@ export async function startRobinhoodStandaloneServer(
   const activeHolderClient = new RobinhoodHolderClient({
     baseUrl: config.blockscoutApiUrl,
     timeoutMs: config.requestTimeoutMs,
-    fetchImpl
+    fetchImpl,
+    debotClient: activeDebotClient
   });
   const activeTokenRiskClient = riskClient || new RobinhoodTokenRiskClient({
     debotClient: activeDebotClient,

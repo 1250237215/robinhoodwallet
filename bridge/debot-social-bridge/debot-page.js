@@ -1,7 +1,7 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const BRIDGE_VERSION = '1.10.5';
+  const BRIDGE_VERSION = '1.10.7';
   const BRIDGE_SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
@@ -1933,7 +1933,6 @@
       throw new AnalysisJobError('INVALID_JOB');
     }
     if (job.type === 'debot.token_holders.v1') {
-      if (chain !== 'bsc') throw new AnalysisJobError('INVALID_JOB');
       const requestedPageSize = job.payload.pageSize ?? 100;
       const pageSize = Number(requestedPageSize);
       if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) {

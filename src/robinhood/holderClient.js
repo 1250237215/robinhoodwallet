@@ -165,22 +165,85 @@ export function normalizeBlockscoutHolder(raw, {
   };
 }
 
+function normalizeDebotHolder(raw, rank, snapshotAt) {
+  const address = normalizeAddress(
+    raw?.address || raw?.wallet || raw?.wallet_address || raw?.walletAddress || raw?.holder || raw?.owner_address
+  );
+  const descriptors = [raw?.type, raw?.wallet_type, raw?.label, raw?.name, ...(Array.isArray(raw?.tags) ? raw.tags : [])]
+    .filter(Boolean).join(' ').toLowerCase();
+  const invalid = !ADDRESS_PATTERN.test(address);
+  const dead = address === '0x0000000000000000000000000000000000000000' ||
+    address === '0x000000000000000000000000000000000000dead';
+  const contract = raw?.is_contract === true || raw?.isContract === true || /contract|router|pair|pool|liquidity|lp|factory|bridge|treasury|locker|vesting/.test(descriptors);
+  const exclusionReasons = [
+    invalid ? 'invalid_address' : '',
+    dead ? 'burn_address' : '',
+    contract ? 'contract_holder' : ''
+  ].filter(Boolean);
+  return {
+    address,
+    holderRank: Number(raw?.rank ?? raw?.holder_rank ?? rank) || null,
+    holdingTokenAmount: asNumber(raw?.holding_amount ?? raw?.holding_token_amount ?? raw?.position),
+    holdingSharePercent: asNumber(raw?.holding_share_percent ?? raw?.holding_percent ?? raw?.position_percent),
+    holdingValueUsd: asNumber(raw?.holding_value_usd ?? raw?.balance_usd ?? raw?.balance),
+    holderSnapshotAt: snapshotAt,
+    holderSource: 'debot_token_holder_profile',
+    isContract: contract,
+    proxyType: null,
+    contractName: String(raw?.name || '') || null,
+    verifiedContract: false,
+    excluded: exclusionReasons.length > 0,
+    exclusionReasons
+  };
+}
+
 export class RobinhoodHolderClient {
   constructor({
     baseUrl = DEFAULT_BASE_URL,
     timeoutMs = 20_000,
-    fetchImpl = globalThis.fetch
+    fetchImpl = globalThis.fetch,
+    debotClient = null
   } = {}) {
     if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl is required');
     this.baseUrl = String(baseUrl || DEFAULT_BASE_URL).replace(/\/$/, '');
     this.timeoutMs = Math.max(1_000, Number(timeoutMs) || 20_000);
     this.fetchImpl = fetchImpl;
+    this.debotClient = debotClient;
   }
 
   async fetchTopHolders(tokenAddress, { limit = 150, signal } = {}) {
     const address = normalizeAddress(tokenAddress);
     if (!ADDRESS_PATTERN.test(address)) throw new TypeError('Invalid Robinhood token address');
     const target = Math.max(1, Math.min(1_000, Math.floor(Number(limit) || 150)));
+    if (typeof this.debotClient?.fetchTokenHolderProfile === 'function') {
+      try {
+        const raw = await this.debotClient.fetchTokenHolderProfile(address, { limit: Math.min(target, 100), signal });
+        const rows = [raw?.list, raw?.holders, raw?.wallets, raw?.holder_list, raw?.holderList]
+          .find((value) => Array.isArray(value)) || [];
+        const snapshotAt = new Date().toISOString();
+        const allHolders = rows.map((row, index) => normalizeDebotHolder(row, index + 1, snapshotAt));
+        const holders = allHolders.filter((holder) => holder.exclusionReasons.length === 0);
+        if (!holders.length) throw new Error('DeBot Holder profile returned no valid wallet rows');
+        const total = Math.max(rows.length, Number(raw?.total ?? raw?.count ?? raw?.holders) || rows.length);
+        const partial = rows.length >= Math.min(target, 100) || raw?.has_more === true || raw?.hasMore === true || total > rows.length;
+        return {
+          token: { address, holders: total },
+          holders,
+          requested: Math.min(target, 100),
+          sourceRows: rows.length,
+          excludedRows: allHolders.length - holders.length,
+          reachedEnd: !partial,
+          partial,
+          denominatorPartial: partial,
+          complete: !partial,
+          snapshotAt,
+          source: 'debot_token_holder_profile'
+        };
+      } catch (error) {
+        if (signal?.aborted || error?.name === 'AbortError') throw error;
+        // Keep Blockscout as a compatibility fallback if the bridge is unavailable.
+      }
+    }
     const tokenUrl = `${this.baseUrl}/tokens/${encodeURIComponent(address)}`;
     const holdersUrl = `${tokenUrl}/holders`;
     const [token, firstPage] = await Promise.all([

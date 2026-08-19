@@ -2,6 +2,7 @@ const DEBOT_ORIGIN = 'https://debot.ai';
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 const TOKEN_DETAIL_PATH = '/api/dashboard/token/detail';
 const WALLET_TOKEN_ANALYSIS_PATH = '/api/dex/profit/wallet_token_analysis';
+const TOKEN_HOLDER_PROFILE_PATH = '/api/token/profiler/tokenHolderList';
 
 function requestUrl(input) {
   if (input instanceof URL) return input;
@@ -51,6 +52,16 @@ export function debotBridgeRequest(input, init = {}) {
       payload: { chain, token, wallet },
       cacheTtlMs: 30_000
     };
+  }
+  const pageSize = Number(url.searchParams.get('page_size'));
+  if (
+    url.pathname === TOKEN_HOLDER_PROFILE_PATH &&
+    hasOnlyParameters(url, ['chain', 'token', 'page_size', 'sort_field', 'sort_order']) &&
+    url.searchParams.get('sort_field') === 'position' &&
+    url.searchParams.get('sort_order') === 'desc' &&
+    Number.isInteger(pageSize) && pageSize >= 1 && pageSize <= 100
+  ) {
+    return { type: 'debot.token_holders.v1', payload: { chain, token, pageSize }, cacheTtlMs: 30_000 };
   }
   return null;
 }
