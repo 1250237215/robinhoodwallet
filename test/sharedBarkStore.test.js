@@ -143,7 +143,7 @@ test('stores Bark test audits in the shared database without exposing them throu
   assert.equal(row.success, 1);
 });
 
-test('shares Bark targets and settings immediately across all chain stores', (t) => {
+test('shares Bark targets and delivery settings while keeping alert thresholds per chain', (t) => {
   const files = testFiles(t);
   const stores = [
     openStore(files.robinhood, 'robinhood', files.bark),
@@ -177,9 +177,16 @@ test('shares Bark targets and settings immediately across all chain stores', (t)
   assert.equal(bsc.getMeta('robinhood:monitor:bark-volume'), '7');
   assert.equal(solana.getMeta('solana:monitor:bark-sound'), 'typewriters');
   assert.equal(solana.getMeta('solana:monitor:bark-volume'), '7');
-  assert.equal(base.getMeta('base:monitor:threshold'), '8');
+  assert.equal(base.getMeta('base:monitor:threshold'), null);
   assert.equal(bsc.getMeta('bsc:monitor:window-seconds'), '75');
-  assert.equal(solana.getMeta('solana:monitor:threshold'), '8');
+  assert.equal(solana.getMeta('solana:monitor:threshold'), null);
+  base.setMeta('robinhood:monitor:threshold', '5');
+  bsc.setMeta('robinhood:monitor:threshold', '6');
+  solana.setMeta('solana:monitor:threshold', '7');
+  assert.equal(robinhood.getMeta('robinhood:monitor:threshold'), '8');
+  assert.equal(base.getMeta('robinhood:monitor:threshold'), '5');
+  assert.equal(bsc.getMeta('robinhood:monitor:threshold'), '6');
+  assert.equal(solana.getMeta('solana:monitor:threshold'), '7');
 
   base.setMonitorBarkFeatureState('fomo_ca', false);
   assert.equal(robinhood.listMonitorBarkFeatureStates().fomo_ca, false);
@@ -344,9 +351,12 @@ test('legacy migration resolves duplicates and id collisions deterministically i
   for (const store of stores) {
     assert.equal(store.getMeta('robinhood:monitor:bark-sound'), 'typewriters');
     assert.equal(store.getMeta('solana:monitor:bark-volume'), '7');
-    assert.equal(store.getMeta('base:monitor:threshold'), '8');
     assert.equal(store.getMeta('solana:monitor:window-seconds'), '60');
   }
+  assert.equal(stores[0].getMeta('solana:monitor:threshold'), '6');
+  assert.equal(stores[1].getMeta('robinhood:monitor:threshold'), '5');
+  assert.equal(stores[2].getMeta('robinhood:monitor:threshold'), '5');
+  assert.equal(stores[3].getMeta('robinhood:monitor:threshold'), '8');
 });
 
 test('delivery status updates do not turn a lower-priority legacy target into a user override', (t) => {
@@ -476,7 +486,7 @@ test('running monitors refresh shared Bark alert settings without a restart', (t
   });
 
   robinhoodMonitor.updateSettings({ threshold: 8, windowSeconds: 75, barkSound: 'chime', barkVolume: 9 });
-  assert.equal(solanaMonitor.getSnapshot({ eventLimit: 0 }).settings.threshold, 8);
+  assert.equal(solanaMonitor.getSnapshot({ eventLimit: 0 }).settings.threshold, 6);
   assert.equal(solanaMonitor.getSnapshot({ eventLimit: 0 }).settings.windowSeconds, 75);
   assert.equal(solanaMonitor.getSnapshot({ eventLimit: 0 }).settings.barkSound, 'chime');
   assert.equal(solanaMonitor.getSnapshot({ eventLimit: 0 }).settings.barkVolume, 9);
@@ -484,7 +494,7 @@ test('running monitors refresh shared Bark alert settings without a restart', (t
   assert.deepEqual(barkTestCalls.at(-1), { id: 11, sound: 'chime', volume: 9 });
 
   solanaMonitor.updateSettings({ threshold: 9, windowSeconds: 90, barkSound: 'glass', barkVolume: 4 });
-  assert.equal(robinhoodMonitor.getSnapshot({ eventLimit: 0 }).settings.threshold, 9);
+  assert.equal(robinhoodMonitor.getSnapshot({ eventLimit: 0 }).settings.threshold, 8);
   assert.equal(robinhoodMonitor.getSnapshot({ eventLimit: 0 }).settings.windowSeconds, 90);
   assert.equal(robinhoodMonitor.getSnapshot({ eventLimit: 0 }).settings.barkSound, 'glass');
   assert.equal(robinhoodMonitor.getSnapshot({ eventLimit: 0 }).settings.barkVolume, 4);

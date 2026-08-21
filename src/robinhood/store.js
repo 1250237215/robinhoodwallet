@@ -172,7 +172,6 @@ const BARK_LIBRARY_AUDIT_TABLE = `${BARK_LIBRARY_SCHEMA}.bark_test_audit`;
 const BARK_LIBRARY_METADATA_TABLE = `${BARK_LIBRARY_SCHEMA}.metadata`;
 const SHARED_BARK_SOUND_KEY = 'bark:sound';
 const SHARED_BARK_VOLUME_KEY = 'bark:volume';
-const SHARED_BARK_THRESHOLD_KEY = 'bark:cluster-threshold';
 const SHARED_BARK_WINDOW_SECONDS_KEY = 'bark:cluster-window-seconds';
 const BARK_LIBRARY_SOURCE_PREFIX = 'legacy_bark_source:';
 const BARK_LIBRARY_TOMBSTONE_PREFIX = 'bark_deleted_endpoint:';
@@ -188,8 +187,7 @@ function sharedBarkMetadataKey(key) {
   const barkSetting = normalized.match(/(?:^|:)monitor:bark-(sound|volume)$/i)?.[1]?.toLowerCase();
   if (barkSetting === 'sound') return SHARED_BARK_SOUND_KEY;
   if (barkSetting === 'volume') return SHARED_BARK_VOLUME_KEY;
-  const clusterSetting = normalized.match(/(?:^|:)monitor:(threshold|window-seconds)$/i)?.[1]?.toLowerCase();
-  if (clusterSetting === 'threshold') return SHARED_BARK_THRESHOLD_KEY;
+  const clusterSetting = normalized.match(/(?:^|:)monitor:(window-seconds)$/i)?.[1]?.toLowerCase();
   if (clusterSetting === 'window-seconds') return SHARED_BARK_WINDOW_SECONDS_KEY;
   return null;
 }
@@ -571,7 +569,6 @@ function migrateLegacyBarkAlertSettings(db, source) {
   db.exec('BEGIN IMMEDIATE');
   try {
     for (const [canonicalKey, value] of [
-      [SHARED_BARK_THRESHOLD_KEY, legacySetting('threshold', 1, 1_000)],
       [SHARED_BARK_WINDOW_SECONDS_KEY, legacySetting('window-seconds', 5, 3_600)]
     ]) {
       if (value === null) continue;
