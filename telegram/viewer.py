@@ -78,8 +78,8 @@ DEEPSEEK_TRANSLATION_BASE_URL = os.environ.get(
 DEEPSEEK_TRANSLATION_URL = f"{DEEPSEEK_TRANSLATION_BASE_URL}/chat/completions"
 DEEPSEEK_TRANSLATION_MODEL = os.environ.get(
     "DEEPSEEK_TRANSLATION_MODEL",
-    "deepseek-v4-flash",
-).strip() or "deepseek-v4-flash"
+    "deepseek-chat",
+).strip() or "deepseek-chat"
 TRANSLATION_TIMEOUT_SECONDS = bounded_environment_number(
     "DEEPSEEK_TRANSLATION_TIMEOUT_MS",
     8000,

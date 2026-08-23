@@ -34,7 +34,7 @@ function deepSeekResponse(content) {
   });
 }
 
-test('social translation uses only the dedicated DeepSeek key and the flash model by default', () => {
+test('social translation uses only the dedicated DeepSeek key and the chat model by default', () => {
   assert.equal(createSocialConfig({ DEEPSEEK_API_KEY: 'unrelated-key' }).translationApiKey, '');
   assert.equal(createSocialConfig({}).translationTimeoutMs, 8_000);
   const config = createSocialConfig({
@@ -43,12 +43,12 @@ test('social translation uses only the dedicated DeepSeek key and the flash mode
     DEEPSEEK_TRANSLATION_CONCURRENCY: '99'
   });
   assert.equal(config.translationApiKey, 'dedicated-key');
-  assert.equal(config.translationModel, 'deepseek-v4-flash');
+  assert.equal(config.translationModel, 'deepseek-chat');
   assert.equal(config.translationTimeoutMs, 500);
   assert.equal(config.translationConcurrency, 8);
 });
 
-test('DeepSeek social translator sends raw text to the flash model with natural-chat guidance', async (t) => {
+test('DeepSeek social translator sends raw text to the chat model with natural-chat guidance', async (t) => {
   const requests = [];
   const translator = createDeepSeekSocialTranslator({
     apiKey: 'translation-test-key',
@@ -63,7 +63,7 @@ test('DeepSeek social translator sends raw text to the flash model with natural-
   assert.equal(await translator.translate('u can speak English'), '你会说英语吗？');
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, 'https://api.deepseek.com/chat/completions');
-  assert.equal(requests[0].body.model, 'deepseek-v4-flash');
+  assert.equal(requests[0].body.model, 'deepseek-chat');
   assert.deepEqual(requests[0].body.thinking, { type: 'disabled' });
   assert.equal(requests[0].body.temperature, 0);
   assert.equal(requests[0].body.max_tokens, 4_096);
@@ -348,7 +348,7 @@ test('social service ignores client translations, persists originals first, then
       xReplyEnrichmentEnabled: true,
       translationApiKey: 'translation-test-key',
       translationBaseUrl: 'https://api.deepseek.com',
-      translationModel: 'deepseek-v4-flash',
+      translationModel: 'deepseek-chat',
       translationTimeoutMs: 8_000,
       translationMaxAttempts: 1,
       translationRetryDelayMs: 0,
@@ -411,7 +411,7 @@ test('social service ignores client translations, persists originals first, then
     assert.equal(translated.replyContext.translatedContent, '父帖说你好');
     assert.equal(translated.quoteContext.translatedContent, '引用的 Alpha 喊单');
   });
-  assert.equal(service.getTranslationStatus().model, 'deepseek-v4-flash');
+  assert.equal(service.getTranslationStatus().model, 'deepseek-chat');
 
   service.close();
   let restartRequests = 0;
@@ -428,7 +428,7 @@ test('social service ignores client translations, persists originals first, then
       xReplyEnrichmentEnabled: false,
       translationApiKey: 'translation-test-key',
       translationBaseUrl: 'https://api.deepseek.com',
-      translationModel: 'deepseek-v4-flash',
+      translationModel: 'deepseek-chat',
       translationTimeoutMs: 8_000,
       translationMaxAttempts: 1,
       translationRetryDelayMs: 0,

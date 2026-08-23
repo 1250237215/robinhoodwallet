@@ -384,12 +384,12 @@ DeBot 翻译不会作为最终译文，API Key 也不会进入浏览器。把 De
 ```dotenv
 DEEPSEEK_TRANSLATION_API_KEY=替换为你的Key
 DEEPSEEK_TRANSLATION_BASE_URL=https://api.deepseek.com
-DEEPSEEK_TRANSLATION_MODEL=deepseek-v4-flash
+DEEPSEEK_TRANSLATION_MODEL=deepseek-chat
 DEEPSEEK_TRANSLATION_TIMEOUT_MS=8000
 DEEPSEEK_TRANSLATION_CONCURRENCY=3
 ```
 
-`deepseek-v4-flash` 是低延迟、非推理模型，适合实时短文本。原文会先立即显示，
+`deepseek-chat` 是低延迟、非推理模型，适合实时短文本。原文会先立即显示，
 译文完成后再增量更新；翻译失败不会阻塞 X 或 Telegram 流水。X 历史译文会分页
 走低优先级回填，成功结果保存在 `social.sqlite` 的专用缓存表；长文本会分段完整
 翻译，不会在 5000 字符处静默截断。

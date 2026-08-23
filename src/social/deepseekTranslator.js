@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 
 const DEFAULT_BASE_URL = 'https://api.deepseek.com';
-const DEFAULT_MODEL = 'deepseek-v4-flash';
+const DEFAULT_MODEL = 'deepseek-chat';
 const TRANSLATION_CACHE_VERSION = 'social-zh-v1';
 const MAX_SOURCE_CHARACTERS = 30_000;
 const TRANSLATION_CHUNK_CHARACTERS = 4_500;

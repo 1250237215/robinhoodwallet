@@ -167,7 +167,7 @@ test('environment templates expose production overrides without embedding creden
   assert.match(bscEnv, /^BSC_HOLDER_LOG_WINDOW=2000$/m);
   assert.match(bscEnv, /^BSC_HOLDER_MAX_TRANSFER_LOGS=100000$/m);
   assert.match(translationEnv, /^DEEPSEEK_TRANSLATION_API_KEY=$/m);
-  assert.match(translationEnv, /^DEEPSEEK_TRANSLATION_MODEL=deepseek-v4-flash$/m);
+  assert.match(translationEnv, /^DEEPSEEK_TRANSLATION_MODEL=deepseek-chat$/m);
   assert.doesNotMatch(translationEnv, /sk-[a-z0-9]/i);
   assert.match(solanaEnv, /^SOLANA_RPC_URL=$/m);
   assert.match(solanaEnv, /^HELIUS_API_KEY=$/m);

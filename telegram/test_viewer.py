@@ -159,7 +159,7 @@ class ViewerUtilityTests(unittest.TestCase):
         self.assertTrue(request.full_url.endswith("/chat/completions"))
         self.assertEqual(request.headers["Authorization"], "Bearer test-key")
         body = json.loads(request.data.decode("utf-8"))
-        self.assertEqual(body["model"], "deepseek-v4-flash")
+        self.assertEqual(body["model"], "deepseek-chat")
         self.assertEqual(body["messages"][-1]["content"], "hello")
         self.assertEqual(body["thinking"], {"type": "disabled"})
         self.assertEqual(requests[0][1], 1.25)

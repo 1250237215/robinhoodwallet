@@ -24,7 +24,7 @@
 每条消息保留原文 `text`，并在后台翻译完成后填充 `translated_text`；回复预览也有
 同名字段。翻译是异步和可失败的，原文不会等待外部翻译服务。历史回填和实时消息
 使用独立限流通道，历史消息不会阻塞新消息的翻译。生产部署使用服务器私有的
-`DEEPSEEK_TRANSLATION_API_KEY` 和 `deepseek-v4-flash`；失败结果不会缓存，短暂超时后
+`DEEPSEEK_TRANSLATION_API_KEY` 和 `deepseek-chat`；失败结果不会缓存，短暂超时后
 仍会重试，鉴权或请求格式错误不会重复请求。成功译文按模型和原文哈希保存在私有
 `telegram_translation_cache.sqlite`，服务重启不会重复翻译同一批历史。密钥只应放在
 权限为 `0600` 的 `/etc/robinhood-radar/translation.env`。
