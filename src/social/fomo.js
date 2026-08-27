@@ -93,6 +93,8 @@ export function dedupeFomoEvents(events) {
 }
 
 export function createFomoClient({ fetchImpl = globalThis.fetch, baseUrl = 'https://wind.jokkimon.club' } = {}) {
+  let catalogCache = [];
+  let catalogRetryAt = 0;
   async function json(path) {
     const response = await fetchImpl(new URL(path, baseUrl), { signal: AbortSignal.timeout(10_000) });
     if (!response.ok) throw new Error(`FOMO upstream returned ${response.status}`);
@@ -100,8 +102,22 @@ export function createFomoClient({ fetchImpl = globalThis.fetch, baseUrl = 'http
   }
   return {
     async catalog(query = '', limit = 100) {
+      if (Date.now() < catalogRetryAt) {
+        return catalogCache
+          .filter((account) => !query || `${account.handle} ${account.name}`.toLowerCase().includes(String(query).toLowerCase()))
+          .slice(0, limit);
+      }
       const params = new URLSearchParams({ platform: 'fomo', q: query, limit: String(limit) });
-      return normalizeFomoCatalog(await json(`/api/catalog?${params}`), baseUrl);
+      try {
+        const accounts = normalizeFomoCatalog(await json(`/api/catalog?${params}`), baseUrl);
+        if (accounts.length || !query) catalogCache = accounts;
+        return accounts;
+      } catch (error) {
+        if (/returned 429/.test(String(error?.message || ''))) catalogRetryAt = Date.now() + 30_000;
+        return catalogCache
+          .filter((account) => !query || `${account.handle} ${account.name}`.toLowerCase().includes(String(query).toLowerCase()))
+          .slice(0, limit);
+      }
     },
     async feed(handles, limit = 100) {
       if (!handles?.length) return [];

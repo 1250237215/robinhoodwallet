@@ -4374,7 +4374,10 @@ async function refreshFomoCatalog() {
       </button>`).join('') || '<span class="social-fomo-empty">没有匹配账号</span>';
     refreshIcons(elements.socialFomoResults);
   } catch {
-    elements.socialFomoResults.innerHTML = '<span class="social-fomo-empty">FOMO 目录暂时不可用</span>';
+    const direct = socialWatchInputKey(query);
+    elements.socialFomoResults.innerHTML = direct
+      ? `<span class="social-fomo-empty">目录暂时限流，可直接点击“加入监控”添加 @${escapeHtml(direct)}</span>`
+      : '<span class="social-fomo-empty">FOMO 目录暂时限流，请稍后重试</span>';
   }
 }
 
