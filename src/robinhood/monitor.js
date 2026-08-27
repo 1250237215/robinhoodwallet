@@ -2237,6 +2237,8 @@ export class RobinhoodWalletMonitor {
     const patches = new Map();
     for (const event of events) {
       const key = JSON.stringify([
+        event.tokenSymbol,
+        event.tokenName,
         event.marketCapUsd,
         event.liquidityUsd,
         event.tokenCreationTimestamp,
@@ -2245,6 +2247,8 @@ export class RobinhoodWalletMonitor {
       const patch = patches.get(key) || {
         eventIds: [],
         tokenAddress: event.tokenAddress,
+        tokenSymbol: event.tokenSymbol,
+        tokenName: event.tokenName,
         marketCapUsd: event.marketCapUsd,
         liquidityUsd: event.liquidityUsd,
         tokenCreationTimestamp: event.tokenCreationTimestamp,
@@ -2416,6 +2420,11 @@ export class RobinhoodWalletMonitor {
       tokenCreationTimestamp,
       marketDataAt: normalizedMarketCap === null ? null : unixSeconds(this.now)
     };
+    const identityEvents = this.store.updateMonitorEventsTokenIdentity?.(
+      address,
+      { symbol: metrics?.symbol, name: metrics?.name, decimals: metrics?.decimals },
+      { eventIds: [...(this.marketDataPendingEventIds.get(address) || [])] }
+    ) || [];
     this.store.upsertMonitorTokenMarketData?.(marketData);
     const eventIds = [...(this.marketDataPendingEventIds.get(address) || [])];
     const updatedEvents = this.store.updateMonitorEventsTokenMarketData?.(
@@ -2423,7 +2432,8 @@ export class RobinhoodWalletMonitor {
       marketData,
       { eventIds }
     ) || [];
-    this.#emitMarketDataPatches(updatedEvents);
+    const eventUpdates = new Map([...identityEvents, ...updatedEvents].map((event) => [event.id, event]));
+    this.#emitMarketDataPatches([...eventUpdates.values()]);
     if (normalizedMarketCap === null || tokenCreationTimestamp === null) {
       const completedIds = new Set(updatedEvents
         .filter((event) => event.marketCapUsd !== null && event.tokenCreationTimestamp !== null)

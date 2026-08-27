@@ -1586,6 +1586,41 @@ export function createRobinhoodStore(filename, {
       const select = db.prepare('SELECT * FROM monitor_events WHERE id = ?');
       return rows.map((row) => monitorEventFromRow(select.get(row.id)));
     },
+    updateMonitorEventsTokenIdentity(tokenAddress, identity = {}, { eventIds } = {}) {
+      const address = normalizeAddress(tokenAddress);
+      if (!isValidAddress(address)) throw new TypeError('Invalid monitor token address');
+      const symbol = String(identity.symbol || '').trim().slice(0, 80);
+      const name = String(identity.name || '').trim().slice(0, 160);
+      const decimals = Number.isInteger(Number(identity.decimals))
+        ? Math.max(0, Math.min(255, Number(identity.decimals)))
+        : null;
+      if (!symbol && !name && decimals === null) return [];
+      const hasEventFilter = Array.isArray(eventIds);
+      const ids = hasEventFilter
+        ? [...new Set(eventIds.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))]
+        : [];
+      if (hasEventFilter && ids.length === 0) return [];
+      const filter = hasEventFilter ? ` AND id IN (${ids.map(() => '?').join(', ')})` : '';
+      const rows = db.prepare(`SELECT id FROM monitor_events WHERE token_address = ? ${filter} ORDER BY id`)
+        .all(address, ...ids);
+      if (!rows.length) return [];
+      db.exec('BEGIN');
+      try {
+        db.prepare(`
+          UPDATE monitor_events
+          SET token_symbol = CASE WHEN ? <> '' AND (token_symbol = token_address OR token_symbol = '') THEN ? ELSE token_symbol END,
+              token_name = CASE WHEN ? <> '' AND (token_name = token_address OR token_name = '') THEN ? ELSE token_name END,
+              token_decimals = COALESCE(?, token_decimals)
+          WHERE token_address = ? ${filter}
+        `).run(symbol, symbol, name, name, decimals, address, ...ids);
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+      const select = db.prepare('SELECT * FROM monitor_events WHERE id = ?');
+      return rows.map((row) => monitorEventFromRow(select.get(row.id)));
+    },
     updateMonitorEventsTokenRiskData(tokenAddress, riskData, { eventIds, replace = false } = {}) {
       const address = normalizeAddress(tokenAddress);
       if (!isValidAddress(address)) throw new TypeError('Invalid monitor token address');
