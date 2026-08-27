@@ -1,7 +1,7 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const BRIDGE_VERSION = '1.10.7';
+  const BRIDGE_VERSION = '1.10.8';
   const BRIDGE_SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
@@ -2746,14 +2746,20 @@
           for (const row of rows.slice(0, 100)) {
             const data = row;
             const chainValue = String(data?.chain || data?.chain_name || data?.network || '').toLowerCase();
-            const chain = ['bsc', 'bnb', 'bnbchain', '56'].includes(chainValue) ? 'bsc' : '';
+            const chain = ['bsc', 'bnb', 'bnbchain', '56'].includes(chainValue)
+              ? 'bsc'
+              : ['base', '8453', 'base-mainnet'].includes(chainValue)
+                ? 'base'
+                : ['robinhood', 'robinhood-chain', 'rh'].includes(chainValue)
+                  ? 'robinhood'
+                  : '';
             const walletAddress = String(data?.wallet || data?.wallet_address || data?.address || '').toLowerCase();
             const tokenAddress = String(
               data?.token?.address || data?.token_address || data?.token || data?.contract_address || ''
             ).toLowerCase();
             const txHash = String(data?.tx_hash || data?.transaction_hash || data?.txHash || '').toLowerCase();
             const operation = String(data?.op || data?.operation || data?.position_action || '').toLowerCase();
-            if (chain !== 'bsc' || !/^0x[0-9a-f]{40}$/.test(walletAddress)
+            if (!chain || !/^0x[0-9a-f]{40}$/.test(walletAddress)
               || !/^0x[0-9a-f]{40}$/.test(tokenAddress) || !/^0x[0-9a-f]{64}$/.test(txHash)
               || !/(?:buy|open|increase|add)/.test(operation)) {
               incrementDiagnosticCounter(bridgeDiagnostics.wallet, 'rejected');

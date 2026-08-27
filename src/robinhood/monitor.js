@@ -846,7 +846,8 @@ export class RobinhoodWalletMonitor {
   }
 
   async ingestExternalWalletEvent(raw, { signal } = {}) {
-    if (this.chainProfile.id !== 'bsc' || String(raw?.chain || '').toLowerCase() !== 'bsc') {
+    const eventChain = String(raw?.chain || '').trim().toLowerCase();
+    if (!eventChain || eventChain !== String(this.chainProfile.id || '').toLowerCase()) {
       return { accepted: false, reason: 'wrong_chain', events: [] };
     }
     const walletAddress = normalizeAddress(raw?.walletAddress);

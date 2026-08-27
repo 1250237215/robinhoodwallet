@@ -1101,24 +1101,31 @@ export async function startRobinhoodStandaloneServer(
     notifySocialContract: (payload) => monitor?.notifySocialContract?.(payload),
     importDeBotWalletSnapshot,
     ingestDeBotWalletEvents: async (events) => {
-      const response = await fetchImpl('http://127.0.0.1:18122/internal/debot-wallet-events', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ events })
-      });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body?.error || `BSC verifier HTTP ${response.status}`);
-      const rejectedReasons = (Array.isArray(body?.results) ? body.results : [])
-        .filter((result) => result?.accepted !== true)
-        .reduce((counts, result) => {
-          const reason = String(result?.reason || 'unknown').slice(0, 80);
-          counts[reason] = (counts[reason] || 0) + 1;
-          return counts;
-        }, {});
-      if (Object.keys(rejectedReasons).length) {
-        console.warn('[debot-wallet-events] rejected', JSON.stringify(rejectedReasons));
+      const grouped = new Map();
+      for (const event of Array.isArray(events) ? events : []) {
+        const chain = String(event?.chain || '').trim().toLowerCase();
+        const port = chain === 'base' ? 18119 : chain === 'bsc' ? 18122 : chain === 'robinhood' ? 18118 : 0;
+        if (!port) continue;
+        if (!grouped.has(port)) grouped.set(port, []);
+        grouped.get(port).push(event);
       }
-      return body;
+      const results = [];
+      for (const [port, chainEvents] of grouped) {
+        const response = await fetchImpl(`http://127.0.0.1:${port}/internal/debot-wallet-events`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ events: chainEvents })
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body?.error || `${port} verifier HTTP ${response.status}`);
+        results.push(body);
+      }
+      return {
+        ok: true,
+        accepted: results.reduce((sum, body) => sum + Number(body?.accepted || 0), 0),
+        events: results.flatMap((body) => body?.events || []),
+        results: results.flatMap((body) => body?.results || [])
+      };
     }
   });
   const syncConfirmedWalletToDeBot = (wallet) => {

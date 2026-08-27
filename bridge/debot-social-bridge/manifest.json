@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Radar DeBot Social Bridge",
-  "version": "1.10.7",
+  "version": "1.10.8",
   "description": "Synchronizes a signed-in DeBot social monitor with a user-configured Radar server.",
   "permissions": ["storage", "alarms", "scripting"],
   "host_permissions": [
