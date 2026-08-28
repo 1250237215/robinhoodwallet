@@ -153,7 +153,8 @@ export async function startBaseStandaloneServer(
   const activeHolderClient = holderClient || new RobinhoodHolderClient({
     baseUrl: config.blockscoutApiUrl,
     timeoutMs: config.requestTimeoutMs,
-    fetchImpl
+    fetchImpl,
+    debotClient: activeDebotClient
   });
   const service = createRobinhoodService({
     config,

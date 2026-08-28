@@ -85,8 +85,8 @@ function normalizeDeBotRequest(type, payload) {
       : exactKeys(payload, ['chain', 'token']);
   if (!validPayloadShape) throw new TypeError('Invalid DeBot analysis payload');
   const chain = String(payload.chain || '').trim().toLowerCase();
-  if (!['robinhood', 'bsc'].includes(chain)) {
-    throw new TypeError('DeBot analysis only supports the Robinhood and BSC chains');
+  if (!['robinhood', 'base', 'bsc'].includes(chain)) {
+    throw new TypeError('DeBot analysis only supports the Robinhood, Base and BSC chains');
   }
   // Holder profiles are provided by the signed-in DeBot bridge for every
   // supported EVM chain. Keep the chain validation above, but do not
