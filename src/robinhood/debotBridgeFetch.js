@@ -89,7 +89,8 @@ function jsonResponse(data) {
 export function createDebotBridgeFetch({
   socialService,
   fetchImpl = globalThis.fetch,
-  timeoutMs = 30_000
+  timeoutMs = 30_000,
+  bridgeUrl = 'http://127.0.0.1:18118/internal/debot/request'
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl is required');
   const bridgeRequest = socialService?.requestDeBot;
@@ -99,11 +100,23 @@ export function createDebotBridgeFetch({
     if (!request || typeof bridgeRequest !== 'function') return fetchImpl(input, init);
 
     try {
-      const result = await bridgeRequest.call(socialService, request.type, request.payload, {
-        signal: init?.signal,
-        timeoutMs,
-        cacheTtlMs: request.cacheTtlMs
-      });
+      let result;
+      if (typeof bridgeRequest === 'function') {
+        result = await bridgeRequest.call(socialService, request.type, request.payload, {
+          signal: init?.signal,
+          timeoutMs,
+          cacheTtlMs: request.cacheTtlMs
+        });
+      } else {
+        const signal = init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
+        const response = await fetchImpl(bridgeUrl, {
+          method: 'POST', signal,
+          headers: { accept: 'application/json', 'content-type': 'application/json' },
+          body: JSON.stringify({ type: request.type, payload: request.payload })
+        });
+        if (!response.ok) throw new Error(`DeBot bridge failed with HTTP ${response.status}`);
+        result = await response.json();
+      }
       return jsonResponse(responseData(result));
     } catch (bridgeError) {
       if (init?.signal?.aborted || bridgeError?.name === 'AbortError') throw bridgeError;

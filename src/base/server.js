@@ -17,6 +17,7 @@ import {
   normalizeBaseAddress
 } from './config.js';
 import { createBaseMarketClient } from './marketClient.js';
+import { createDebotBridgeFetch } from '../robinhood/debotBridgeFetch.js';
 
 export const BASE_API_PREFIX = '/api/base';
 export const BASE_MONITOR_PROFILE = Object.freeze({
@@ -120,7 +121,7 @@ export async function startBaseStandaloneServer(
   const activeDebotClient = debotClient || new RobinhoodDebotClient({
     chain: 'base',
     timeoutMs: config.requestTimeoutMs,
-    fetchImpl,
+    fetchImpl: createDebotBridgeFetch({ fetchImpl, timeoutMs: config.requestTimeoutMs }),
     addressNormalizer: config.addressNormalizer,
     addressValidator: config.addressValidator
   });
