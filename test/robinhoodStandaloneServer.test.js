@@ -762,6 +762,27 @@ test('standalone startup wires resilient holder scans separately from DexScreene
     assert.equal(health.maxLogConcurrency, 2);
     assert.equal(health.rpcProtection.recoverySuccessesRequired, 20);
     assert.equal(running.monitor.noxaLaunchFactory, '0xd9ec2db5f3d1b236843925949fe5bd8a3836fccb');
+    const internalPort = running.server.address().port;
+    const walletEventResponse = await fetch(`http://127.0.0.1:${internalPort}/internal/debot-wallet-events`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        events: [{
+          chain: 'robinhood',
+          walletAddress: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          tokenAddress: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          txHash: `0x${'4'.repeat(64)}`,
+          operation: 'buy',
+          tokenSymbol: 'RHDOG',
+          tokenAmount: '42',
+          tokenDecimals: 18,
+          blockTimestamp: 1_787_900_000
+        }]
+      })
+    });
+    assert.equal(walletEventResponse.status, 200);
+    assert.equal((await walletEventResponse.json()).accepted, 1);
+    assert.equal(running.store.listMonitorEvents({ limit: 1 })[0].tokenSymbol, 'RHDOG');
   } finally {
     running.service.close();
     running.monitor.close();

@@ -8,7 +8,8 @@ function normalize(value) {
   const walletAddress = String(event.walletAddress || '').toLowerCase();
   const tokenAddress = String(event.tokenAddress || '').toLowerCase();
   const txHash = String(event.txHash || '').toLowerCase();
-  if (chain !== 'bsc' || !ADDRESS.test(walletAddress) || !ADDRESS.test(tokenAddress) || !HASH.test(txHash)) return null;
+  if (!['robinhood', 'base', 'bsc'].includes(chain)
+    || !ADDRESS.test(walletAddress) || !ADDRESS.test(tokenAddress) || !HASH.test(txHash)) return null;
   return {
     chain,
     walletAddress,

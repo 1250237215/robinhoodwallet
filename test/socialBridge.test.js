@@ -102,6 +102,42 @@ class FakeWebSocket {
   }
 }
 
+class FakeMessagePort {
+  constructor() {
+    this.listeners = new Map();
+    this.onmessage = null;
+    this.sent = [];
+  }
+
+  addEventListener(type, listener) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(listener);
+  }
+
+  start() {}
+
+  postMessage(message) {
+    this.sent.push(message);
+  }
+
+  receive(data) {
+    const event = { data };
+    this.onmessage?.(event);
+    for (const listener of this.listeners.get('message') || []) listener(event);
+  }
+}
+
+class FakeSharedWorker {
+  static instances = [];
+
+  constructor(url, options) {
+    this.url = String(url);
+    this.options = options;
+    this.port = new FakeMessagePort();
+    FakeSharedWorker.instances.push(this);
+  }
+}
+
 function jsonResponse(data) {
   return {
     ok: true,
@@ -136,16 +172,21 @@ function personalTwitterWatchlist(handle, configId = 42) {
 function createTimelineBridgeHarness(initialHandler, {
   now = 1_784_300_100_000,
   initialWatchlistHandler = async () => ({ list: [], total: 0 }),
-  autoAcknowledge = false
+  autoAcknowledge = false,
+  sharedWorker = null,
+  initialWalletActivityHandler = async () => ({ meta: { token: {}, wallet: {} }, transactions: [], next: '' })
 } = {}) {
   const window = new FakeWindow('https://debot.ai');
   window.WebSocket = FakeWebSocket;
+  if (sharedWorker) window.SharedWorker = sharedWorker;
   const calls = [];
   const watchlistCalls = [];
+  const walletActivityCalls = [];
   const intervals = [];
   const acknowledgedDeliveries = new Set();
   let handler = initialHandler;
   let watchlistHandler = initialWatchlistHandler;
+  let walletActivityHandler = initialWalletActivityHandler;
   let clock = now;
   let forcePollSequence = 0;
   let timerSequence = 0;
@@ -214,6 +255,11 @@ function createTimelineBridgeHarness(initialHandler, {
       watchlistCalls.push(call);
       return jsonResponse(await watchlistHandler(call));
     }
+    if (requestUrl.startsWith('/api/wallet/track/transactions')) {
+      const call = { url: requestUrl, options };
+      walletActivityCalls.push(call);
+      return jsonResponse(await walletActivityHandler(call));
+    }
     throw new Error(`Unexpected DeBot endpoint: ${requestUrl}`);
   };
 
@@ -250,11 +296,17 @@ function createTimelineBridgeHarness(initialHandler, {
     watchlistCalls() {
       return watchlistCalls.slice();
     },
+    walletActivityCalls() {
+      return walletActivityCalls.slice();
+    },
     setHandler(value) {
       handler = value;
     },
     setWatchlistHandler(value) {
       watchlistHandler = value;
+    },
+    setWalletActivityHandler(value) {
+      walletActivityHandler = value;
     },
     advance(milliseconds) {
       clock += milliseconds;
@@ -289,7 +341,7 @@ function timelineFailure(errorType) {
 test('extension manifest, configuration and scripts are valid and narrowly scoped', async () => {
   const manifest = JSON.parse(bridgeSource('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.10.8');
+  assert.equal(manifest.version, '1.10.9');
   assert.equal(manifest.background.type, 'module');
   assert.deepEqual(manifest.permissions, ['storage', 'alarms', 'scripting']);
   assert.equal(manifest.host_permissions.includes('<all_urls>'), false);
@@ -470,6 +522,148 @@ test('transient timeline failures require count and duration without a healthy p
     const resetHeartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
     assert.equal(resetHeartbeat.payload.capabilities.includes('error'), false);
   }
+});
+
+test('DeBot SharedWorker wallet events are observed without disrupting the page port', async () => {
+  FakeSharedWorker.instances.length = 0;
+  const harness = createTimelineBridgeHarness(
+    async () => ({ feeds: [], has_more: false, next_cursor: '' }),
+    { sharedWorker: FakeSharedWorker }
+  );
+  const worker = new harness.window.SharedWorker('/assets/sharedSocketWorker.js', {
+    name: 'portal-ws-shared',
+    type: 'module'
+  });
+  let pageDeliveries = 0;
+  worker.port.onmessage = () => { pageDeliveries += 1; };
+  worker.port.start();
+  worker.port.receive({
+    type: 'socket-event',
+    kind: 'main',
+    event: 'wallet-history-update',
+    args: [{
+      chain: 'base',
+      wallet: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      token: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      token_symbol: 'BASEDOG',
+      token_name: 'Base Dog',
+      decimal: 18,
+      txs: [{
+        tx: `0x${'1'.repeat(64)}`,
+        op: 'buy',
+        amount: '123.45',
+        block: 50550000,
+        unixTime: 1_787_900_000,
+        log_index: 9
+      }]
+    }]
+  });
+  worker.port.receive({
+    type: 'socket-event',
+    kind: 'main',
+    event: 'wallet-track',
+    args: [{ data: {
+      chain: 'robinhood',
+      wallet: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      token: '0xcccccccccccccccccccccccccccccccccccccccc',
+      tx_hash: `0x${'2'.repeat(64)}`,
+      op: 'buy',
+      token_symbol: 'RHDOG',
+      token_amount: '50',
+      decimal: 18,
+      unix_time: 1_787_900_001
+    } }]
+  });
+
+  const deliveredEvents = harness.window.messages
+    .filter((message) => message.type === 'wallet-events')
+    .flatMap((message) => message.payload.events);
+  assert.equal(pageDeliveries, 2);
+  assert.deepEqual(Array.from(deliveredEvents, (event) => ({
+    chain: event.chain,
+    walletAddress: event.walletAddress,
+    tokenAddress: event.tokenAddress,
+    txHash: event.txHash,
+    operation: event.operation,
+    tokenSymbol: event.tokenSymbol
+  })), [{
+    chain: 'base',
+    walletAddress: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    tokenAddress: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    txHash: `0x${'1'.repeat(64)}`,
+    operation: 'buy',
+    tokenSymbol: 'BASEDOG'
+  }, {
+    chain: 'robinhood',
+    walletAddress: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    tokenAddress: '0xcccccccccccccccccccccccccccccccccccccccc',
+    txHash: `0x${'2'.repeat(64)}`,
+    operation: 'buy',
+    tokenSymbol: 'RHDOG'
+  }]);
+  const heartbeat = harness.window.messages.findLast((message) => message.type === 'heartbeat');
+  assert.equal(heartbeat.payload.diagnostics.wallet.frames, 2);
+  assert.equal(heartbeat.payload.diagnostics.wallet.accepted, 2);
+});
+
+test('DeBot wallet activity REST poll establishes a baseline and emits only new buys', async () => {
+  const wallet = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const token = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const row = (tx, time) => ({
+    chain: 'base',
+    trader: wallet,
+    token,
+    tx,
+    op: 'buy',
+    amount: 42,
+    time,
+    mc: 123_456
+  });
+  const oldRow = row(`0x${'3'.repeat(64)}`, 1_787_900_000);
+  const newRow = row(`0x${'4'.repeat(64)}`, 1_787_900_001);
+  const payload = (transactions) => ({
+    meta: { token: { [token]: { symbol: 'BASEDOG', name: 'Base Dog', decimals: 18 } }, wallet: {} },
+    transactions,
+    next: ''
+  });
+  const harness = createTimelineBridgeHarness(
+    async () => ({ feeds: [], has_more: false, next_cursor: '' }),
+    { initialWalletActivityHandler: async () => payload([oldRow]) }
+  );
+  await eventually(() => assert.equal(harness.walletActivityCalls().length, 1));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(harness.window.messages.some((message) => message.type === 'wallet-events'), false);
+
+  harness.setWalletActivityHandler(async () => payload([newRow, oldRow]));
+  const activityInterval = harness.intervals.find((interval) => interval.delay === 1_200);
+  assert.ok(activityInterval);
+  activityInterval.callback();
+  await eventually(() => assert.equal(harness.walletActivityCalls().length, 2));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const walletDeliveries = harness.window.messages.filter((message) => message.type === 'wallet-events');
+  assert.equal(walletDeliveries.length, 1);
+  assert.deepEqual(Array.from(walletDeliveries[0].payload.events, (event) => ({
+    chain: event.chain,
+    walletAddress: event.walletAddress,
+    tokenAddress: event.tokenAddress,
+    txHash: event.txHash,
+    tokenSymbol: event.tokenSymbol,
+    tokenAmount: event.tokenAmount,
+    marketCapUsd: event.marketCapUsd
+  })), [{
+    chain: 'base',
+    walletAddress: wallet,
+    tokenAddress: token,
+    txHash: newRow.tx,
+    tokenSymbol: 'BASEDOG',
+    tokenAmount: '42',
+    marketCapUsd: 123_456
+  }]);
+
+  activityInterval.callback();
+  await eventually(() => assert.equal(harness.walletActivityCalls().length, 3));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(harness.window.messages.filter((message) => message.type === 'wallet-events').length, 1);
 });
 
 test('authentication failures report immediately without changing the page-session identity', async () => {
@@ -983,7 +1177,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
     .filter((call) => call.url.startsWith('/api/social/twitter/'))
     .every((call) => new URL(call.url, 'https://debot.ai').searchParams.get('tw_types')
       === 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow'), true);
-  assert.deepEqual(intervals.map((interval) => interval.delay), [1_000, 30_000, 60_000]);
+  assert.deepEqual(intervals.map((interval) => interval.delay), [1_000, 1_200, 30_000, 60_000]);
   assert.equal(calls.every((call) => call.options.credentials === 'include'), true);
 
   window.dispatchMessage({
@@ -1011,7 +1205,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
       && message.payload.requestId === 'page-personal-probe'
       && message.payload.ok === true)));
   const personalHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
-  assert.equal(personalHeartbeat.payload.version, '1.10.8');
+  assert.equal(personalHeartbeat.payload.version, '1.10.9');
   assert.deepEqual(Array.from(personalHeartbeat.payload.capabilities), [
     'posts', 'watchlist', 'commands', 'debot-session', 'debot-analysis-v1', 'debot-token-holders-v1'
   ]);
@@ -1502,11 +1696,10 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   assert.deepEqual(Array.from(portalSocket.sent), []);
   portalSocket.receive('42["authorization","success"]');
   assert.deepEqual(Array.from(portalSocket.sent), [
-    '42["subscribe","social-user-twitter"]',
-    '42["subscribe-wallet-track"]'
+    '42["subscribe","social-user-twitter"]'
   ]);
   portalSocket.receive('42["authorization","success"]');
-  assert.equal(portalSocket.sent.length, 2);
+  assert.equal(portalSocket.sent.length, 1);
   window.dispatchMessage({
     source: 'debot-social-relay',
     type: 'force-poll',
@@ -1968,7 +2161,7 @@ test('DeBot page bridge polls while hidden, consumes the expected channels and u
   const recoveredHeartbeat = window.messages.findLast((message) => message.type === 'heartbeat');
   assert.equal(recoveredHeartbeat.payload.capabilities.includes('error'), false);
   assert.equal(Object.hasOwn(recoveredHeartbeat.payload, 'error'), false);
-  assert.equal(recoveredHeartbeat.payload.version, '1.10.8');
+  assert.equal(recoveredHeartbeat.payload.version, '1.10.9');
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.accountCount >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.rawRows >= 0, true);
   assert.equal(recoveredHeartbeat.payload.diagnostics.poll.normalizedRows >= 0, true);

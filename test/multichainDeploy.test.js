@@ -114,6 +114,7 @@ test('chain systemd units bind independent ports, chain databases, and private e
   assert.match(robinhoodUnit, /Environment=EVM_WALLET_DATA_FILE=\/var\/lib\/robinhood-radar\/evm-wallets\.sqlite/);
   assert.match(baseUnit, /Environment=BASE_PORT=18119/);
   assert.match(baseUnit, /Environment=BASE_DATA_FILE=\/var\/lib\/robinhood-radar\/base\.sqlite/);
+  assert.match(baseUnit, /Environment=EVM_WALLET_DATA_FILE=\/var\/lib\/robinhood-radar\/evm-wallets\.sqlite/);
   assert.match(baseUnit, /EnvironmentFile=-\/etc\/robinhood-radar\/base\.env/);
   assert.match(baseUnit, /ExecStart=.*base-server\.mjs/);
   assert.match(bscUnit, /Environment=BSC_PORT=18122/);
@@ -127,7 +128,6 @@ test('chain systemd units bind independent ports, chain databases, and private e
   assert.match(solanaUnit, /Environment=SOLANA_DATA_FILE=\/var\/lib\/robinhood-radar\/solana\.sqlite/);
   assert.match(solanaUnit, /EnvironmentFile=-\/etc\/robinhood-radar\/solana\.env/);
   assert.match(solanaUnit, /ExecStart=.*solana-server\.mjs/);
-  assert.doesNotMatch(baseUnit, /EVM_WALLET_DATA_FILE/);
   assert.doesNotMatch(solanaUnit, /EVM_WALLET_DATA_FILE/);
   assert.doesNotMatch(solanaUnit, /HELIUS_API_KEY=/);
   assert.doesNotMatch(solanaUnit, /SOLANA_HELIUS_AUTH_HEADER=/);

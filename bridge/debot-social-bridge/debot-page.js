@@ -1,7 +1,7 @@
 (() => {
   const PAGE_SOURCE = 'debot-social-page';
   const RELAY_SOURCE = 'debot-social-relay';
-  const BRIDGE_VERSION = '1.10.8';
+  const BRIDGE_VERSION = '1.10.9';
   const BRIDGE_SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   const DEFAULT_TYPES = 'tweet|reply|retweet|quote|delTweet|reName|reImage|reDescription|follow|unfollow';
   const SOCIAL_EVENT_KINDS = new Set(['post', 'reply', 'repost', 'quote', 'delete', 'follow', 'unfollow', 'profile']);
@@ -17,6 +17,9 @@
   const TIMELINE_CATCHUP_MAX_POSTS = TIMELINE_PAGE_SIZE * TIMELINE_CATCHUP_MAX_PAGES;
   const WATCHLIST_POLL_INTERVAL_MS = 30_000;
   const WALLET_LIBRARY_POLL_INTERVAL_MS = 60_000;
+  const WALLET_ACTIVITY_POLL_INTERVAL_MS = 1_200;
+  const WALLET_ACTIVITY_API_TIMEOUT_MS = 2_000;
+  const WALLET_ACTIVITY_SEEN_LIMIT = 5_000;
   const API_TIMEOUT_MS = 20_000;
   const DELIVERY_TIMEOUT_MS = 2_000;
   const DELIVERY_RETRY_BASE_MS = 2_000;
@@ -58,6 +61,9 @@
   const analysisKeys = new Set();
   let watchlistInFlight = null;
   let walletLibraryInFlight = null;
+  let walletActivityInFlight = null;
+  let walletActivityBootstrapped = false;
+  const walletActivitySeen = new Set();
   let watchlistFetchGeneration = 0;
   let primaryFollowUpRequested = false;
   let timelineCatchUpRequired = true;
@@ -2538,6 +2544,102 @@
       .replace(/^-+|-+$/g, '');
   }
 
+  function normalizedWalletChain(value) {
+    const chain = String(value || '').trim().toLowerCase();
+    if (['bsc', 'bnb', 'bnbchain', '56'].includes(chain)) return 'bsc';
+    if (['base', '8453', 'base-mainnet'].includes(chain)) return 'base';
+    if (['robinhood', 'robinhood-chain', 'rh', '4663'].includes(chain)) return 'robinhood';
+    return '';
+  }
+
+  function walletMetaEntry(values, address) {
+    if (!values || typeof values !== 'object' || Array.isArray(values)) return {};
+    const normalized = String(address || '').toLowerCase();
+    if (values[address]) return values[address];
+    if (values[normalized]) return values[normalized];
+    const match = Object.entries(values).find(([key]) => String(key).toLowerCase() === normalized);
+    return match?.[1] && typeof match[1] === 'object' ? match[1] : {};
+  }
+
+  function normalizedWalletActivity(row, meta = {}) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+    const chain = normalizedWalletChain(row.chain || row.chain_name || row.network);
+    const walletAddress = String(row.trader || row.wallet || row.wallet_address || '').trim().toLowerCase();
+    const tokenAddress = String(row.token || row.token_address || row.contract_address || '').trim().toLowerCase();
+    const txHash = String(row.tx || row.tx_hash || row.transaction_hash || '').trim().toLowerCase();
+    const operation = `${row.op || ''} ${row.position_action || ''}`.toLowerCase();
+    if (!chain || !EVM_ADDRESS_PATTERN.test(walletAddress) || !EVM_ADDRESS_PATTERN.test(tokenAddress)
+      || !/^0x[0-9a-f]{64}$/.test(txHash) || !/(?:buy|open|increase|add)/.test(operation)) return null;
+    const tokenMeta = walletMetaEntry(meta?.token, tokenAddress);
+    const blockTimestamp = Math.floor(timestamp(row.time ?? row.unix_time ?? row.timestamp, Date.now()) / 1_000);
+    const creationTimestamp = Math.floor(timestamp(
+      row.token_create_time ?? tokenMeta.creation_timestamp ?? tokenMeta.creationTimestamp,
+      0
+    ) / 1_000);
+    return {
+      chain,
+      walletAddress,
+      tokenAddress,
+      txHash,
+      operation: 'buy',
+      tokenSymbol: String(row.token_symbol || row.symbol || tokenMeta.symbol || '').slice(0, 80),
+      tokenName: String(row.token_name || row.name || tokenMeta.name || row.token_symbol || tokenMeta.symbol || '').slice(0, 160),
+      rawTokenAmount: String(row.raw_token_amount || '').slice(0, 120),
+      tokenAmount: String(row.amount ?? row.token_amount ?? '').slice(0, 120),
+      tokenDecimals: Number(row.decimal ?? row.decimals ?? tokenMeta.decimals ?? 18),
+      blockNumber: Number(row.block ?? row.block_number ?? 0),
+      blockTimestamp,
+      logIndex: Number(row.log_index ?? row.logIndex ?? 0),
+      marketCapUsd: Number.isFinite(Number(row.mc)) ? Number(row.mc) : null,
+      tokenCreationTimestamp: creationTimestamp > 0 ? creationTimestamp : null,
+      source: 'debot-wallet-track-rest',
+      discoveredAt: Date.now()
+    };
+  }
+
+  function rememberWalletActivity(event) {
+    const key = `${event.chain}:${event.txHash}:${event.walletAddress}:${event.tokenAddress}`;
+    if (walletActivitySeen.has(key)) return false;
+    walletActivitySeen.add(key);
+    while (walletActivitySeen.size > WALLET_ACTIVITY_SEEN_LIMIT) {
+      walletActivitySeen.delete(walletActivitySeen.values().next().value);
+    }
+    return true;
+  }
+
+  function pollWalletActivity() {
+    if (walletActivityInFlight) return walletActivityInFlight;
+    const operation = api('wallet/track/transactions', {
+      timeoutMs: WALLET_ACTIVITY_API_TIMEOUT_MS
+    }).then((payload) => {
+      const rows = Array.isArray(payload?.transactions) ? payload.transactions.slice(0, 200) : [];
+      incrementDiagnosticCounter(bridgeDiagnostics.wallet, 'frames');
+      incrementDiagnosticCounter(bridgeDiagnostics.wallet, 'rows', rows.length);
+      const events = [];
+      for (const row of rows) {
+        const event = normalizedWalletActivity(row, payload?.meta || {});
+        if (!event) {
+          incrementDiagnosticCounter(bridgeDiagnostics.wallet, 'rejected');
+          continue;
+        }
+        if (!rememberWalletActivity(event) || !walletActivityBootstrapped) continue;
+        events.push(event);
+      }
+      walletActivityBootstrapped = true;
+      if (events.length) {
+        incrementDiagnosticCounter(bridgeDiagnostics.wallet, 'accepted', events.length);
+        bridgeDiagnostics.wallet.lastEventAt = Date.now();
+        emit('wallet-events', { events });
+      }
+      if (events.length) emitHealthyHeartbeat();
+      return { ok: true, events: events.length };
+    }).catch((error) => ({ ok: false, errorType: coarseErrorType(error) })).finally(() => {
+      if (walletActivityInFlight === operation) walletActivityInFlight = null;
+    });
+    walletActivityInFlight = operation;
+    return operation;
+  }
+
   function isSocialTwitterChannel(value) {
     const channel = socketChannelKey(value);
     return /^social(?:-[a-z0-9]+){0,6}-twitter(?:-|$)/.test(channel)
@@ -2864,6 +2966,69 @@
     }).catch(() => rejectSocketFrame('unreadable'));
   }
 
+  function observeSharedWorkerMessage(message) {
+    if (!message || typeof message !== 'object' || Array.isArray(message)) return;
+    if (message.type !== 'socket-event') return;
+    const event = String(message.event || '').trim().toLowerCase();
+    const args = Array.isArray(message.args) ? message.args : [];
+    let walletPayloads = args;
+    if (event === 'wallet-history-update') {
+      walletPayloads = args.flatMap((root) => {
+        if (!root || typeof root !== 'object' || !Array.isArray(root.txs)) return [];
+        return root.txs.map((transaction) => ({
+          data: {
+            chain: root.chain,
+            wallet: root.wallet || transaction?.trader,
+            token: root.token,
+            tx_hash: transaction?.tx,
+            op: transaction?.op,
+            token_symbol: root.token_symbol || root.symbol,
+            token_name: root.token_name || root.name,
+            token_amount: transaction?.amount,
+            decimal: root.decimal ?? root.decimals,
+            block_number: transaction?.block,
+            unix_time: transaction?.unixTime ?? transaction?.time,
+            log_index: transaction?.log_index ?? transaction?.logIndex
+          }
+        }));
+      });
+    } else if (!['wallet-track', 'wallet-position-track'].includes(event)) {
+      return;
+    }
+    try {
+      observeSocketText(JSON.stringify(['wallet-track', ...walletPayloads]));
+    } catch {
+      rejectSocketFrame('invalidPacket');
+    }
+  }
+
+  function wrapSharedWorkerPort(port) {
+    if (!port || typeof port !== 'object') return port;
+    const wrapHandler = (handler) => typeof handler === 'function'
+      ? (event) => {
+          observeSharedWorkerMessage(event?.data);
+          return handler.call(port, event);
+        }
+      : handler;
+    return new Proxy(port, {
+      get(target, property, receiver) {
+        if (property === 'addEventListener') {
+          return (type, listener, options) => target.addEventListener(
+            type,
+            type === 'message' ? wrapHandler(listener) : listener,
+            options
+          );
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+      set(target, property, value) {
+        if (property === 'onmessage') return Reflect.set(target, property, wrapHandler(value), target);
+        return Reflect.set(target, property, value, target);
+      }
+    });
+  }
+
   function isDeBotPortalSocket(socket, constructorArgs) {
     const address = String(socket?.url || constructorArgs?.[0] || '').trim();
     if (!address) return false;
@@ -2908,7 +3073,6 @@
       incrementDiagnosticCounter(bridgeDiagnostics.ws, 'subscribeAttempts');
       bridgeDiagnostics.ws.lastSubscribeAt = Date.now();
       socket.send('42["subscribe","social-user-twitter"]');
-      socket.send('42["subscribe-wallet-track"]');
       portalSubscribedSockets.add(socket);
     } catch {
       incrementDiagnosticCounter(bridgeDiagnostics.ws, 'subscribeFailures');
@@ -2940,6 +3104,26 @@
           observeSocketFrame(event.data);
         });
         return socket;
+      }
+    });
+  }
+
+  const NativeSharedWorker = window.SharedWorker;
+  if (typeof NativeSharedWorker === 'function') {
+    window.SharedWorker = new Proxy(NativeSharedWorker, {
+      construct(target, args) {
+        const worker = Reflect.construct(target, args);
+        const port = wrapSharedWorkerPort(worker?.port);
+        return new Proxy(worker, {
+          get(instance, property, receiver) {
+            if (property === 'port') return port;
+            const value = Reflect.get(instance, property, instance);
+            return typeof value === 'function' ? value.bind(instance) : value;
+          },
+          set(instance, property, value) {
+            return Reflect.set(instance, property, value, instance);
+          }
+        });
       }
     });
   }
@@ -3009,7 +3193,9 @@
   void fallbackPoll();
   void refreshWatchlistIfNeeded();
   void refreshWalletLibrary().catch(() => {});
+  void pollWalletActivity();
   setInterval(() => requestPrimaryFollowUp(), PRIMARY_POLL_INTERVAL_MS);
+  setInterval(() => void pollWalletActivity(), WALLET_ACTIVITY_POLL_INTERVAL_MS);
   setInterval(() => void refreshWatchlistIfNeeded(), WATCHLIST_POLL_INTERVAL_MS);
   setInterval(() => void refreshWalletLibrary().catch(() => {}), WALLET_LIBRARY_POLL_INTERVAL_MS);
 })();

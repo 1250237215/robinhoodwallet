@@ -4,6 +4,7 @@ import {
   createPostOutbox,
   POST_OUTBOX_LIMITS
 } from '../bridge/debot-social-bridge/post-outbox.js';
+import { createWalletEventOutbox } from '../bridge/debot-social-bridge/wallet-event-outbox.js';
 
 class FakeStorage {
   constructor(initial = {}) {
@@ -493,4 +494,36 @@ test('outbox rejects incomplete posts and publishes conservative default limits'
     maxBytes: 4 * 1024 * 1024,
     defaultBatchLimit: 200
   });
+});
+
+test('wallet event outbox preserves Robinhood, Base and BSC events independently', async () => {
+  const storage = new FakeStorage();
+  const outbox = createWalletEventOutbox({ storage });
+  const walletAddress = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const tokenAddress = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const event = (chain, byte) => ({
+    chain,
+    walletAddress,
+    tokenAddress,
+    txHash: `0x${byte.repeat(64)}`,
+    operation: 'buy',
+    tokenSymbol: `${chain.toUpperCase()}DOG`,
+    tokenName: `${chain} dog`,
+    tokenAmount: '123.45',
+    tokenDecimals: 18,
+    privateCookie: 'must-not-persist'
+  });
+
+  const result = await outbox.enqueue([
+    event('robinhood', '1'),
+    event('base', '2'),
+    event('bsc', '3'),
+    event('solana', '4')
+  ]);
+  const records = await outbox.readBatch(10);
+
+  assert.equal(result.added, 3);
+  assert.equal(result.queued, 3);
+  assert.deepEqual(records.map((record) => record.event.chain), ['robinhood', 'base', 'bsc']);
+  assert.equal(JSON.stringify(records).includes('must-not-persist'), false);
 });

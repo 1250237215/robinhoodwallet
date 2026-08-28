@@ -1263,6 +1263,22 @@ export async function startRobinhoodStandaloneServer(
     monitor,
     socialService,
     socialBridgeToken: socialConfig.bridgeToken,
+    internalWalletEventHandler: async (events) => {
+      const results = [];
+      for (const event of events.slice(0, 100)) {
+        try {
+          results.push(await monitor.ingestExternalWalletEvent(event));
+        } catch (error) {
+          results.push({ accepted: false, reason: error instanceof Error ? error.message : String(error), events: [] });
+        }
+      }
+      return {
+        ok: true,
+        accepted: results.filter((result) => result.accepted).length,
+        events: results.flatMap((result) => result.events || []),
+        results
+      };
+    },
     telegramBarkToken: env.TELEGRAM_BARK_INTERNAL_TOKEN || '',
     feishuBarkToken: env.FEISHU_BARK_INTERNAL_TOKEN || '',
     publicDir: env.ROBINHOOD_PUBLIC_DIR || path.resolve('public')
