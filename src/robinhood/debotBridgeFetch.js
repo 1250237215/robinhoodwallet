@@ -97,7 +97,9 @@ export function createDebotBridgeFetch({
 
   return async function debotBridgeFetch(input, init = {}) {
     const request = debotBridgeRequest(input, init);
-    if (!request || typeof bridgeRequest !== 'function') return fetchImpl(input, init);
+    // Standalone chain services use bridgeUrl instead of an in-process
+    // socialService. Only bypass the bridge for requests we do not recognize.
+    if (!request) return fetchImpl(input, init);
 
     try {
       let result;

@@ -355,7 +355,7 @@ function safeTokenDetailResult(value) {
   const market = raw.market_metrics && typeof raw.market_metrics === 'object' ? raw.market_metrics : {};
   const address = text(meta.address || pair.tokenAddress, 100).toLowerCase();
   const chain = text(meta.chain || pair.chain || 'robinhood', 20).toLowerCase();
-  if (!['robinhood', 'bsc'].includes(chain) || !validWalletAddress(address)) {
+  if (!['robinhood', 'base', 'bsc'].includes(chain) || !validWalletAddress(address)) {
     throw new Error('Invalid token detail result');
   }
   const pools = (Array.isArray(raw.pools?.list) ? raw.pools.list : []).slice(0, 32).map((entry) => {
@@ -470,7 +470,7 @@ function safeWalletProfitResult(value) {
   const chain = text(raw.chain || 'robinhood', 20).toLowerCase();
   const wallet = text(raw.wallet, 100).toLowerCase();
   const token = text(raw.token, 100).toLowerCase();
-  if (!['robinhood', 'bsc'].includes(chain) || !validWalletAddress(wallet) || !validWalletAddress(token)) {
+  if (!['robinhood', 'base', 'bsc'].includes(chain) || !validWalletAddress(wallet) || !validWalletAddress(token)) {
     throw new Error('Invalid wallet profit result');
   }
   const result = { chain, wallet, token };

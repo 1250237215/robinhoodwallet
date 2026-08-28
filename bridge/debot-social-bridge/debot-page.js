@@ -1935,7 +1935,7 @@
     if (!validShape) throw new AnalysisJobError('INVALID_JOB');
     const chain = String(job.payload.chain || '').trim().toLowerCase();
     const token = normalizeEvmAddress(job.payload.token);
-    if (!['robinhood', 'bsc'].includes(chain) || !token || token === ZERO_EVM_ADDRESS) {
+    if (!['robinhood', 'base', 'bsc'].includes(chain) || !token || token === ZERO_EVM_ADDRESS) {
       throw new AnalysisJobError('INVALID_JOB');
     }
     if (job.type === 'debot.token_holders.v1') {
