@@ -121,7 +121,7 @@ export async function startBaseStandaloneServer(
   const activeDebotClient = debotClient || new RobinhoodDebotClient({
     chain: 'base',
     timeoutMs: config.requestTimeoutMs,
-    fetchImpl: createDebotBridgeFetch({ fetchImpl, timeoutMs: config.requestTimeoutMs }),
+    fetchImpl: createDebotBridgeFetch({ fetchImpl, timeoutMs: config.requestTimeoutMs, bridgeRequired: true }),
     addressNormalizer: config.addressNormalizer,
     addressValidator: config.addressValidator
   });
@@ -155,7 +155,8 @@ export async function startBaseStandaloneServer(
     baseUrl: config.blockscoutApiUrl,
     timeoutMs: config.requestTimeoutMs,
     fetchImpl,
-    debotClient: activeDebotClient
+    debotClient: activeDebotClient,
+    debotRequired: true
   });
   const service = createRobinhoodService({
     config,

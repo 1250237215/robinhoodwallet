@@ -90,7 +90,8 @@ export function createDebotBridgeFetch({
   socialService,
   fetchImpl = globalThis.fetch,
   timeoutMs = 30_000,
-  bridgeUrl = 'http://127.0.0.1:18118/internal/debot/request'
+  bridgeUrl = 'http://127.0.0.1:18118/internal/debot/request',
+  bridgeRequired = false
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl is required');
   const bridgeRequest = socialService?.requestDeBot;
@@ -122,6 +123,7 @@ export function createDebotBridgeFetch({
       return jsonResponse(responseData(result));
     } catch (bridgeError) {
       if (init?.signal?.aborted || bridgeError?.name === 'AbortError') throw bridgeError;
+      if (bridgeRequired) throw bridgeError;
       return fetchImpl(input, init);
     }
   };

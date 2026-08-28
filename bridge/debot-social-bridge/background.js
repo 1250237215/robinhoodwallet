@@ -540,7 +540,7 @@ function safeTokenHoldersResult(value) {
   const raw = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const chain = text(raw.chain, 20).toLowerCase();
   const token = text(raw.token, 100).toLowerCase();
-  if (chain !== 'bsc' || !validWalletAddress(token) || !Array.isArray(raw.list)) {
+  if (!['robinhood', 'base', 'bsc'].includes(chain) || !validWalletAddress(token) || !Array.isArray(raw.list)) {
     throw new Error('Invalid token Holder result');
   }
   const list = [];

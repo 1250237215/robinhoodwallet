@@ -202,13 +202,15 @@ export class RobinhoodHolderClient {
     baseUrl = DEFAULT_BASE_URL,
     timeoutMs = 20_000,
     fetchImpl = globalThis.fetch,
-    debotClient = null
+    debotClient = null,
+    debotRequired = false
   } = {}) {
     if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl is required');
     this.baseUrl = String(baseUrl || DEFAULT_BASE_URL).replace(/\/$/, '');
     this.timeoutMs = Math.max(1_000, Number(timeoutMs) || 20_000);
     this.fetchImpl = fetchImpl;
     this.debotClient = debotClient;
+    this.debotRequired = debotRequired === true;
   }
 
   async fetchTopHolders(tokenAddress, { limit = 150, signal } = {}) {
@@ -241,6 +243,7 @@ export class RobinhoodHolderClient {
         };
       } catch (error) {
         if (signal?.aborted || error?.name === 'AbortError') throw error;
+        if (this.debotRequired) throw error;
         // Keep Blockscout as a compatibility fallback if the bridge is unavailable.
       }
     }
