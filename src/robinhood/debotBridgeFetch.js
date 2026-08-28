@@ -31,7 +31,7 @@ export function debotBridgeRequest(input, init = {}) {
   if (requestMethod(input, init) !== 'GET' || url.origin !== DEBOT_ORIGIN) return null;
   const chain = String(url.searchParams.get('chain') || '').trim().toLowerCase();
   const token = String(url.searchParams.get('token') || '').trim().toLowerCase();
-  if (chain !== 'robinhood' || !ADDRESS_PATTERN.test(token)) return null;
+  if (!['robinhood', 'bsc'].includes(chain) || !ADDRESS_PATTERN.test(token)) return null;
 
   if (url.pathname === TOKEN_DETAIL_PATH && hasOnlyParameters(url, ['chain', 'token'])) {
     return {

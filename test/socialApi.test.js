@@ -947,10 +947,21 @@ test('DeBot analysis bridge capability-gates and validates bounded BSC Holder re
       capabilities: ['posts', 'debot-analysis-v1', 'debot-token-holders-v1']
     })
   });
-  assert.throws(() => socialService.requestDeBot('debot.token_holders.v1', {
+  const robinhoodHolderPending = socialService.requestDeBot('debot.token_holders.v1', {
     chain: 'robinhood',
     token
-  }), /only supports the BSC chain/);
+  });
+  const robinhoodHolderJob = socialService.claimDeBotJobs({ limit: 1 }).jobs[0];
+  assert.equal(robinhoodHolderJob.type, 'debot.token_holders.v1');
+  socialService.submitDeBotResult(robinhoodHolderJob.id, {
+    claimToken: robinhoodHolderJob.claimToken,
+    success: true,
+    result: { chain: 'robinhood', token, total: 0, list: [] }
+  });
+  assert.deepEqual(await robinhoodHolderPending, {
+    schema: 'debot.token_holders.raw.v1',
+    data: { chain: 'robinhood', token, total: 0, list: [] }
+  });
   assert.throws(() => socialService.requestDeBot('debot.token_holders.v1', {
     chain: 'bsc',
     token,

@@ -88,9 +88,9 @@ function normalizeDeBotRequest(type, payload) {
   if (!['robinhood', 'bsc'].includes(chain)) {
     throw new TypeError('DeBot analysis only supports the Robinhood and BSC chains');
   }
-  if (normalizedType === DEBOT_TOKEN_HOLDERS && chain !== 'bsc') {
-    throw new TypeError('DeBot Holder analysis only supports the BSC chain');
-  }
+  // Holder profiles are provided by the signed-in DeBot bridge for every
+  // supported EVM chain. Keep the chain validation above, but do not
+  // incorrectly reject Robinhood requests before they reach DeBot.
   const normalized = {
     chain,
     token: evmAddress(payload.token, 'token')

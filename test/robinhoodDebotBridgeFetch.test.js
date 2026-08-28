@@ -29,6 +29,18 @@ test('recognizes only the two allowlisted Robinhood DeBot analysis requests', ()
   assert.equal(debotBridgeRequest(`https://example.com/api/dashboard/token/detail?chain=robinhood&token=${token}`), null);
 });
 
+test('recognizes Robinhood Holder profile requests for the signed-in DeBot bridge', () => {
+  const request = debotBridgeRequest(
+    `https://debot.ai/api/token/profiler/tokenHolderList?chain=robinhood&token=${token}` +
+      '&page_size=100&sort_field=position&sort_order=desc'
+  );
+  assert.deepEqual(request, {
+    type: 'debot.token_holders.v1',
+    payload: { chain: 'robinhood', token, pageSize: 100 },
+    cacheTtlMs: 30_000
+  });
+});
+
 test('returns a DeBot-compatible JSON response from the browser bridge', async () => {
   const calls = [];
   const fetch = createDebotBridgeFetch({
