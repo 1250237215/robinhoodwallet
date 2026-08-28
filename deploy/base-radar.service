@@ -12,6 +12,7 @@ Environment=NODE_ENV=production
 Environment=BASE_HOST=127.0.0.1
 Environment=BASE_PORT=18119
 Environment=BASE_DATA_FILE=/var/lib/robinhood-radar/base.sqlite
+Environment=EVM_WALLET_DATA_FILE=/var/lib/robinhood-radar/evm-wallets.sqlite
 Environment=BARK_DATA_FILE=/var/lib/robinhood-radar/bark.sqlite
 Environment=BASE_MIN_ENTRY_USD=500
 Environment=BASE_SIGNIFICANT_PROFIT_RATE=0.002
