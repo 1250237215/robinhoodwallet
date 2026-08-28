@@ -40,6 +40,10 @@ function baseTuningEnvironment(env) {
       mapped[key] = value;
       continue;
     }
+    if (key === 'EVM_WALLET_DATA_FILE') {
+      mapped[key] = value;
+      continue;
+    }
     if (!key.startsWith('BASE_')) continue;
     mapped[`ROBINHOOD_${key.slice('BASE_'.length)}`] = value;
   }
@@ -110,6 +114,7 @@ export async function startBaseStandaloneServer(
     addressNormalizer: config.addressNormalizer,
     addressValidator: config.addressValidator,
     transactionNormalizer: config.transactionNormalizer,
+    walletLibraryFile: config.walletDataFile,
     barkLibraryFile: config.barkDataFile
   });
   const activeDebotClient = debotClient || new RobinhoodDebotClient({
