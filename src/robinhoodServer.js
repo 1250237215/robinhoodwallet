@@ -1291,7 +1291,8 @@ export async function startRobinhoodStandaloneServer(
     server.listen(port, host, resolve);
   });
   service.start();
-  monitor.start();
+  if (String(env.ROBINHOOD_DEBOT_WALLET_MONITOR_ONLY || '').trim() === '1') monitor.startExternal();
+  else monitor.start();
   socialService.start();
   return {
     server,

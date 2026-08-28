@@ -112,9 +112,11 @@ test('reverse proxy routes each chain API to its own process', () => {
 test('chain systemd units bind independent ports, chain databases, and private environment files', () => {
   assert.match(robinhoodUnit, /EnvironmentFile=-\/etc\/robinhood-radar\/robinhood\.env/);
   assert.match(robinhoodUnit, /Environment=EVM_WALLET_DATA_FILE=\/var\/lib\/robinhood-radar\/evm-wallets\.sqlite/);
+  assert.match(robinhoodUnit, /Environment=ROBINHOOD_DEBOT_WALLET_MONITOR_ONLY=1/);
   assert.match(baseUnit, /Environment=BASE_PORT=18119/);
   assert.match(baseUnit, /Environment=BASE_DATA_FILE=\/var\/lib\/robinhood-radar\/base\.sqlite/);
   assert.match(baseUnit, /Environment=EVM_WALLET_DATA_FILE=\/var\/lib\/robinhood-radar\/evm-wallets\.sqlite/);
+  assert.match(baseUnit, /Environment=BASE_DEBOT_WALLET_MONITOR_ONLY=1/);
   assert.match(baseUnit, /EnvironmentFile=-\/etc\/robinhood-radar\/base\.env/);
   assert.match(baseUnit, /ExecStart=.*base-server\.mjs/);
   assert.match(bscUnit, /Environment=BSC_PORT=18122/);

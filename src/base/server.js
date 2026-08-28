@@ -234,7 +234,8 @@ export async function startBaseStandaloneServer(
     throw error;
   }
   await service.start();
-  monitor.start();
+  if (String(env.BASE_DEBOT_WALLET_MONITOR_ONLY || '').trim() === '1') monitor.startExternal();
+  else monitor.start();
   const address = server.address();
   return {
     server,
