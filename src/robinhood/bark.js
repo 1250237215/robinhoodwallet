@@ -193,6 +193,17 @@ export class RobinhoodBarkNotifier {
     }));
   }
 
+  isEnabled() {
+    return this.store.isMonitorBarkEnabled?.() !== false;
+  }
+
+  updateEnabled(enabled) {
+    if (typeof enabled !== 'boolean') throw new TypeError('enabled must be a boolean');
+    if (!this.store.setMonitorBarkEnabled) throw new Error('Bark global settings are unavailable');
+    this.store.setMonitorBarkEnabled(enabled);
+    return this.isEnabled();
+  }
+
   updateFeature(featureId, enabled) {
     const id = String(featureId || '').trim();
     if (!BARK_FEATURE_IDS.has(id)) throw new TypeError('Unknown Bark feature');
@@ -587,7 +598,7 @@ export class RobinhoodBarkNotifier {
   }
 
   #featureEnabled(featureId) {
-    return (this.store.listMonitorBarkFeatureStates?.() || {})[featureId] !== false;
+    return this.isEnabled() && (this.store.listMonitorBarkFeatureStates?.() || {})[featureId] !== false;
   }
 }
 

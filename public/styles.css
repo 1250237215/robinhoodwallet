@@ -2624,6 +2624,46 @@ select:hover {
   margin-left: auto;
 }
 
+.monitor-bark-global-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: inherit;
+}
+
+.inline-action-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 25px;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-muted);
+  color: var(--ink);
+  font: inherit;
+  font-size: 9px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.inline-action-button svg {
+  width: 11px;
+  height: 11px;
+}
+
+.inline-action-button:hover:not(:disabled),
+.inline-action-button.is-active {
+  border-color: #7ea58a;
+  background: #edf6ef;
+}
+
+.inline-action-button:disabled {
+  opacity: 0.52;
+  cursor: default;
+}
+
 .monitor-sound-fields {
   min-width: 0;
   display: grid;

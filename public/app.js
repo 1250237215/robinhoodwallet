@@ -479,6 +479,8 @@ const elements = {
   monitorBarkLabel: document.querySelector('#monitor-bark-label'),
   monitorBarkAddButton: document.querySelector('#monitor-bark-add-button'),
   monitorBarkCount: document.querySelector('#monitor-bark-count'),
+  monitorBarkEnableAll: document.querySelector('#monitor-bark-enable-all'),
+  monitorBarkDisableAll: document.querySelector('#monitor-bark-disable-all'),
   monitorBarkList: document.querySelector('#monitor-bark-list'),
   monitorBarkFeatureCount: document.querySelector('#monitor-bark-feature-count'),
   monitorBarkFeatureList: document.querySelector('#monitor-bark-feature-list')
@@ -539,6 +541,7 @@ const state = {
   monitorBarkBusy: new Set(),
   monitorMobileBarkTesting: false,
   monitorBarkFeatures: [],
+  monitorBarkEnabled: true,
   monitorBarkFeatureBusy: new Set(),
   walletEditorChainId: 'robinhood',
   walletEditorLoadSequence: 0,
@@ -1757,6 +1760,7 @@ function normalizeBarkFeature(raw) {
 
 function applyBarkFeatures(payload) {
   const record = unwrapRecord(payload || {});
+  if (typeof record.barkEnabled === 'boolean') state.monitorBarkEnabled = record.barkEnabled;
   if (!Array.isArray(record.barkFeatures)) return;
   state.monitorBarkFeatures = record.barkFeatures
     .map(normalizeBarkFeature)
@@ -1776,7 +1780,7 @@ function renderMonitorBarkFeatures() {
   const features = state.monitorBarkFeatures;
   const enabledCount = features.filter((feature) => feature.enabled).length;
   elements.monitorBarkFeatureCount.textContent = features.length
-    ? `${enabledCount} / ${features.length} 已启用`
+    ? `${enabledCount} / ${features.length} 已启用 · ${state.monitorBarkEnabled ? '总开关开启' : '总开关关闭'}`
     : '暂无功能';
   if (!features.length) {
     elements.monitorBarkFeatureList.innerHTML = '<div class="monitor-bark-feature-empty">暂无可管理的 Bark 功能</div>';
@@ -1799,8 +1803,22 @@ function renderMonitorBarkFeatures() {
   }).join('');
 }
 
+function renderMonitorBarkGlobalActions() {
+  const busy = state.monitorBarkFeatureBusy.has('__global__');
+  const enabled = state.monitorBarkEnabled;
+  if (elements.monitorBarkEnableAll) {
+    elements.monitorBarkEnableAll.disabled = busy || enabled;
+    elements.monitorBarkEnableAll.classList.toggle('is-active', enabled);
+  }
+  if (elements.monitorBarkDisableAll) {
+    elements.monitorBarkDisableAll.disabled = busy || !enabled;
+    elements.monitorBarkDisableAll.classList.toggle('is-active', !enabled);
+  }
+}
+
 function renderMonitorBarkTargets() {
   renderMonitorBarkFeatures();
+  renderMonitorBarkGlobalActions();
   const targets = state.monitorBarkTargets;
   const enabledTargets = targets.filter((target) => target.enabled);
   if (elements.mobileBarkTestButton) {
@@ -3578,6 +3596,8 @@ function setMonitorMutationControlsDisabled(disabled) {
   elements.monitorSoundSaveButton.disabled = disabled;
   elements.monitorBarkSettingsSaveButton.disabled = disabled;
   elements.monitorBarkAddButton.disabled = disabled;
+  if (elements.monitorBarkEnableAll) elements.monitorBarkEnableAll.disabled = disabled;
+  if (elements.monitorBarkDisableAll) elements.monitorBarkDisableAll.disabled = disabled;
   for (const input of elements.monitorBarkFeatureList.querySelectorAll('[data-bark-feature-toggle]')) {
     input.disabled = disabled || state.monitorBarkFeatureBusy.has(input.closest('[data-bark-feature-id]')?.dataset.barkFeatureId);
   }
@@ -3971,6 +3991,35 @@ async function toggleBarkFeature(input) {
     if (chainRequestIsCurrent(context)) {
       state.monitorBarkFeatureBusy.delete(id);
       renderMonitorBarkFeatures();
+    }
+  }
+}
+
+async function toggleAllBark(enabled) {
+  const context = captureChainRequestContext();
+  if (state.monitorBarkEnabled === enabled || state.monitorBarkFeatureBusy.has('__global__')) return;
+  const previous = state.monitorBarkEnabled;
+  state.monitorBarkEnabled = enabled;
+  state.monitorBarkFeatureBusy.add('__global__');
+  renderMonitorBarkFeatures();
+  renderMonitorBarkGlobalActions();
+  try {
+    const payload = await fetchChainJson(context, '/monitor/bark/global', {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled })
+    });
+    if (!chainRequestIsCurrent(context)) return;
+    applyBarkFeatures(payload);
+    showToast(enabled ? 'Bark 实际提醒已全部开启' : 'Bark 实际提醒已全部关闭（测试推送不受影响）');
+  } catch (error) {
+    if (!chainRequestIsCurrent(context)) return;
+    state.monitorBarkEnabled = previous;
+    showToast(`Bark 总开关修改失败：${error.message}`, 'error');
+  } finally {
+    if (chainRequestIsCurrent(context)) {
+      state.monitorBarkFeatureBusy.delete('__global__');
+      renderMonitorBarkFeatures();
+      renderMonitorBarkGlobalActions();
     }
   }
 }
@@ -7753,7 +7802,8 @@ function resetChainState({ preserveMonitorFeed = false } = {}) {
     state.monitorAlertedTokens.clear();
     state.monitorBarkTargets = [];
     state.monitorBarkBusy.clear();
-    state.monitorBarkFeatures = [];
+  state.monitorBarkFeatures = [];
+  state.monitorBarkEnabled = true;
     state.monitorBarkFeatureBusy.clear();
   } else {
     synchronizeCombinedMonitorEvents();
@@ -7979,6 +8029,8 @@ elements.monitorBarkFeatureList.addEventListener('change', (event) => {
   const input = event.target.closest('[data-bark-feature-toggle]');
   if (input) void toggleBarkFeature(input);
 });
+elements.monitorBarkEnableAll?.addEventListener('click', () => void toggleAllBark(true));
+elements.monitorBarkDisableAll?.addEventListener('click', () => void toggleAllBark(false));
 elements.monitorEventFeed.addEventListener('click', (event) => {
   const button = event.target.closest('[data-monitor-wallet-edit]');
   if (button) void openMonitorWalletEditor(button);

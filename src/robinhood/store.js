@@ -173,6 +173,7 @@ const BARK_LIBRARY_METADATA_TABLE = `${BARK_LIBRARY_SCHEMA}.metadata`;
 const SHARED_BARK_SOUND_KEY = 'bark:sound';
 const SHARED_BARK_VOLUME_KEY = 'bark:volume';
 const SHARED_BARK_WINDOW_SECONDS_KEY = 'bark:cluster-window-seconds';
+const SHARED_BARK_ENABLED_KEY = 'bark:enabled';
 const BARK_LIBRARY_SOURCE_PREFIX = 'legacy_bark_source:';
 const BARK_LIBRARY_TOMBSTONE_PREFIX = 'bark_deleted_endpoint:';
 const BARK_LIBRARY_SOURCE_PRIORITY = Object.freeze({
@@ -1789,6 +1790,19 @@ export function createRobinhoodStore(filename, {
         String(row.key).slice(BARK_FEATURE_METADATA_PREFIX.length),
         String(row.value) !== '0'
       ]));
+    },
+    isMonitorBarkEnabled() {
+      const row = db.prepare(`SELECT value FROM ${barkMetadataTable} WHERE key = ?`)
+        .get(SHARED_BARK_ENABLED_KEY);
+      return !row || String(row.value) !== '0';
+    },
+    setMonitorBarkEnabled(enabled) {
+      if (typeof enabled !== 'boolean') throw new TypeError('enabled must be a boolean');
+      runSharedBarkWrite(() => {
+        db.prepare(`INSERT OR REPLACE INTO ${barkMetadataTable}(key, value) VALUES (?, ?)`)
+          .run(SHARED_BARK_ENABLED_KEY, enabled ? '1' : '0');
+      });
+      return enabled;
     },
     setMonitorBarkFeatureState(featureId, enabled) {
       const key = `${BARK_FEATURE_METADATA_PREFIX}${String(featureId || '')}`;

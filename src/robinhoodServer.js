@@ -565,7 +565,8 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
     sendJson(res, 200, {
       ...activeMonitor.getSnapshot({ eventLimit: limit }),
       barkTargets: activeMonitor.listBarkTargets(),
-      barkFeatures: activeMonitor.listBarkFeatures?.() || []
+      barkFeatures: activeMonitor.listBarkFeatures?.() || [],
+      barkEnabled: activeMonitor.isBarkEnabled?.() !== false
     });
     return true;
   }
@@ -580,10 +581,11 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
   if (url.pathname === '/api/robinhood/monitor/bark') {
     const activeMonitor = requireMonitor(monitor);
     if (req.method === 'GET') {
-      sendJson(res, 200, {
-        ok: true,
-        barkTargets: activeMonitor.listBarkTargets(),
-        barkFeatures: activeMonitor.listBarkFeatures?.() || []
+    sendJson(res, 200, {
+      ok: true,
+      barkTargets: activeMonitor.listBarkTargets(),
+      barkFeatures: activeMonitor.listBarkFeatures?.() || [],
+      barkEnabled: activeMonitor.isBarkEnabled?.() !== false
       });
       return true;
     }
@@ -598,7 +600,8 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
         ok: true,
         target,
         barkTargets: activeMonitor.listBarkTargets(),
-        barkFeatures: activeMonitor.listBarkFeatures?.() || []
+        barkFeatures: activeMonitor.listBarkFeatures?.() || [],
+        barkEnabled: activeMonitor.isBarkEnabled?.() !== false
       });
       return true;
     }
@@ -608,7 +611,11 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
   if (url.pathname === '/api/robinhood/monitor/bark/features') {
     const activeMonitor = requireMonitor(monitor);
     if (req.method === 'GET') {
-      sendJson(res, 200, { ok: true, barkFeatures: activeMonitor.listBarkFeatures?.() || [] });
+      sendJson(res, 200, {
+        ok: true,
+        barkFeatures: activeMonitor.listBarkFeatures?.() || [],
+        barkEnabled: activeMonitor.isBarkEnabled?.() !== false
+      });
       return true;
     }
     if (req.method === 'PATCH') {
@@ -622,8 +629,32 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
       sendJson(res, 200, {
         ok: true,
         feature,
-        barkFeatures: activeMonitor.listBarkFeatures?.() || []
+        barkFeatures: activeMonitor.listBarkFeatures?.() || [],
+        barkEnabled: activeMonitor.isBarkEnabled?.() !== false
       });
+      return true;
+    }
+    methodNotAllowed(['GET', 'PATCH']);
+  }
+
+  if (url.pathname === '/api/robinhood/monitor/bark/global') {
+    const activeMonitor = requireMonitor(monitor);
+    if (req.method === 'GET') {
+      sendJson(res, 200, { ok: true, barkEnabled: activeMonitor.isBarkEnabled?.() !== false });
+      return true;
+    }
+    if (req.method === 'PATCH') {
+      const body = await readJson(req);
+      if (typeof body.enabled !== 'boolean') {
+        throw new HttpError(400, 'enabled must be a boolean', 'INVALID_BARK_GLOBAL');
+      }
+      let barkEnabled;
+      try {
+        barkEnabled = activeMonitor.updateBarkEnabled(body.enabled);
+      } catch (error) {
+        throw new HttpError(400, error instanceof Error ? error.message : String(error), 'INVALID_BARK_GLOBAL');
+      }
+      sendJson(res, 200, { ok: true, barkEnabled });
       return true;
     }
     methodNotAllowed(['GET', 'PATCH']);
