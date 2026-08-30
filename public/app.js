@@ -1762,9 +1762,20 @@ function applyBarkFeatures(payload) {
   const record = unwrapRecord(payload || {});
   if (typeof record.barkEnabled === 'boolean') state.monitorBarkEnabled = record.barkEnabled;
   if (!Array.isArray(record.barkFeatures)) return;
-  state.monitorBarkFeatures = record.barkFeatures
+  const features = record.barkFeatures
     .map(normalizeBarkFeature)
     .filter((feature) => /^[a-z][a-z0-9_]{1,63}$/.test(feature.id));
+  // Keep the newly added pinned-message switch visible while an older
+  // backend response is still cached by a proxy or browser.
+  if (!features.some((feature) => feature.id === 'telegram_pinned')) {
+    features.splice(6, 0, {
+      id: 'telegram_pinned',
+      group: '群聊监控',
+      label: 'Telegram 置顶',
+      enabled: true
+    });
+  }
+  state.monitorBarkFeatures = features;
 }
 
 function applyBarkTargets(payload) {
