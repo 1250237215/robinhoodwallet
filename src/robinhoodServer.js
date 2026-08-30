@@ -110,8 +110,13 @@ function telegramBarkPayload(body) {
   if (![chatId, messageId, senderId].every(Number.isSafeInteger)) {
     throw new HttpError(400, 'Telegram identifiers must be integers', 'INVALID_TELEGRAM_BARK_PAYLOAD');
   }
-  if (!Array.isArray(body.contractAddresses) || !body.contractAddresses.length || body.contractAddresses.length > 8) {
-    throw new HttpError(400, 'contractAddresses must contain 1 to 8 entries', 'INVALID_TELEGRAM_BARK_PAYLOAD');
+  const eventType = body.eventType === undefined ? 'ca' : String(body.eventType || '').trim().toLowerCase();
+  if (!['ca', 'pinned'].includes(eventType)) {
+    throw new HttpError(400, 'eventType is unsupported', 'INVALID_TELEGRAM_BARK_PAYLOAD');
+  }
+  if (!Array.isArray(body.contractAddresses) || body.contractAddresses.length > 8
+    || (eventType === 'ca' && !body.contractAddresses.length)) {
+    throw new HttpError(400, 'contractAddresses must contain 1 to 8 entries for CA alerts', 'INVALID_TELEGRAM_BARK_PAYLOAD');
   }
   const contractAddresses = [...new Set(body.contractAddresses.map((value) => (
     cleanInternalText(value, 'contract address', 100)
@@ -162,6 +167,7 @@ function telegramBarkPayload(body) {
     throw new HttpError(400, 'messageUrl must be a Telegram URL', 'INVALID_TELEGRAM_BARK_PAYLOAD');
   }
   return {
+    eventType,
     chatId,
     messageId,
     senderId,
@@ -182,11 +188,14 @@ async function handleInternalTelegramBark(req, res, url, monitor, token) {
   if (!internalTokenMatches(req, token)) {
     throw new HttpError(401, 'Unauthorized', 'UNAUTHORIZED');
   }
-  if (!monitor?.notifyTelegramMessage) {
+  const payload = telegramBarkPayload(await readJson(req, 16 * 1024));
+  const notifier = payload.eventType === 'pinned'
+    ? monitor?.notifyTelegramPinnedMessage
+    : monitor?.notifyTelegramMessage;
+  if (typeof notifier !== 'function') {
     throw new HttpError(503, 'Bark notifications are unavailable', 'BARK_UNAVAILABLE');
   }
-  const payload = telegramBarkPayload(await readJson(req, 16 * 1024));
-  const delivery = await monitor.notifyTelegramMessage(payload);
+  const delivery = await notifier.call(monitor, payload);
   sendJson(res, 200, { ok: true, delivery });
   return true;
 }

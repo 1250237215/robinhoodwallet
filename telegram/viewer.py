@@ -133,6 +133,11 @@ CA_ALERT_PINNED_CHAT_NAME = os.environ.get(
     "TG_PINNED_CHAT_NAME",
     "LazyCat FNF",
 ).strip()
+try:
+    _pinned_poll_interval = float(os.environ.get("TG_PINNED_POLL_INTERVAL_SECONDS", "5"))
+except (TypeError, ValueError):
+    _pinned_poll_interval = 5.0
+PINNED_POLL_INTERVAL_SECONDS = max(3.0, min(60.0, _pinned_poll_interval))
 CA_ALERT_CHAIN_DETECTION_TIMEOUT_SECONDS = bounded_environment_number(
     "TG_CA_CHAIN_DETECTION_TIMEOUT_MS",
     1200,
@@ -3108,6 +3113,110 @@ class TelegramCaAlertService:
         self.store.close()
 
 
+class TelegramPinnedAlertService(TelegramCaAlertService):
+    """Poll the fixed LazyCat chat's pinned-message list and Bark new pins."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._seen_ids = set()
+        self._initialized = False
+
+    async def _latest_pinned(self, limit=100):
+        latest = []
+        async for message in self.avatar_resolver.client.iter_messages(
+            self.dialog.entity,
+            filter=types.InputMessagesFilterPinned(),
+            limit=limit,
+        ):
+            latest.append(message)
+        return latest
+
+    async def initialize(self):
+        try:
+            messages = await self._latest_pinned()
+            self._seen_ids = {
+                int(message.id)
+                for message in messages
+                if getattr(message, "id", None) is not None
+            }
+            self._initialized = True
+            logging.info("已读取 LazyCat 群现有置顶消息 %s 条", len(self._seen_ids))
+        except Exception as error:
+            logging.warning("读取 Telegram 置顶消息失败：%s", error)
+
+    async def poll_once(self):
+        messages = await self._latest_pinned()
+        current_ids = {
+            int(message.id)
+            for message in messages
+            if getattr(message, "id", None) is not None
+        }
+        if not self._initialized:
+            self._seen_ids = current_ids
+            self._initialized = True
+            return 0
+        new_messages = [
+            message
+            for message in reversed(messages)
+            if getattr(message, "id", None) is not None
+            and int(message.id) not in self._seen_ids
+        ]
+        self._seen_ids.update(current_ids)
+        # Bound memory while retaining enough IDs to prevent repeated pins.
+        if len(self._seen_ids) > 500:
+            self._seen_ids = set(sorted(self._seen_ids)[-300:])
+        for message in new_messages:
+            await self.handle_pinned_message(message)
+        return len(new_messages)
+
+    async def handle_pinned_message(self, message):
+        message_id = getattr(message, "id", None)
+        if message_id is None or not self.delivery_configured:
+            return False
+        sender_id = int(getattr(message, "sender_id", 0) or 0)
+        stream_id = f"pinned:{self.chat_id}:{int(message_id)}"
+        text = str(getattr(message, "raw_text", None) or "").strip()
+        addresses = extract_contract_addresses(text)
+        if not self.store.claim_social_delivery(
+            stream_id,
+            self.chat_id,
+            int(message_id),
+            sender_id,
+            "Telegram 置顶",
+            addresses,
+        ):
+            return False
+        avatar = await self.avatar_resolver.info_for_message(message, self.dialog.entity)
+        debot_urls, contract_chains = await self._resolve_contracts(addresses)
+        payload = {
+            "eventType": "pinned",
+            "chatId": self.chat_id,
+            "messageId": int(message_id),
+            "senderId": sender_id,
+            "streamId": stream_id,
+            "senderName": str(avatar.get("name") or "Telegram"),
+            "chatName": self.chat_name,
+            "text": text or "（置顶消息没有文字内容）",
+            "contractAddresses": addresses,
+            "debotUrls": debot_urls,
+            "contractChains": contract_chains,
+            "messageUrl": self._message_url(message_id),
+        }
+        task = asyncio.create_task(self._deliver(stream_id, payload))
+        self.delivery_tasks.add(task)
+        task.add_done_callback(self._delivery_finished)
+        return True
+
+    async def drain(self):
+        if not self.delivery_tasks:
+            return
+        done, pending = await asyncio.wait(tuple(self.delivery_tasks), timeout=16)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
 class TelegramSocialCaAlertService(TelegramCaAlertService):
     """CA alerts for channels selected in the social-monitor panel.
 
@@ -3631,6 +3740,28 @@ async def run_viewer(client, config, dialogs=None):
         excluded_chat_id=alert_service.chat_id if alert_service is not None else None,
     )
 
+    pinned_alert_service = None
+    pinned_poll_task = None
+    if alert_service is not None:
+        pinned_alert_service = TelegramPinnedAlertService(
+            alert_dialog,
+            controller.avatar_resolver,
+            store=alert_service.store,
+        )
+        await pinned_alert_service.initialize()
+
+        async def poll_pinned_messages():
+            while True:
+                await asyncio.sleep(PINNED_POLL_INTERVAL_SECONDS)
+                try:
+                    await pinned_alert_service.poll_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    logging.warning("Telegram 置顶消息轮询失败：%s", error)
+
+        pinned_poll_task = asyncio.create_task(poll_pinned_messages())
+
     @client.on(events.NewMessage())
     async def handle_new_message(event):
         controller_task = controller.add_message(event.message)
@@ -3702,6 +3833,11 @@ async def run_viewer(client, config, dialogs=None):
     try:
         await client.run_until_disconnected()
     finally:
+        if pinned_poll_task is not None:
+            pinned_poll_task.cancel()
+            await asyncio.gather(pinned_poll_task, return_exceptions=True)
+        if pinned_alert_service is not None:
+            await pinned_alert_service.drain()
         controller.close()
         if alert_service is not None:
             await alert_service.close()

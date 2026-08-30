@@ -110,6 +110,37 @@ test('internal Telegram Bark endpoint requires its bearer token and validates pa
   }
 });
 
+test('internal Telegram Bark endpoint accepts a pinned message without a CA', async () => {
+  const received = [];
+  const tokenValue = 'p'.repeat(48);
+  const monitor = {
+    async notifyTelegramPinnedMessage(payload) {
+      received.push(payload);
+      return { attempted: 1, sent: 1, failed: 0 };
+    }
+  };
+  const server = createRobinhoodStandaloneServer({
+    service: {}, monitor, telegramBarkToken: tokenValue, servePublic: false
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    const response = await fetch(`${baseUrl}/internal/telegram-bark`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${tokenValue}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        eventType: 'pinned', chatId: -1001, messageId: 9, senderId: 42,
+        streamId: 'pinned:-1001:9', senderName: 'LazyCat', chatName: 'LazyCat FNF',
+        text: '新的置顶消息', contractAddresses: [], contractChains: [], debotUrls: [], messageUrl: ''
+      })
+    });
+    assert.equal(response.status, 200);
+    assert.equal(received[0].eventType, 'pinned');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('internal DeBot wallet-event endpoint accepts loopback POST batches', async () => {
   const received = [];
   const server = createRobinhoodStandaloneServer({

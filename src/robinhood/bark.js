@@ -15,6 +15,7 @@ export const BARK_FEATURES = Object.freeze([
   { id: 'token_create', group: '链上流水', label: '钱包发币' },
   { id: 'cluster_buy', group: '链上流水', label: '集合买入' },
   { id: 'telegram_ca', group: '群聊监控', label: 'Telegram CA' },
+  { id: 'telegram_pinned', group: '群聊监控', label: 'Telegram 置顶' },
   { id: 'feishu_ca', group: '群聊监控', label: '飞书 CA' },
   { id: 'twitter_ca', group: '社媒监控', label: 'X 账号 CA' },
   { id: 'telegram_social_ca', group: '社媒监控', label: 'Telegram 频道 CA' },
@@ -359,6 +360,68 @@ export class RobinhoodBarkNotifier {
       volume,
       url: normalizedDebotUrls[0] || String(messageUrl || ''),
       group: 'Telegram CA 监控'
+    })));
+    return {
+      attempted: targets.length,
+      sent: results.filter((result) => result.status === 'fulfilled').length,
+      failed: results.filter((result) => result.status === 'rejected').length
+    };
+  }
+
+  async notifyTelegramPinnedMessage({
+    senderName = 'Telegram',
+    chatName = 'Telegram',
+    text = '',
+    contractAddresses = [],
+    contractChains = [],
+    debotUrls = [],
+    messageUrl = '',
+    sound = 'alarm',
+    volume = 5
+  } = {}) {
+    if (!this.#featureEnabled('telegram_pinned')) return { attempted: 0, sent: 0, failed: 0 };
+    const targets = this.store.listMonitorBarkTargets().filter((target) => target.enabled);
+    if (!targets.length) return { attempted: 0, sent: 0, failed: 0 };
+    const addresses = [...new Set(
+      (Array.isArray(contractAddresses) ? contractAddresses : [])
+        .map((address) => String(address || '').trim())
+        .filter(Boolean)
+    )].slice(0, 8);
+    const chainLabels = {
+      robinhood: 'Robinhood',
+      bsc: 'BSC',
+      base: 'Base',
+      solana: 'Solana',
+      multiple: '多链待确认',
+      unknown: '链待确认'
+    };
+    const addressSummary = addresses.map((address, index) => {
+      const chain = String(Array.isArray(contractChains) ? contractChains[index] : '').toLowerCase();
+      return `${chainLabels[chain] || '链待确认'}：${address}`;
+    }).join('\n');
+    const normalizedDebotUrls = [...new Set(
+      (Array.isArray(debotUrls) ? debotUrls : [])
+        .map((url) => String(url || '').trim())
+        .filter((url) => /^https:\/\/debot\.ai\/token\//i.test(url))
+    )].slice(0, 8);
+    const normalizedText = String(text || '').replace(/\s+/g, ' ').trim();
+    const textSummary = normalizedText.length > 600
+      ? `${normalizedText.slice(0, 599).trimEnd()}...`
+      : normalizedText;
+    const body = [
+      `${cleanLabel(chatName, 'Telegram')} 新置顶`,
+      addressSummary,
+      ...normalizedDebotUrls,
+      textSummary,
+      messageUrl ? `来源：${String(messageUrl).trim()}` : ''
+    ].filter(Boolean).join('\n');
+    const results = await Promise.allSettled(targets.map((target) => this.#send(target, {
+      title: `Telegram 置顶：${cleanLabel(senderName, 'Telegram')}`,
+      body: body || 'Telegram 群出现新的置顶消息',
+      sound,
+      volume,
+      url: normalizedDebotUrls[0] || String(messageUrl || ''),
+      group: 'Telegram 置顶监控'
     })));
     return {
       attempted: targets.length,

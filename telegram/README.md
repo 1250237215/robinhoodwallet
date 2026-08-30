@@ -21,6 +21,10 @@
 - `PUT` 或 `POST /api/selection`：提交 JSON `{"chat_ids":[-100123,-100456]}` 保存并应用选择；也接受字段名 `selected_chat_ids`。
 - `GET /api/messages?limit=1000`：返回当前所选聊天的合并消息流；需要单独查看某个聊天时可附加 `chat_id`。
 
+固定的 LazyCat 群会每隔几秒检查 Telegram 置顶消息。检测到新的置顶消息后，服务会通过
+1874catch 的 Bark 目标发送“Telegram 置顶”提醒；置顶内容包含 CA 时会同时附上对应链的
+DeBot 购买链接。置顶提醒可在网站 Bark 设置中单独关闭，不会影响普通 Telegram CA 提醒。
+
 每条消息保留原文 `text`，并在后台翻译完成后填充 `translated_text`；回复预览也有
 同名字段。翻译是异步和可失败的，原文不会等待外部翻译服务。历史回填和实时消息
 使用独立限流通道，历史消息不会阻塞新消息的翻译。生产部署使用服务器私有的

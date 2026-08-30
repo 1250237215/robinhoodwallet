@@ -245,6 +245,39 @@ test('sends Telegram CA alerts to enabled targets in a separate Bark group', asy
   store.close();
 });
 
+test('sends new Telegram pinned messages even without a CA and links CA pins to DeBot', async () => {
+  const store = createRobinhoodStore(':memory:');
+  const requests = [];
+  const notifier = new RobinhoodBarkNotifier({
+    store,
+    fetchImpl: async (url) => {
+      requests.push(new URL(url));
+      return new Response(JSON.stringify({ code: 200 }), { status: 200 });
+    }
+  });
+  notifier.createTarget({ endpoint: 'device_key_123456', label: 'Phone' });
+  const withoutCa = await notifier.notifyTelegramPinnedMessage({
+    senderName: 'LazyCat',
+    chatName: 'LazyCat FNF',
+    text: '新的置顶提醒'
+  });
+  assert.deepEqual(withoutCa, { attempted: 1, sent: 1, failed: 0 });
+  assert.equal(requests[0].searchParams.get('group'), 'Telegram 置顶监控');
+  assert.match(decodeURIComponent(requests[0].pathname), /新的置顶提醒/);
+  const debotUrl = 'https://debot.ai/token/bsc/289942_0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  await notifier.notifyTelegramPinnedMessage({
+    senderName: 'LazyCat',
+    chatName: 'LazyCat FNF',
+    text: 'CA 已置顶',
+    contractAddresses: ['0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+    contractChains: ['bsc'],
+    debotUrls: [debotUrl]
+  });
+  assert.equal(requests[1].searchParams.get('url'), debotUrl);
+  assert.match(decodeURIComponent(requests[1].pathname), /BSC：0xaaaaaaaa/);
+  store.close();
+});
+
 test('sends Feishu CA alerts with a DeBot purchase link in the body and click target', async () => {
   const store = createRobinhoodStore(':memory:');
   const requests = [];
