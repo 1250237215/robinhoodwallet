@@ -455,11 +455,25 @@ export class RobinhoodDebotClient {
 
   async fetchTokenMetrics(tokenAddress, { signal } = {}) {
     const address = this.requireAddress(tokenAddress, 'token');
-    const raw = await requestObject(
-      `${this.baseUrl}/dashboard/token/market/metrics?chain=${encodeURIComponent(this.chain)}&token=${encodeURIComponent(address)}`,
-      { timeoutMs: this.timeoutMs, signal, fetchImpl: this.fetchImpl }
-    );
-    return normalizeTokenMetrics(raw, this.normalizationOptions());
+    // The signed-in browser bridge supports token/detail, while the older
+    // market/metrics endpoint is not available to a VPS without cookies.
+    // Reuse the detail response so market cap, liquidity and creation time
+    // continue to work when DexScreener is unavailable.
+    const detail = await this.fetchTokenDetail(address, { signal });
+    return {
+      chain: detail.chain,
+      address: detail.address,
+      symbol: detail.symbol,
+      name: detail.name,
+      decimals: detail.decimals,
+      creationTimestamp: detail.creationTimestamp,
+      priceUsd: detail.priceUsd,
+      marketCapUsd: detail.marketCapUsd,
+      liquidityUsd: detail.liquidityUsd,
+      holders: detail.holders,
+      updatedAt: detail.updatedAt,
+      source: 'debot_token_detail'
+    };
   }
 
   async fetchTokenSafety(tokenAddress, { signal } = {}) {

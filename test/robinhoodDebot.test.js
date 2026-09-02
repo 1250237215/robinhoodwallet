@@ -358,10 +358,9 @@ test('routes Base requests through the same client without changing EVM address 
       return Response.json({
         code: 0,
         data: {
-          chain: 'base',
-          token: tokenAddress,
-          meta: { address: tokenAddress, symbol: 'BASE', creation_timestamp: 100 },
-          mkt_cap: 5_000_000
+          token: { meta: { chain: 'base', address: tokenAddress, symbol: 'BASE', creation_timestamp: 100 } },
+          pair: { chain: 'base', tokenAddress, market_cap: 5_000_000 },
+          market_metrics: { mkt_cap: 5_000_000 }
         }
       });
     }
@@ -373,6 +372,7 @@ test('routes Base requests through the same client without changing EVM address 
   assert.equal(metrics.chain, 'base');
   assert.equal(metrics.address, tokenAddress);
   assert.equal(metrics.marketCapUsd, 5_000_000);
+  assert.equal(metrics.creationTimestamp, 100);
   assert.equal(requests[0].searchParams.get('chain'), 'base');
   assert.equal(requests[0].searchParams.get('token'), tokenAddress);
   await assert.rejects(client.fetchTokenMetrics('0x1234'), /Invalid Base token address/);
