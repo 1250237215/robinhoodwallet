@@ -204,6 +204,20 @@ export class RobinhoodBarkNotifier {
     return this.isEnabled();
   }
 
+  updateAllFeatures(enabled) {
+    if (typeof enabled !== 'boolean') throw new TypeError('enabled must be a boolean');
+    const ids = BARK_FEATURES.map((feature) => feature.id);
+    if (this.store.setMonitorBarkFeatureStates) {
+      this.store.setMonitorBarkFeatureStates(ids, enabled);
+    } else {
+      if (!this.store.setMonitorBarkFeatureState) throw new Error('Bark feature settings are unavailable');
+      for (const id of ids) this.store.setMonitorBarkFeatureState(id, enabled);
+      if (!this.store.setMonitorBarkEnabled) throw new Error('Bark global settings are unavailable');
+      this.store.setMonitorBarkEnabled(enabled);
+    }
+    return { barkEnabled: this.isEnabled(), barkFeatures: this.listFeatures() };
+  }
+
   updateFeature(featureId, enabled) {
     const id = String(featureId || '').trim();
     if (!BARK_FEATURE_IDS.has(id)) throw new TypeError('Unknown Bark feature');

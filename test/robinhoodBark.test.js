@@ -106,6 +106,32 @@ test('global Bark switch pauses alerts but never blocks test delivery', async ()
   store.close();
 });
 
+test('batch Bark switch updates every feature while keeping tests independent', async () => {
+  const store = createRobinhoodStore(':memory:');
+  const requests = [];
+  const notifier = new RobinhoodBarkNotifier({
+    store,
+    fetchImpl: async (url) => {
+      requests.push(new URL(url));
+      return new Response(JSON.stringify({ code: 200 }), { status: 200 });
+    }
+  });
+  const target = notifier.createTarget({ endpoint: 'device_key_123456' });
+  notifier.updateFeature('wallet_buy', false);
+
+  const disabled = notifier.updateAllFeatures(false);
+  assert.equal(disabled.barkEnabled, false);
+  assert.equal(disabled.barkFeatures.every((feature) => feature.enabled === false), true);
+  assert.equal((await notifier.notifyTelegramMessage({})).attempted, 0);
+  await notifier.testTarget(target.id);
+  assert.equal(requests.length, 1);
+
+  const enabled = notifier.updateAllFeatures(true);
+  assert.equal(enabled.barkEnabled, true);
+  assert.equal(enabled.barkFeatures.every((feature) => feature.enabled === true), true);
+  store.close();
+});
+
 test('sends Bark tests and threshold alerts with the selected sound and critical volume', async () => {
   const store = createRobinhoodStore(':memory:');
   const requests = [];

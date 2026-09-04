@@ -648,16 +648,33 @@ async function handleApi(req, res, url, service, monitor, addressCodec = DEFAULT
       if (typeof body.enabled !== 'boolean') {
         throw new HttpError(400, 'enabled must be a boolean', 'INVALID_BARK_GLOBAL');
       }
-      let barkEnabled;
+      let result;
       try {
-        barkEnabled = activeMonitor.updateBarkEnabled(body.enabled);
+        result = activeMonitor.updateBarkFeaturesEnabled(body.enabled);
       } catch (error) {
         throw new HttpError(400, error instanceof Error ? error.message : String(error), 'INVALID_BARK_GLOBAL');
       }
-      sendJson(res, 200, { ok: true, barkEnabled });
+      sendJson(res, 200, { ok: true, ...result });
       return true;
     }
     methodNotAllowed(['GET', 'PATCH']);
+  }
+
+  if (url.pathname === '/api/robinhood/monitor/bark/features/all') {
+    const activeMonitor = requireMonitor(monitor);
+    if (req.method !== 'PATCH') methodNotAllowed(['PATCH']);
+    const body = await readJson(req);
+    if (typeof body.enabled !== 'boolean') {
+      throw new HttpError(400, 'enabled must be a boolean', 'INVALID_BARK_FEATURES');
+    }
+    let result;
+    try {
+      result = activeMonitor.updateBarkFeaturesEnabled(body.enabled);
+    } catch (error) {
+      throw new HttpError(400, error instanceof Error ? error.message : String(error), 'INVALID_BARK_FEATURES');
+    }
+    sendJson(res, 200, { ok: true, ...result });
+    return true;
   }
 
   const barkTargetMatch = url.pathname.match(/^\/api\/robinhood\/monitor\/bark\/(\d+)(?:\/(test))?$/);

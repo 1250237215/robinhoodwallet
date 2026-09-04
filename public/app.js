@@ -1816,14 +1816,16 @@ function renderMonitorBarkFeatures() {
 
 function renderMonitorBarkGlobalActions() {
   const busy = state.monitorBarkFeatureBusy.has('__global__');
-  const enabled = state.monitorBarkEnabled;
+  const features = state.monitorBarkFeatures;
+  const allEnabled = features.length > 0 && features.every((feature) => feature.enabled);
+  const allDisabled = features.length > 0 && features.every((feature) => !feature.enabled);
   if (elements.monitorBarkEnableAll) {
-    elements.monitorBarkEnableAll.disabled = busy || enabled;
-    elements.monitorBarkEnableAll.classList.toggle('is-active', enabled);
+    elements.monitorBarkEnableAll.disabled = busy || (allEnabled && state.monitorBarkEnabled);
+    elements.monitorBarkEnableAll.classList.toggle('is-active', allEnabled && state.monitorBarkEnabled);
   }
   if (elements.monitorBarkDisableAll) {
-    elements.monitorBarkDisableAll.disabled = busy || !enabled;
-    elements.monitorBarkDisableAll.classList.toggle('is-active', !enabled);
+    elements.monitorBarkDisableAll.disabled = busy || (allDisabled && !state.monitorBarkEnabled);
+    elements.monitorBarkDisableAll.classList.toggle('is-active', allDisabled && !state.monitorBarkEnabled);
   }
 }
 
@@ -4008,14 +4010,19 @@ async function toggleBarkFeature(input) {
 
 async function toggleAllBark(enabled) {
   const context = captureChainRequestContext();
-  if (state.monitorBarkEnabled === enabled || state.monitorBarkFeatureBusy.has('__global__')) return;
+  const allInRequestedState = state.monitorBarkFeatures.length > 0
+    && state.monitorBarkFeatures.every((feature) => feature.enabled === enabled)
+    && state.monitorBarkEnabled === enabled;
+  if (allInRequestedState || state.monitorBarkFeatureBusy.has('__global__')) return;
   const previous = state.monitorBarkEnabled;
+  const previousFeatures = state.monitorBarkFeatures.map((feature) => ({ ...feature }));
   state.monitorBarkEnabled = enabled;
+  state.monitorBarkFeatures = state.monitorBarkFeatures.map((feature) => ({ ...feature, enabled }));
   state.monitorBarkFeatureBusy.add('__global__');
   renderMonitorBarkFeatures();
   renderMonitorBarkGlobalActions();
   try {
-    const payload = await fetchChainJson(context, '/monitor/bark/global', {
+    const payload = await fetchChainJson(context, '/monitor/bark/features/all', {
       method: 'PATCH',
       body: JSON.stringify({ enabled })
     });
@@ -4025,6 +4032,7 @@ async function toggleAllBark(enabled) {
   } catch (error) {
     if (!chainRequestIsCurrent(context)) return;
     state.monitorBarkEnabled = previous;
+    state.monitorBarkFeatures = previousFeatures;
     showToast(`Bark 总开关修改失败：${error.message}`, 'error');
   } finally {
     if (chainRequestIsCurrent(context)) {

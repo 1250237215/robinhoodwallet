@@ -1812,6 +1812,18 @@ export function createRobinhoodStore(filename, {
       });
       return enabled === true;
     },
+    setMonitorBarkFeatureStates(featureIds, enabled) {
+      if (!Array.isArray(featureIds) || typeof enabled !== 'boolean') {
+        throw new TypeError('featureIds and enabled are required');
+      }
+      const ids = [...new Set(featureIds.map((id) => String(id || '').trim()).filter(Boolean))];
+      runSharedBarkWrite(() => {
+        const statement = db.prepare(`INSERT OR REPLACE INTO ${barkMetadataTable}(key, value) VALUES (?, ?)`);
+        for (const id of ids) statement.run(`${BARK_FEATURE_METADATA_PREFIX}${id}`, enabled ? '1' : '0');
+        statement.run(SHARED_BARK_ENABLED_KEY, enabled ? '1' : '0');
+      });
+      return enabled;
+    },
     getMonitorBarkTarget(id) {
       return monitorBarkTargetFromRow(
         db.prepare(`SELECT * FROM ${barkTargetTable} WHERE id = ?`).get(Number(id))

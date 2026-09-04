@@ -603,6 +603,11 @@ test('standalone monitor routes expose snapshots, incremental events, and valida
       feature.enabled = enabled;
       return feature;
     },
+    updateBarkFeaturesEnabled(enabled) {
+      if (typeof enabled !== 'boolean') throw new TypeError('enabled must be a boolean');
+      for (const feature of barkFeatures) feature.enabled = enabled;
+      return { barkEnabled: enabled, barkFeatures };
+    },
     createBarkTarget(payload) {
       const target = { id: 1, label: payload.label || 'Bark', endpointMasked: 'https://api.day.app/abcd***wxyz', enabled: true };
       barkTargets.push(target);
@@ -700,6 +705,24 @@ test('standalone monitor routes expose snapshots, incremental events, and valida
     assert.equal((await pausedFeature.json()).feature.enabled, false);
     const featureList = await fetch(`${baseUrl}/api/robinhood/monitor/bark/features`);
     assert.equal((await featureList.json()).barkFeatures[0].enabled, false);
+    const allEnabled = await fetch(`${baseUrl}/api/robinhood/monitor/bark/features/all`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: true })
+    });
+    assert.equal(allEnabled.status, 200);
+    const allEnabledBody = await allEnabled.json();
+    assert.equal(allEnabledBody.barkEnabled, true);
+    assert.equal(allEnabledBody.barkFeatures.every((feature) => feature.enabled), true);
+    const allDisabled = await fetch(`${baseUrl}/api/robinhood/monitor/bark/global`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: false })
+    });
+    assert.equal(allDisabled.status, 200);
+    const allDisabledBody = await allDisabled.json();
+    assert.equal(allDisabledBody.barkEnabled, false);
+    assert.equal(allDisabledBody.barkFeatures.every((feature) => !feature.enabled), true);
     const paused = await fetch(`${baseUrl}/api/robinhood/monitor/bark/1`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },

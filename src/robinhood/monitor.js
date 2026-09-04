@@ -955,6 +955,11 @@ export class RobinhoodWalletMonitor {
     return this.barkNotifier.updateEnabled(enabled);
   }
 
+  updateBarkFeaturesEnabled(enabled) {
+    if (!this.barkNotifier?.updateAllFeatures) throw new Error('Bark feature settings are unavailable');
+    return this.barkNotifier.updateAllFeatures(enabled);
+  }
+
   updateBarkFeature(featureId, enabled) {
     if (!this.barkNotifier?.updateFeature) throw new Error('Bark feature settings are unavailable');
     return this.barkNotifier.updateFeature(featureId, enabled);

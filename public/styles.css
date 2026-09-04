@@ -2760,6 +2760,10 @@ select:hover {
   background: var(--surface);
 }
 
+.monitor-bark-feature:not(.is-paused) {
+  background: #edf6ef;
+}
+
 .monitor-bark-feature-copy {
   min-width: 0;
   display: grid;
