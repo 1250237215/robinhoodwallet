@@ -254,6 +254,32 @@ test('background translation leaves a concurrency slot immediately available for
   assert.equal(await second, '中文：history reserved two');
 });
 
+test('a provider that ignores abort still cannot occupy the translation worker forever', async (t) => {
+  const requested = [];
+  const translator = createDeepSeekSocialTranslator({
+    apiKey: 'translation-test-key',
+    concurrency: 1,
+    timeoutMs: 500,
+    maxAttempts: 1,
+    fetchImpl: async (url, options) => {
+      const source = JSON.parse(options.body).messages[1].content;
+      requested.push(source);
+      if (source === 'stuck history') return new Promise(() => {});
+      return deepSeekResponse(`中文：${source}`);
+    }
+  });
+  t.after(() => translator.close());
+
+  const stuck = translator.translate('stuck history', { priority: 'background' });
+  await eventually(() => assert.deepEqual(requested, ['stuck history']));
+  const live = translator.translate('live after stuck request');
+  await eventually(() => assert.deepEqual(requested, ['stuck history', 'live after stuck request']), 3_000);
+  assert.equal(await live, '中文：live after stuck request');
+  assert.equal(await stuck, '');
+  assert.equal(translator.status.active, 0);
+  assert.equal(translator.status.queued, 0);
+});
+
 test('single-slot translation eventually runs background work during a sustained realtime burst', async (t) => {
   const requested = [];
   const releases = [];

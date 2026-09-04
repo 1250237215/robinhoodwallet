@@ -185,22 +185,29 @@ export function createDeepSeekSocialTranslator({
     }
   }
 
-  function waitBeforeRetry(delayMs) {
-    if (delayMs <= 0 || controller.signal.aborted) return Promise.resolve();
+  function waitBeforeRetry(delayMs, signal = null) {
+    if (delayMs <= 0 || controller.signal.aborted || signal?.aborted) return Promise.resolve();
     return new Promise((resolve) => {
-      const timer = setTimeout(() => {
+      let timer;
+      const finish = () => {
+        clearTimeout(timer);
         retryTimers.delete(timer);
+        signal?.removeEventListener('abort', finish);
         resolve();
-      }, delayMs);
+      };
+      timer = setTimeout(finish, delayMs);
       timer.unref?.();
-      retryTimers.set(timer, resolve);
+      retryTimers.set(timer, finish);
+      signal?.addEventListener('abort', finish, { once: true });
     });
   }
 
-  async function requestOnce(source) {
+  async function requestOnce(source, signal = null) {
     const requestController = new AbortController();
     const onClose = () => requestController.abort(controller.signal.reason || abortError());
+    const onJobAbort = () => requestController.abort(signal?.reason || abortError());
     controller.signal.addEventListener('abort', onClose, { once: true });
+    signal?.addEventListener('abort', onJobAbort, { once: true });
     const timer = setTimeout(() => requestController.abort(abortError(
       `DeepSeek social translation timed out after ${requestTimeoutMs}ms`
     )), requestTimeoutMs);
@@ -242,27 +249,28 @@ export function createDeepSeekSocialTranslator({
       const payload = await response.json().catch(() => null);
       return { translated: validTranslation(source, responseContent(payload)), retryable: true };
     } catch (error) {
-      if (closed || controller.signal.aborted) return { translated: '', retryable: false };
+      if (closed || controller.signal.aborted || signal?.aborted) return { translated: '', retryable: false };
       return { translated: '', retryable: error?.name === 'AbortError' || error instanceof TypeError };
     } finally {
       clearTimeout(timer);
       controller.signal.removeEventListener('abort', onClose);
+      signal?.removeEventListener('abort', onJobAbort);
     }
   }
 
-  async function runTranslation(source) {
+  async function runTranslation(source, signal = null) {
     const translatedChunks = [];
     for (const chunk of translationChunks(source)) {
       let translated = '';
       for (let attempt = 1; attempt <= attemptLimit && !closed; attempt += 1) {
-        const result = await requestOnce(chunk);
+        const result = await requestOnce(chunk, signal);
         if (result.translated) {
           translated = result.translated;
           break;
         }
         if (!result.retryable || attempt >= attemptLimit) break;
         stats.retries += 1;
-        await waitBeforeRetry(retryDelay * attempt);
+        await waitBeforeRetry(retryDelay * attempt, signal);
       }
       if (!translated) return '';
       translatedChunks.push(translated);
@@ -343,12 +351,32 @@ export function createDeepSeekSocialTranslator({
       const job = nextQueuedJob();
       if (!job) break;
       job.state = 'active';
+      job.controller = new AbortController();
       active += 1;
       if (job.priority === 'background') activeBackground += 1;
       else activeRealtime += 1;
-      void runTranslation(job.source)
+      const chunkCount = translationChunks(job.source).length;
+      const deadlineMs = Math.max(
+        1_000,
+        requestTimeoutMs * attemptLimit * chunkCount
+          + retryDelay * attemptLimit * chunkCount
+          + 1_000
+      );
+      let deadlineTimer;
+      const deadline = new Promise((resolve) => {
+        deadlineTimer = setTimeout(() => {
+          job.controller.abort(abortError(`DeepSeek translation job timed out after ${deadlineMs}ms`));
+          resolve('');
+        }, deadlineMs);
+        deadlineTimer.unref?.();
+      });
+      const translation = runTranslation(job.source, job.controller.signal);
+      // A provider that ignores AbortSignal must still release this worker.
+      translation.catch(() => {});
+      void Promise.race([translation, deadline])
         .then((translated) => settle(job, translated))
         .finally(() => {
+          clearTimeout(deadlineTimer);
           active -= 1;
           if (job.priority === 'background') activeBackground -= 1;
           else activeRealtime -= 1;
@@ -473,7 +501,10 @@ export function createDeepSeekSocialTranslator({
         resolve();
       }
       retryTimers.clear();
-      for (const job of jobs.values()) rejectJob(job);
+      for (const job of jobs.values()) {
+        job.controller?.abort(abortError());
+        rejectJob(job);
+      }
       jobs.clear();
       realtimeQueue.length = 0;
       backgroundQueue.length = 0;
