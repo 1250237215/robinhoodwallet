@@ -50,7 +50,12 @@ function normalizeMessage(person, message) {
   const rawContent = person.clean(message.content).trim();
   const media = extractImageResources(rawContent);
   const content = cleanMediaMarkers(rawContent);
-  const dynamicBotName = person.id === 'group_owners_bots' ? extractBotName(rawContent) : '';
+  const enrichedBotName = person.id === 'group_owners_bots'
+    ? message.sender?.name || message.sender?.sender_name || message.sender?.sender_i18n_names?.zh_cn
+    : '';
+  const dynamicBotName = person.id === 'group_owners_bots'
+    ? cleanBotName(enrichedBotName) || extractBotName(rawContent)
+    : '';
   const personName = dynamicBotName || person.name;
   return {
     id: message.message_id || `${person.id}:${message.message_position || message.create_time}:${content}`,

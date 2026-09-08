@@ -2,7 +2,7 @@ const CRAZYSEN_GROUP_ID = 'oc_884bb58e6b0b07d56c610364cab40a03';
 const SEN_CHANNEL_ID = 'oc_a1ff43aca201bc05ee024e0238345d02';
 const LASERCAT_GROUP_ID = 'oc_f624316b25a32ab66af618989b2c2aec';
 const JINWA_GROUP_ID = 'oc_215ff685ff278ad855288a3d640d7b32';
-const GROUP_OWNERS_ID = 'oc_e14c9de830ac46862a0dd1ca764819c3';
+export const GROUP_OWNERS_ID = 'oc_e14c9de830ac46862a0dd1ca764819c3';
 
 function prefixMatcher(prefix) {
   return {
