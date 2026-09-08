@@ -95,9 +95,13 @@ function renderFeed() {
     const owner = personById.get(message.personId) || {};
     const isImage = message.type === 'image' || /^\[Image:/.test(message.content);
     const content = isImage ? '图片消息' : message.content || '空消息';
+    const initials = message.personShortName || owner.shortName || '?';
+    const avatarUrl = /^https:\/\/(?:[^/]+\.)?(?:feishucdn|larksuitecdn)\.com\//i.test(String(message.personAvatarUrl || '').trim())
+      ? String(message.personAvatarUrl).trim()
+      : '';
     return `
       <article class="message" data-accent="${escapeHtml(owner.accent || '')}">
-        <span class="message-avatar" aria-hidden="true">${escapeHtml(message.personShortName || owner.shortName || '?')}</span>
+        <span class="message-avatar" aria-hidden="true" data-avatar-fallback="${escapeHtml(initials)}">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" loading="lazy" data-message-avatar />` : escapeHtml(initials)}</span>
         <div class="message-main">
           <div class="message-meta">
             <strong>${escapeHtml(message.personName)}</strong>
@@ -110,6 +114,13 @@ function renderFeed() {
       </article>
     `;
   }).join('');
+  for (const image of els.feed.querySelectorAll('[data-message-avatar]')) {
+    image.addEventListener('error', () => {
+      const avatar = image.closest('.message-avatar');
+      image.remove();
+      if (avatar) avatar.textContent = avatar.dataset.avatarFallback || '?';
+    }, { once: true });
+  }
 }
 
 function renderStatus() {

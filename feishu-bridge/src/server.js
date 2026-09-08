@@ -24,7 +24,7 @@ const MIME_TYPES = new Map([
 function headers(extra = {}) {
   return {
     'cache-control': 'no-store',
-    'content-security-policy': "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+    'content-security-policy': "default-src 'self'; connect-src 'self'; img-src 'self' data: https://*.feishucdn.com https://*.larksuitecdn.com https://*.feishu.cn https://*.larksuite.com; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'",
     'referrer-policy': 'no-referrer',
     'x-content-type-options': 'nosniff',
     'x-frame-options': 'DENY',

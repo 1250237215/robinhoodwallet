@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { PEOPLE } from '../src/config.js';
 import { extractBotName, extractImageResources, extractMessages, mergeMessages, PeopleMonitor } from '../src/monitor.js';
-import { createLarkClient, normalizeRawMessage } from '../src/lark-client.js';
+import { createLarkClient, normalizeRawMessage, normalizeSenderAvatarUrl } from '../src/lark-client.js';
 import { GROUP_OWNERS_ID } from '../src/config.js';
 
 function raw(overrides = {}) {
@@ -123,10 +123,16 @@ test('labels first-tier bot messages from their embedded bot headers', () => {
   const [message] = extractMessages([person], [raw({
     message_id: 'named-bot',
     content: '【JAMES】：4stock',
-    sender: { sender_type: 'app', id: 'cli_forwarder', name: '猴哥James' }
+    sender: {
+      sender_type: 'app',
+      id: 'cli_forwarder',
+      name: '猴哥James',
+      avatar_url: 'https://s16-imfile-sg.feishucdn.com/james.jpg'
+    }
   })]).get(person.id);
   assert.equal(message.personName, '猴哥James');
   assert.equal(message.personShortName, '猴哥');
+  assert.equal(message.personAvatarUrl, 'https://s16-imfile-sg.feishucdn.com/james.jpg');
 });
 
 test('mergeMessages deduplicates, sorts newest first, and applies the limit', () => {
@@ -184,6 +190,15 @@ test('normalizes standalone Feishu image messages into downloadable media marker
   assert.deepEqual(normalized.media, [{ type: 'image', resourceKey: 'img_v3_0214m_example' }]);
 });
 
+test('keeps only original Feishu CDN avatar URLs', () => {
+  assert.match(
+    normalizeSenderAvatarUrl('https://s16-imfile-sg.feishucdn.com/static-resource/avatar.jpg'),
+    /^https:\/\//
+  );
+  assert.equal(normalizeSenderAvatarUrl('https://example.com/avatar.jpg'), '');
+  assert.equal(normalizeSenderAvatarUrl('http://s16-imfile-sg.feishucdn.com/avatar.jpg'), '');
+});
+
 test('enriches first-tier bot messages with sender names and caches old message details', async () => {
   const calls = [];
   const rawItems = [
@@ -216,8 +231,8 @@ test('enriches first-tier bot messages with sender names and caches old message 
             ok: true,
             data: {
               items: [
-                { message_id: 'om_bot_one', sender: { name: 'LaserCat', sender_type: 'app' } },
-                { message_id: 'om_bot_two', sender: { name: '猴哥James', sender_type: 'app' } }
+                { message_id: 'om_bot_one', sender: { name: 'LaserCat', sender_type: 'app', avatar_url: 'https://s16-imfile-sg.feishucdn.com/laser.jpg' } },
+                { message_id: 'om_bot_two', sender: { name: '猴哥James', sender_type: 'app', avatar_url: 'https://s16-imfile-sg.feishucdn.com/james.jpg' } }
               ]
             }
           })
@@ -229,6 +244,10 @@ test('enriches first-tier bot messages with sender names and caches old message 
 
   const first = await client.fetchChatPage(GROUP_OWNERS_ID, { pageSize: 2 });
   assert.deepEqual(first.messages.map((message) => message.sender.name), ['LaserCat', '猴哥James']);
+  assert.deepEqual(first.messages.map((message) => message.sender.avatar_url), [
+    'https://s16-imfile-sg.feishucdn.com/laser.jpg',
+    'https://s16-imfile-sg.feishucdn.com/james.jpg'
+  ]);
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[1].params.message_ids, ['om_bot_one', 'om_bot_two']);
 

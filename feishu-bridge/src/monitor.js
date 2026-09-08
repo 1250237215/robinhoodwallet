@@ -57,11 +57,18 @@ function normalizeMessage(person, message) {
     ? cleanBotName(enrichedBotName) || extractBotName(rawContent)
     : '';
   const personName = dynamicBotName || person.name;
+  const personAvatarUrl = String(
+    message.sender?.avatar_url
+      || message.sender?.avatarUrl
+      || message.sender?.sender_avatar_url
+      || ''
+  ).trim();
   return {
     id: message.message_id || `${person.id}:${message.message_position || message.create_time}:${content}`,
     personId: person.id,
     personName,
     personShortName: dynamicBotName ? [...dynamicBotName].slice(0, 2).join('') : person.shortName,
+    ...(personAvatarUrl ? { personAvatarUrl } : {}),
     source: person.source,
     content,
     type: message.msg_type || 'text',

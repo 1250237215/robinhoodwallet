@@ -24,18 +24,53 @@ function contentText(value) {
   return contentText(value.text || value.content || value.content_v2 || '');
 }
 
+export function normalizeSenderAvatarUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return '';
+  }
+  if (url.protocol !== 'https:') return '';
+  const hostname = url.hostname.toLowerCase();
+  const allowed = hostname === 'feishu.cn'
+    || hostname.endsWith('.feishu.cn')
+    || hostname === 'larksuite.com'
+    || hostname.endsWith('.larksuite.com')
+    || hostname.endsWith('.feishucdn.com')
+    || hostname.endsWith('.larksuitecdn.com');
+  return allowed ? url.href : '';
+}
+
+function senderAvatarUrl(sender) {
+  const candidates = [
+    sender?.avatar_url,
+    sender?.avatarUrl,
+    sender?.sender_avatar_url,
+    sender?.senderAvatarUrl,
+    sender?.avatar?.avatar_origin,
+    sender?.avatar?.origin,
+    sender?.avatar?.url
+  ];
+  return candidates.map(normalizeSenderAvatarUrl).find(Boolean) || '';
+}
+
 export function normalizeRawMessage(message) {
   let body = message.body?.content ?? message.content ?? '';
   if (typeof body === 'string') {
     try { body = JSON.parse(body); } catch { /* keep plain text */ }
   }
   const content = contentText(body);
+  const avatarUrl = senderAvatarUrl(message.sender);
   const timestamp = Number(message.create_time);
   const createdAt = Number.isFinite(timestamp) && timestamp > 0
     ? new Date(timestamp).toISOString()
     : String(message.create_time || '');
   return {
     ...message,
+    ...(avatarUrl ? { sender: { ...message.sender, avatar_url: avatarUrl } } : {}),
     content,
     create_time: createdAt,
     message_app_link: message.message_app_link || (message.chat_id && message.message_position

@@ -92,6 +92,7 @@ button { color: inherit; }
 .message { --accent: #6d737b; display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 13px; padding: 16px 17px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); box-shadow: 0 2px 8px rgba(23, 25, 28, .025); }
 .message:hover { border-color: var(--line-strong); box-shadow: var(--shadow); }
 .message-avatar { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: color-mix(in srgb, var(--accent) 14%, white); color: var(--accent); font-size: 10px; font-weight: 800; }
+.message-avatar img { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
 .message-main { min-width: 0; }
 .message-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-height: 18px; }
 .message-meta strong { font-size: 12px; }

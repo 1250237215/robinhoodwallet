@@ -179,7 +179,22 @@ function messageRow(message) {
   const avatar = document.createElement('span');
   avatar.className = 'telegram-avatar';
   avatar.dataset.accent = message.person?.accent || '';
-  avatar.textContent = message.personShortName || message.person?.shortName || String(message.personName || '?').slice(0, 2);
+  const initials = message.personShortName || message.person?.shortName || String(message.personName || '?').slice(0, 2);
+  const avatarUrl = String(message.personAvatarUrl || '').trim();
+  if (/^https:\/\/(?:[^/]+\.)?(?:feishucdn|larksuitecdn)\.com\//i.test(avatarUrl)) {
+    const image = document.createElement('img');
+    image.src = avatarUrl;
+    image.alt = `${message.personName || '飞书'}头像`;
+    image.loading = 'lazy';
+    image.decoding = 'async';
+    image.addEventListener('error', () => {
+      image.remove();
+      avatar.textContent = initials;
+    }, { once: true });
+    avatar.appendChild(image);
+  } else {
+    avatar.textContent = initials;
+  }
   avatarColumn.appendChild(avatar);
 
   const bubble = document.createElement('article');
