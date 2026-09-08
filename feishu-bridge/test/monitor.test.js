@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { PEOPLE } from '../src/config.js';
-import { extractImageResources, extractMessages, mergeMessages, PeopleMonitor } from '../src/monitor.js';
+import { extractBotName, extractImageResources, extractMessages, mergeMessages, PeopleMonitor } from '../src/monitor.js';
 import { normalizeRawMessage } from '../src/lark-client.js';
 
 function raw(overrides = {}) {
@@ -110,6 +110,22 @@ test('the first-tier owner radar captures every bot message without mixing ordin
     '【JAMES】：4stock',
     '引用 机器猫：$STRATTON'
   ]);
+});
+
+test('labels first-tier bot messages from their embedded bot headers', () => {
+  assert.equal(extractBotName('【JAMES】：4stock'), 'JAMES');
+  assert.equal(extractBotName('引用 #356 机器猫：$STRATTON'), '机器猫');
+  assert.equal(extractBotName('这句话\n\n引用 Mabon.：依稀记得'), 'Mabon.');
+  assert.equal(extractBotName('没有来源名称的机器人短消息'), '');
+
+  const person = PEOPLE.find((entry) => entry.id === 'group_owners_bots');
+  const [message] = extractMessages([person], [raw({
+    message_id: 'named-bot',
+    content: '【JAMES】：4stock',
+    sender: { sender_type: 'app', id: 'cli_forwarder' }
+  })]).get(person.id);
+  assert.equal(message.personName, 'JAMES');
+  assert.equal(message.personShortName, 'JA');
 });
 
 test('mergeMessages deduplicates, sorts newest first, and applies the limit', () => {

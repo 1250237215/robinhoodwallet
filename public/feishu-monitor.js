@@ -179,7 +179,7 @@ function messageRow(message) {
   const avatar = document.createElement('span');
   avatar.className = 'telegram-avatar';
   avatar.dataset.accent = message.person?.accent || '';
-  avatar.textContent = message.person?.shortName || String(message.personName || '?').slice(0, 2);
+  avatar.textContent = message.personShortName || message.person?.shortName || String(message.personName || '?').slice(0, 2);
   avatarColumn.appendChild(avatar);
 
   const bubble = document.createElement('article');

@@ -10,6 +10,26 @@ import {
 
 const IMAGE_RESOURCE_PATTERN = /(?:!\[Image\]\(|\[Image:\s*)(img_[A-Za-z0-9_-]+)\)?\]?/gi;
 
+function cleanBotName(value) {
+  return String(value || '')
+    .replace(/^#\d+\s*/u, '')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .replace(/[：:]$/u, '')
+    .slice(0, 80);
+}
+
+export function extractBotName(content) {
+  const text = String(content || '').replace(/^\s+/u, '');
+  const bracket = /^【([^】\n]{1,80})】(?:[：:]|\s|$)/u.exec(text);
+  if (bracket) return cleanBotName(bracket[1]);
+  const quoted = /引用\s*(?:#\d+\s*)?([^：:\n]{1,80}?)(?:\s+的消息)?\s*[：:]/gu;
+  let match;
+  let name = '';
+  while ((match = quoted.exec(text))) name = cleanBotName(match[1]);
+  return name;
+}
+
 export function extractImageResources(content) {
   const resources = [];
   const seen = new Set();
@@ -33,10 +53,13 @@ function normalizeMessage(person, message) {
   const rawContent = person.clean(message.content).trim();
   const media = extractImageResources(rawContent);
   const content = cleanMediaMarkers(rawContent);
+  const dynamicBotName = person.id === 'group_owners_bots' ? extractBotName(rawContent) : '';
+  const personName = dynamicBotName || person.name;
   return {
     id: message.message_id || `${person.id}:${message.message_position || message.create_time}:${content}`,
     personId: person.id,
-    personName: person.name,
+    personName,
+    personShortName: dynamicBotName ? [...dynamicBotName].slice(0, 2).join('') : person.shortName,
     source: person.source,
     content,
     type: message.msg_type || 'text',
