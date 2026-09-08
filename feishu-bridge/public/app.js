@@ -97,7 +97,7 @@ function renderFeed() {
     const content = isImage ? '图片消息' : message.content || '空消息';
     return `
       <article class="message" data-accent="${escapeHtml(owner.accent || '')}">
-        <span class="message-avatar" aria-hidden="true">${escapeHtml(owner.shortName || '?')}</span>
+        <span class="message-avatar" aria-hidden="true">${escapeHtml(message.personShortName || owner.shortName || '?')}</span>
         <div class="message-main">
           <div class="message-meta">
             <strong>${escapeHtml(message.personName)}</strong>
