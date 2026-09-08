@@ -23,11 +23,8 @@ export function extractBotName(content) {
   const text = String(content || '').replace(/^\s+/u, '');
   const bracket = /^【([^】\n]{1,80})】(?:[：:]|\s|$)/u.exec(text);
   if (bracket) return cleanBotName(bracket[1]);
-  const quoted = /引用\s*(?:#\d+\s*)?([^：:\n]{1,80}?)(?:\s+的消息)?\s*[：:]/gu;
-  let match;
-  let name = '';
-  while ((match = quoted.exec(text))) name = cleanBotName(match[1]);
-  return name;
+  const quoted = /^引用\s*(?:#\d+\s*)?([^：:\n]{1,80}?)(?:\s+的消息)?\s*[：:]/u.exec(text);
+  return quoted ? cleanBotName(quoted[1]) : '';
 }
 
 export function extractImageResources(content) {
