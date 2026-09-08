@@ -169,7 +169,13 @@ export class FeishuCaWatch {
     const seen = new Set(this.seenMessageIds);
     const messages = (snapshot?.people || []).flatMap((person) => person.messages || []);
     const firstObservation = seen.size === 0;
-    const fresh = messages.filter((message) => message?.id && !seen.has(String(message.id)));
+    const freshIds = new Set();
+    const fresh = messages.filter((message) => {
+      const id = String(message?.id || '');
+      if (!id || seen.has(id) || freshIds.has(id)) return false;
+      freshIds.add(id);
+      return true;
+    });
     for (const message of messages) if (message?.id) seen.add(String(message.id));
     this.seenMessageIds = [...seen].slice(-MAX_TRACKED_MESSAGES);
     this.persist();

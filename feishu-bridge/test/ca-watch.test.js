@@ -57,3 +57,44 @@ test('selected people trigger one CA Bark only for messages after bootstrap', as
   assert.equal(payload.debotUrls[0], 'https://debot.ai/token/solana/289942_63zfjPfH4uaX3TQZoD35WqUrqiuCQQWndMTxQHsJpump');
   fs.rmSync(directory, { recursive: true, force: true });
 });
+
+test('deduplicates a message shared by an individual radar and the all-bots radar', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-watch-dedupe-'));
+  const requests = [];
+  const watch = new FeishuCaWatch({
+    people: [
+      { id: 'cryptod', name: 'CryptoD', shortName: 'CD', source: '一级群' },
+      { id: 'group_owners_bots', name: '一级群全部机器人', shortName: '机', source: '一级群' }
+    ],
+    dataFile: path.join(directory, 'watch.json'),
+    internalUrl: 'http://127.0.0.1/internal/feishu-bark',
+    internalToken: 'x'.repeat(48),
+    rpcProfiles: [],
+    async fetchImpl(url, options) {
+      requests.push({ url, options });
+      return { ok: true, async json() { return { delivery: { sent: 1 } }; } };
+    }
+  });
+  watch.update({ enabled: true, person_ids: ['cryptod', 'group_owners_bots'] });
+  const oldMessage = {
+    id: 'old-message',
+    personId: 'cryptod',
+    personName: 'CryptoD',
+    source: '一级群',
+    content: '没有 CA',
+    url: ''
+  };
+  watch.observe({ people: [{ messages: [{ ...oldMessage }] }] });
+  const message = {
+    id: 'shared-message',
+    personId: 'cryptod',
+    personName: 'CryptoD',
+    source: '一级群',
+    content: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    url: ''
+  };
+  watch.observe({ people: [{ messages: [{ ...message }] }, { messages: [{ ...message, personId: 'group_owners_bots', personName: '一级群全部机器人' }] }] });
+  await watch.queue;
+  assert.equal(requests.length, 1);
+  fs.rmSync(directory, { recursive: true, force: true });
+});

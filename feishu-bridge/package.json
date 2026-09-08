@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Local near-real-time dashboard for six Feishu speakers.",
+  "description": "VPS near-real-time dashboard for Feishu speakers and bot streams.",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",

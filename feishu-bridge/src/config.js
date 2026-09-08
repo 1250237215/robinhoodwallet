@@ -48,6 +48,15 @@ const cryptoD = quotedSpeakerMatcher('CryptoD');
 const wangXiaoer = quotedSpeakerMatcher('王小二');
 const zeroXSun = quotedSpeakerMatcher('孙嘉良0xSun');
 const zeroXAce = prefixMatcher('【0xace（尊师陈皮皮）');
+const groupOwnersBots = {
+  matches(message) {
+    const sender = message?.sender || {};
+    return sender.sender_type === 'app';
+  },
+  clean(content) {
+    return String(content || '');
+  }
+};
 const chenpepe = {
   matches(message) {
     const content = String(message.content || '').trim();
@@ -178,6 +187,16 @@ export const PEOPLE = Object.freeze([
     accent: 'green',
     matches: zeroXSun.matches,
     clean: zeroXSun.clean
+  },
+  {
+    id: 'group_owners_bots',
+    name: '一级群全部机器人',
+    shortName: '机',
+    source: '各大群主发言（一级）',
+    chatId: GROUP_OWNERS_ID,
+    accent: 'violet',
+    matches: groupOwnersBots.matches,
+    clean: groupOwnersBots.clean
   },
   {
     id: '0xace',

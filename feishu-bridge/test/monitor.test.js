@@ -84,6 +84,34 @@ test('extracts each monitored speaker with the correct source rule', () => {
   assert.deepEqual(ownerMessages.get('0xsun').map((message) => message.content), ['我这iPhone充电的时候太烫了']);
 });
 
+test('the first-tier owner radar captures every bot message without mixing ordinary members', () => {
+  const byId = new Map(PEOPLE.map((person) => [person.id, person]));
+  const botMessages = extractMessages(
+    [byId.get('group_owners_bots')],
+    [
+      raw({
+        message_id: 'bot-1',
+        content: '【JAMES】：4stock',
+        sender: { sender_type: 'app', id: 'cli_c08abc1da138d00f' }
+      }),
+      raw({
+        message_id: 'bot-2',
+        content: '引用 机器猫：$STRATTON',
+        sender: { sender_type: 'app', id: 'cli_forwarder' }
+      }),
+      raw({
+        message_id: 'member-1',
+        content: '普通成员发言，不应进入机器人总览',
+        sender: { sender_type: 'user', id: 'ou_member' }
+      })
+    ]
+  );
+  assert.deepEqual(botMessages.get('group_owners_bots').map((message) => message.content), [
+    '【JAMES】：4stock',
+    '引用 机器猫：$STRATTON'
+  ]);
+});
+
 test('mergeMessages deduplicates, sorts newest first, and applies the limit', () => {
   const messages = Array.from({ length: 12 }, (_, index) => ({
     id: `m${index}`,
